@@ -133,6 +133,32 @@ impl PersonalMemory {
         Ok(())
     }
 
+    /// Load today's conversation history as (user, assistant) pairs
+    pub async fn load_chat_history(&self) -> Result<Vec<(String, String)>> {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let memory_file = self.path.join("memory").join(format!("{}.md", today));
+
+        let content = match tokio::fs::read_to_string(&memory_file).await {
+            Ok(c) => c,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut history = Vec::new();
+        let mut current_user: Option<String> = None;
+
+        for line in content.lines() {
+            if let Some(user_msg) = line.strip_prefix("**User**: ") {
+                current_user = Some(user_msg.to_string());
+            } else if let Some(assistant_msg) = line.strip_prefix("**Assistant**: ") {
+                if let Some(user_msg) = current_user.take() {
+                    history.push((user_msg, assistant_msg.to_string()));
+                }
+            }
+        }
+
+        Ok(history)
+    }
+
     /// Add a new fact to memory
     pub fn add_fact(&mut self, content: impl Into<String>, category: impl Into<String>) {
         self.memory_md.facts.push(MemoryFact {

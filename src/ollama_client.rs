@@ -5,6 +5,8 @@
 //! - Request batching for efficiency
 //! - Latency budget enforcement with fallback
 
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
+use ollama_rs::generation::chat::request::ChatMessageRequest;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use ollama_rs::Ollama;
 use std::sync::Arc;
@@ -45,7 +47,7 @@ impl Default for OllamaConfig {
             batch_size: 4,
             batch_timeout_ms: 100,
             temperature: 0.7,
-            max_tokens: 500,
+            max_tokens: 1024,
         }
     }
 }
@@ -140,6 +142,63 @@ impl OllamaClient {
             Err(_) => {
                 eprintln!(
                     "LLM call timed out after {}ms",
+                    self.config.latency_budget_ms
+                );
+                self.fallback_result("LLM call timed out")
+            }
+        };
+
+        result
+    }
+
+    /// Chat with proper system/user message roles (uses /api/chat endpoint)
+    /// `history` contains prior (user, assistant) message pairs for conversation continuity.
+    pub async fn chat(&self, system_prompt: &str, user_message: &str, history: &[(String, String)]) -> LlmResult {
+        let start = Instant::now();
+
+        let mut messages = vec![
+            ChatMessage::new(MessageRole::System, system_prompt.to_string()),
+        ];
+
+        // Add conversation history
+        for (user_msg, assistant_msg) in history {
+            messages.push(ChatMessage::new(MessageRole::User, user_msg.clone()));
+            messages.push(ChatMessage::new(MessageRole::Assistant, assistant_msg.clone()));
+        }
+
+        // Add current user message
+        messages.push(ChatMessage::new(MessageRole::User, user_message.to_string()));
+
+        let request = ChatMessageRequest::new(self.config.model.clone(), messages);
+
+        let timeout_duration = Duration::from_millis(self.config.latency_budget_ms);
+        let ollama = self.ollama.clone();
+
+        let result = match timeout(timeout_duration, async move {
+            let ollama = ollama.lock().await;
+            ollama.send_chat_messages(request).await
+        })
+        .await
+        {
+            Ok(Ok(response)) => {
+                let latency = start.elapsed().as_millis() as u64;
+                self.record_latency(latency).await;
+
+                LlmResult {
+                    text: response.message.content,
+                    latency_ms: latency,
+                    tokens_generated: response.final_data.as_ref().map(|d| d.eval_count as usize).unwrap_or(0),
+                    cached: false,
+                    timed_out: false,
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("Ollama chat error: {}", e);
+                self.fallback_result("Error calling LLM")
+            }
+            Err(_) => {
+                eprintln!(
+                    "LLM chat call timed out after {}ms",
                     self.config.latency_budget_ms
                 );
                 self.fallback_result("LLM call timed out")

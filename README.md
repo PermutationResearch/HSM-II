@@ -354,8 +354,9 @@ let result = client.web_search("AI agents").await?;
 - [x] Multi-provider LLM with failover
 - [x] Docker deployment
 - [x] Hermes Agent integration
+- [x] Telegram bot
+- [x] Job queue/scheduler
 - [ ] Vector database integration
-- [ ] Job queue/scheduler
 - [ ] Advanced web dashboard
 
 ---

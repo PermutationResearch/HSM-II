@@ -75,6 +75,9 @@ pub mod auth;
 // Platform gateways
 pub mod gateways;
 
+// Job scheduler for cron and background tasks
+pub mod scheduler;
+
 // Codex-style TUI - Dark minimalist terminal aesthetic
 pub mod tui_codex_style;
 

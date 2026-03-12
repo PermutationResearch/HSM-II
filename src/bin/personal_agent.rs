@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 use hyper_stigmergy::personal::{
-    gateway, hsmii_home, Heartbeat, Persona, PersonalAgent, PersonalMemory,
+    gateway, hsmii_home, EnhancedPersonalAgent, EnhancedAgentConfig,
 };
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use std::sync::Arc;
@@ -174,16 +174,19 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         return Ok(());
     }
 
-    // Load agent
-    let mut agent = PersonalAgent::initialize(home).await?;
+    // Load enhanced agent with full HSM-II
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
-    println!("🚀 Starting {}...", agent.persona.name);
+    println!("🚀 Starting Enhanced HSM-II Personal Agent");
+    println!("   Agents: {}", agent.world.agents.len());
+    println!("   Coherence: {:.3}", agent.world.global_coherence());
+    println!("   Council: {}", if agent.config.enable_council { "enabled" } else { "disabled" });
+    println!("   CASS: {}", if agent.config.enable_cass { "enabled" } else { "disabled" });
+    println!("   LadybugDB: active\n");
 
-    if daemon {
-        // Daemon mode - start gateway and heartbeat
-        info!("Running in daemon mode");
-
-        // Configure gateway
+    // Setup gateway if requested
+    let mut msg_rx = None;
+    if discord || telegram {
         let mut gateway_config = gateway::Config::default();
         if discord {
             gateway_config.discord_token = std::env::var("DISCORD_TOKEN").ok();
@@ -191,15 +194,58 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         if telegram {
             gateway_config.telegram_token = std::env::var("TELEGRAM_TOKEN").ok();
         }
+        
+        // Start gateway and get message channel
+        let rx = agent.start_gateway(gateway_config).await?;
+        msg_rx = Some(rx);
+        println!("Gateway(s) started. Telegram/Discord messages will be processed.\n");
+    }
 
-        // Start gateway
-        agent.start_gateway(gateway_config).await?;
+    if daemon {
+        // Daemon mode - spawn message processing task
+        info!("Running in daemon mode");
 
-        // Start heartbeat loop
-        let heartbeat = agent.heartbeat.clone();
+        // Spawn message processing loop
+        if let Some(mut rx) = msg_rx {
+            let home_msg = home.clone();
+            tokio::spawn(async move {
+                while let Some((msg, response_tx)) = rx.recv().await {
+                    // Reload agent for each message to get latest state
+                    let mut agent = match EnhancedPersonalAgent::initialize(&home_msg).await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            error!("Failed to load agent: {}", e);
+                            let _ = response_tx.send(format!("Error: {}", e));
+                            continue;
+                        }
+                    };
+                    
+                    let response = match agent.handle_message(msg).await {
+                        Ok(resp) => resp,
+                        Err(e) => format!("Error: {}", e),
+                    };
+                    
+                    let _ = response_tx.send(response);
+                    let _ = agent.save().await;
+                }
+            });
+        }
+
+        // Start DKS evolution loop (replacing simple heartbeat)
         let home_clone = home.clone();
         tokio::spawn(async move {
-            heartbeat.run_loop(home_clone).await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Ok(mut agent) = EnhancedPersonalAgent::initialize(&home_clone).await {
+                    // Run DKS tick
+                    if agent.config.enable_dks {
+                        let _ = agent.services.dks.tick();
+                    }
+                    // Auto-save
+                    let _ = agent.save().await;
+                }
+            }
         });
 
         println!("Agent is running. Press Ctrl+C to stop.");
@@ -219,33 +265,54 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         let mut lines = stdin.lines();
 
         loop {
-            print!("{}> ", agent.persona.name);
-            // Would need to flush stdout here in real implementation
-
-            let line: String = lines.next_line().await?.unwrap_or_default();
-
-            match line.as_str() {
-                "exit" | "quit" => break,
-                "" => continue,
-                input => {
-                    // Create gateway message
-                    let msg = gateway::Message {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        platform: gateway::Platform::Cli,
-                        channel_id: "cli".to_string(),
-                        channel_name: None,
-                        user_id: "user".to_string(),
+            // Handle both stdin and gateway messages concurrently
+            tokio::select! {
+                // Handle stdin input
+                line_result = lines.next_line() => {
+                    let line: String = line_result?.unwrap_or_default();
+                    
+                    match line.as_str() {
+                        "exit" | "quit" => break,
+                        "" => continue,
+                        input => {
+                            // Create gateway message
+                            let msg = gateway::Message {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                platform: gateway::Platform::Cli,
+                                channel_id: "cli".to_string(),
+                                channel_name: None,
+                                user_id: "user".to_string(),
                         user_name: "User".to_string(),
-                        content: input.to_string(),
-                        timestamp: chrono::Utc::now(),
-                        attachments: vec![],
-                        reply_to: None,
-                    };
+                                content: input.to_string(),
+                                timestamp: chrono::Utc::now(),
+                                attachments: vec![],
+                                reply_to: None,
+                            };
 
-                    match agent.handle_message(msg).await {
-                        Ok(response) => println!("\n{}", response),
-                        Err(e) => error!("Error: {}", e),
+                            match agent.handle_message(msg).await {
+                                Ok(response) => {
+                                    // Show council usage info
+                                    let stats = agent.get_stats();
+                                    if stats.council_invocations > 0 {
+                                        println!("\n[Coherence: {:.3} | Council used: {} | Agents: {}]", 
+                                            stats.coherence, stats.council_invocations, stats.agent_count);
+                                    }
+                                    println!("\n{}", response);
+                                }
+                                Err(e) => error!("Error: {}", e),
+                            }
+                        }
                     }
+                }
+                // Handle gateway messages (if gateway is enabled)
+                Some((msg, response_tx)) = async { 
+                    if let Some(ref mut rx) = msg_rx { rx.recv().await } else { None }
+                } => {
+                    let response = match agent.handle_message(msg).await {
+                        Ok(resp) => resp,
+                        Err(e) => format!("Error: {}", e),
+                    };
+                    let _ = response_tx.send(response);
                 }
             }
         }
@@ -258,7 +325,7 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
 
 /// Chat with agent
 async fn cmd_chat(home: &PathBuf, message: Option<String>) -> Result<()> {
-    let mut agent = PersonalAgent::initialize(home).await?;
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
     if let Some(msg) = message {
         // Single message mode
@@ -288,17 +355,35 @@ async fn cmd_chat(home: &PathBuf, message: Option<String>) -> Result<()> {
 
 /// Execute a task
 async fn cmd_do(home: &PathBuf, task: &str) -> Result<()> {
-    let mut agent = PersonalAgent::initialize(home).await?;
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
     println!("Executing: {}\n", task);
+    println!("Using {} agents with coherence {:.3}\n", 
+        agent.world.agents.len(), 
+        agent.world.global_coherence()
+    );
 
-    let result = agent.execute_task(task).await?;
+    // Create message for the task
+    let msg = gateway::Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        platform: gateway::Platform::Cli,
+        channel_id: "cli".to_string(),
+        channel_name: None,
+        user_id: "user".to_string(),
+        user_name: "User".to_string(),
+        content: task.to_string(),
+        timestamp: chrono::Utc::now(),
+        attachments: vec![],
+        reply_to: None,
+    };
 
-    if result.success {
-        println!("✓ Success\n{}\n", result.output);
-    } else {
-        println!("✗ Failed\n{}\n", result.output);
-    }
+    let result = agent.handle_message(msg).await;
+    let output = match result {
+        Ok(resp) => resp,
+        Err(e) => format!("Error: {}", e),
+    };
+
+    println!("{}\n", output);
 
     agent.save().await?;
     Ok(())
@@ -308,15 +393,16 @@ async fn cmd_do(home: &PathBuf, task: &str) -> Result<()> {
 async fn cmd_config(home: &PathBuf, action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Show => {
-            let persona = Persona::load(home).await?;
-            println!("# Configuration\n");
-            println!("Name: {}", persona.name);
-            println!("Proactivity: {:.0}%", persona.proactivity * 100.0);
-            println!("Capabilities:");
-            for cap in &persona.capabilities {
-                let status = if cap.enabled { "✓" } else { "✗" };
-                println!("  {} {}", status, cap.name);
-            }
+            let agent = EnhancedPersonalAgent::initialize(home).await?;
+            println!("# HSM-II Configuration\n");
+            println!("Agents: {}", agent.world.agents.len());
+            println!("Coherence: {:.3}", agent.world.global_coherence());
+            println!("Beliefs: {}", agent.world.beliefs.len());
+            println!("Edges: {}", agent.world.edges.len());
+            println!("\nCouncil: {}", if agent.config.enable_council { "enabled" } else { "disabled" });
+            println!("CASS: {}", if agent.config.enable_cass { "enabled" } else { "disabled" });
+            println!("DKS: {}", if agent.config.enable_dks { "enabled" } else { "disabled" });
+            println!("JouleWork tracking: {}", if agent.config.track_joulework { "enabled" } else { "disabled" });
         }
         ConfigAction::Persona => {
             // Open SOUL.md in editor
@@ -332,97 +418,148 @@ async fn cmd_config(home: &PathBuf, action: ConfigAction) -> Result<()> {
     Ok(())
 }
 
-/// Memory commands
+/// Memory commands - now uses LadybugDB beliefs
 async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
-    let mut memory = PersonalMemory::load(home).await?;
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
     match action {
         MemoryAction::Show { n } => {
-            println!("# Recent Memories (showing {} facts)\n", n);
-            for fact in memory.memory_md.facts.iter().rev().take(n) {
-                println!("- [{}] {}", fact.category, fact.content);
+            use hyper_stigmergy::hyper_stigmergy::BeliefSource;
+            println!("# LadybugDB Beliefs (showing {})\n", n);
+            for belief in agent.world.beliefs.iter().rev().take(n) {
+                let source_icon = match belief.source {
+                    BeliefSource::UserProvided => "👤",
+                    BeliefSource::Observation => "👁️",
+                    BeliefSource::Reflection => "💭",
+                    BeliefSource::Inference => "🔗",
+                };
+                println!("{} [{:.2}] {}", source_icon, belief.confidence, belief.content);
+            }
+            println!("\n# Hyperedges\n");
+            for (i, edge) in agent.world.edges.iter().rev().take(n).enumerate() {
+                println!("Edge {}: agents {:?}, weight={:.2}, emergent={}", 
+                    i, edge.participants, edge.weight, edge.emergent);
             }
         }
         MemoryAction::Search { query } => {
-            println!("# Searching for: {}\n", query);
-            // TODO: Implement search
+            println!("# Vector search for: {}\n", query);
+            let beliefs = agent.get_relevant_beliefs(&query).await?;
+            for belief in beliefs {
+                println!("[{:.2}] {}", belief.confidence, belief.content);
+            }
         }
-        MemoryAction::Add { content, category } => {
-            let cat = category.unwrap_or_else(|| "general".to_string());
-            memory.add_fact(&content, &cat);
-            memory.save(home).await?;
-            println!("✓ Added to memory");
+        MemoryAction::Add { content, category: _ } => {
+            use hyper_stigmergy::hyper_stigmergy::{Belief, BeliefSource};
+            // Add as a belief to the world
+            let id = agent.world.beliefs.len();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            agent.world.beliefs.push(Belief {
+                id,
+                content: content.clone(),
+                confidence: 0.9,
+                source: BeliefSource::UserProvided,
+                supporting_evidence: vec!["User added via CLI".to_string()],
+                contradicting_evidence: vec![],
+                created_at: now,
+                updated_at: now,
+                update_count: 0,
+            });
+            agent.save().await?;
+            println!("✓ Added to LadybugDB beliefs");
         }
     }
     Ok(())
 }
 
-/// Run heartbeat
+/// Run DKS evolution tick
 async fn cmd_heartbeat(home: &PathBuf) -> Result<()> {
-    let mut agent = PersonalAgent::initialize(home).await?;
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
-    println!("Running heartbeat...\n");
+    println!("Running DKS evolution tick...\n");
 
-    let results = agent.heartbeat().await?;
-
-    for result in results {
-        let icon = if result.success { "✓" } else { "✗" };
-        println!("{} {}: {}", icon, result.action, result.message);
-    }
+    let tick = agent.services.dks.tick();
+    let stats = agent.services.dks.stats();
+    println!("Generation: {}", tick.generation);
+    println!("Population: {}", stats.size);
+    println!("Avg persistence: {:.3}", stats.average_persistence);
+    
+    agent.save().await?;
+    println!("\n✓ State saved to LadybugDB");
 
     Ok(())
 }
 
-/// Bootstrap new agent
+/// Bootstrap new enhanced agent
 async fn cmd_bootstrap(home: &PathBuf) -> Result<()> {
-    if home.join("SOUL.md").exists() {
-        println!("Agent already initialized at {}", home.display());
-        println!("Run `hsmii config persona` to edit personality.");
+    if home.join("config.json").exists() || hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+        println!("Enhanced agent already initialized at {}", home.display());
+        println!("Run `hsmii config` to view configuration.");
         return Ok(());
     }
 
-    let _agent = PersonalAgent::bootstrap(home).await?;
+    println!("🌱 Bootstrapping Enhanced HSM-II Personal Agent\n");
+    
+    let agent = EnhancedPersonalAgent::initialize(home).await?;
+    
+    println!("✨ Created {} agents:", agent.world.agents.len());
+    for (i, agent_info) in agent.world.agents.iter().enumerate() {
+        println!("  {}. {:?} - JW: {:.3}", 
+            i + 1, agent_info.role, agent_info.jw);
+    }
+    
+    println!("\n✓ LadybugDB initialized");
+    println!("✓ CASS skill system ready");
+    println!("✓ Council deliberation enabled");
+    println!("✓ DKS evolution active");
+    println!("✓ JouleWork tracking on");
 
-    println!("\n✨ Agent initialized!");
     println!("\nNext steps:");
-    println!("  - Run `hsmii start` to chat with your agent");
-    println!(
-        "  - Edit {} to customize personality",
-        home.join("SOUL.md").display()
-    );
-    println!(
-        "  - Edit {} to add your details",
-        home.join("USER.md").display()
-    );
+    println!("  - Run `hsmii start` to chat with your multi-agent system");
+    println!("  - Run `hsmii start --telegram` to enable Telegram bot");
+    println!("  - Use `hsmii memory` to view/query beliefs");
 
     Ok(())
 }
 
 /// Check status
 async fn cmd_status(home: &PathBuf) -> Result<()> {
-    if !home.join("SOUL.md").exists() {
-        println!("Agent not initialized.");
-        println!("Run `hsmii bootstrap` to set up your AI companion.");
+    if !hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+        println!("Enhanced agent not initialized.");
+        println!("Run `hsmii bootstrap` to set up your HSM-II multi-agent system.");
         return Ok(());
     }
 
-    let persona = Persona::load(home).await?;
-    let memory = PersonalMemory::load(home).await?;
-    let heartbeat = Heartbeat::load(home).await?;
+    let agent = EnhancedPersonalAgent::initialize(home).await?;
+    let stats = agent.get_stats();
 
-    println!("# {} Status\n", persona.name);
+    println!("# HSM-II Enhanced Agent Status\n");
 
-    println!("## Memory");
-    println!("  Facts: {}", memory.memory_md.facts.len());
-    println!("  Projects: {}", memory.memory_md.projects.len());
-    println!("  User: {}\n", memory.user_md.name);
+    println!("## Multi-Agent World");
+    println!("  Agents: {}", stats.agent_count);
+    println!("  Hyperedges: {}", stats.edge_count);
+    println!("  Beliefs: {}", stats.belief_count);
+    println!("  Global coherence: {:.3}", stats.coherence);
+    println!("  Tick count: {}\n", stats.tick_count);
 
-    println!("## Health");
-    println!(
-        "  Last heartbeat: {} minutes ago",
-        (chrono::Utc::now() - heartbeat.last_beat).num_minutes()
-    );
-    println!("  Cron jobs: {}", heartbeat.cron_jobs.len());
+    println!("## Activity");
+    println!("  Messages processed: {}", stats.total_messages);
+    println!("  Council invocations: {}\n", stats.council_invocations);
+
+    println!("## Agent Roles");
+    for agent_info in &agent.world.agents {
+        let jw = agent_info.calculate_jw(stats.coherence, 3);
+        println!("  {:?}: JW={:.3}", agent_info.role, jw);
+    }
+
+    println!("\n## System");
+    println!("  LadybugDB: {}", 
+        if hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() { "✓ active" } else { "✗ not found" });
+    println!("  Council: {}", if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" });
+    println!("  CASS: {}", if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" });
+    println!("  DKS: {}", if agent.config.enable_dks { "✓ enabled" } else { "✗ disabled" });
 
     Ok(())
 }
@@ -437,9 +574,13 @@ async fn cmd_start_tui(home: &PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    // Load agent
-    let agent = Arc::new(Mutex::new(PersonalAgent::initialize(home).await?));
-    let mut state = CodexState::new(&agent.lock().await.persona.name);
+    // Load enhanced agent
+    let agent = Arc::new(Mutex::new(EnhancedPersonalAgent::initialize(home).await?));
+    let agent_name = {
+        let a = agent.lock().await;
+        format!("HSM-II Agent ({} agents)", a.world.agents.len())
+    };
+    let mut state = CodexState::new(&agent_name);
 
     // Setup terminal
     enable_raw_mode()?;
@@ -448,18 +589,28 @@ async fn cmd_start_tui(home: &PathBuf) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Update state with agent info - use actual LLM model name
-    state.model = agent.lock().await.current_model();
+    // Update state with agent info - use model from LLM
+    state.model = agent.lock().await.llm.model().to_string();
     state.current_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "~".to_string());
 
-    // Welcome message
-    let welcome_msg = format!(
-        "Hi! I'm {}. {}\n\nWhat would you like to build today?",
-        agent.lock().await.persona.name,
-        agent.lock().await.persona.identity
-    );
+    // Welcome message with HSM-II stats
+    let welcome_msg = {
+        let a = agent.lock().await;
+        let stats = a.get_stats();
+        format!(
+            "🌌 HSM-II Enhanced Agent Online\n\n\
+            Active agents: {} | Coherence: {:.3}\n\
+            Council: {} | CASS: {} | DKS: {}\n\n\
+            What would you like to explore today?",
+            stats.agent_count,
+            stats.coherence,
+            if a.config.enable_council { "✓" } else { "✗" },
+            if a.config.enable_cass { "✓" } else { "✗" },
+            if a.config.enable_dks { "✓" } else { "✗" }
+        )
+    };
     state.push_message("agent", &welcome_msg);
 
     // Channel for receiving agent responses asynchronously

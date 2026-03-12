@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "hyper-stigmergy"
 
 [workspace]
-members = [".", "external_integrations/hermes/hermes-bridge"]
+members = ["."]
 resolver = "2"
 
 [dependencies]
@@ -70,6 +70,12 @@ jsonwebtoken = "9"
 # Discord bot
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
 
+# Telegram bot
+teloxide = { version = "0.13", features = ["macros"] }
+
+# Job scheduler (cron expressions)
+cron = "0.14"
+
 # Code navigation
 walkdir = "2"
 glob = "0.3"
@@ -85,13 +91,9 @@ reedline = "0.10"
 # Directories
 dirs = "5"
 
-# Workspace dependencies - Hermes Bridge
-hermes-bridge = { path = "integrations/hermes/hermes-bridge", optional = true }
-
 [features]
 default = ["gpu"]
 gpu = ["wgpu", "bytemuck", "pollster"]
-hermes = ["hermes-bridge"]
 
 [dev-dependencies]
 tokio-test = "0.4"

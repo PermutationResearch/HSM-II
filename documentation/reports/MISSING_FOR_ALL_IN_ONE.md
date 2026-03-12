@@ -241,9 +241,9 @@ hsm-cli agent create --name "Helper" --prompt "You are helpful"
 
 | # | Feature | Current | Needed | Effort | Priority |
 |---|---------|---------|--------|--------|----------|
-| 1 | Discord/Telegram/Slack | Stubs | Real impl | Medium | 🔴 Critical |
+| 1 | Discord/Telegram/Slack | Discord ✅, Telegram ✅ | Slack impl | Medium | 🟡 High |
 | 2 | Web UI Dashboard | Viz only | Full app | High | 🔴 Critical |
-| 3 | Job Queue/Scheduler | None | Persistent | Medium | 🔴 Critical |
+| 3 | Job Queue/Scheduler | ✅ In-memory | Persistent SQLite | Low | 🟢 Medium |
 | 4 | Auth/Rate Limiting | None | Full auth | Medium | 🔴 Critical |
 | 5 | Vector DB | In-memory | Qdrant/etc | Medium | 🟡 High |
 | 6 | Plugin System | Hardcoded | WASM/dynamic | High | 🟡 High |

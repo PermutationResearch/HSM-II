@@ -11,13 +11,19 @@ use std::path::{Path, PathBuf};
 
 use crate::ollama_client::{OllamaClient, OllamaConfig};
 use crate::tools::ToolRegistry;
+use tokio::sync::{mpsc, oneshot};
 
+pub mod enhanced_agent;
 pub mod gateway;
 pub mod heartbeat;
 pub mod hypergraph_client;
 pub mod memory;
 pub mod persona;
 
+pub use enhanced_agent::{
+    EnhancedPersonalAgent, EnhancedAgentConfig, AgentResponse, WorldStats,
+    JouleWorkRecord, ContributionType, AgentMetrics, MessageContext,
+};
 pub use heartbeat::{CronJob, Heartbeat, Routine, RoutineAction, RoutineTrigger};
 pub use hypergraph_client::HypergraphClient;
 pub use memory::{MemoryFact, MemoryMd, PersonalMemory, Project, UserMd};
@@ -39,6 +45,8 @@ pub struct PersonalAgent {
     llm: OllamaClient,
     /// Tool registry for executing tasks
     tool_registry: ToolRegistry,
+    /// Recent chat history for conversation continuity (user, assistant) pairs
+    chat_history: Vec<(String, String)>,
 }
 
 impl PersonalAgent {
@@ -79,6 +87,7 @@ impl PersonalAgent {
             gateway: None,
             llm,
             tool_registry,
+            chat_history: Vec::new(),
         })
     }
 
@@ -114,24 +123,25 @@ impl PersonalAgent {
             gateway: None,
             llm,
             tool_registry,
+            chat_history: Vec::new(),
         })
     }
 
     /// Process incoming message from any gateway
     pub async fn handle_message(&mut self, msg: gateway::Message) -> Result<String> {
-        // 1. Get relevant context from memory
+        // 1. Get relevant context from memory (facts, projects, preferences)
         let context = self.memory.get_context(&msg.content).await?;
 
-        // 2. Build system prompt from persona + context
+        // 2. Load today's conversation history from disk
+        self.chat_history = self.memory.load_chat_history().await?;
+
+        // 3. Build system prompt from persona + context
         let system_prompt = self.build_system_prompt(&context);
 
-        // 3. Council deliberation (if enabled)
-        // TODO: Integrate with Council for complex decisions
-
-        // 4. Generate response
+        // 4. Generate response with full conversation history
         let response = self.generate_response(&system_prompt, &msg).await?;
 
-        // 5. Update memory with interaction
+        // 5. Record interaction to disk (appends to today's log)
         self.memory.record_interaction(&msg, &response).await?;
 
         // 6. Persist changes
@@ -165,11 +175,20 @@ impl PersonalAgent {
     }
 
     /// Start gateway for external communication
-    pub async fn start_gateway(&mut self, config: gateway::Config) -> Result<()> {
+    /// Returns a channel receiver for processing messages
+    pub async fn start_gateway(&mut self, config: gateway::Config) -> Result<mpsc::Receiver<(gateway::Message, oneshot::Sender<String>)>> {
         let mut gateway = gateway::Gateway::new(config);
+        
+        // Create channel for message passing (avoids circular reference)
+        let (tx, rx) = mpsc::channel::<(gateway::Message, oneshot::Sender<String>)>(100);
+        
+        // Create handler that uses the channel
+        let handler = ChannelMessageHandler { sender: tx };
+        gateway.on_message(handler);
         gateway.start().await?;
         self.gateway = Some(gateway);
-        Ok(())
+        
+        Ok(rx)
     }
 
     /// Get the current LLM model name
@@ -179,8 +198,20 @@ impl PersonalAgent {
 
     /// Build system prompt for LLM
     fn build_system_prompt(&self, context: &str) -> String {
+        let name = &self.persona.name;
         format!(
-            "{persona}\n\n{capabilities}\n\n## Relevant Context\n{context}\n\n## Guidelines\n- Be helpful and proactive\n- Ask clarifying questions when needed\n- Use available tools when appropriate\n- Reference previous conversations when relevant",
+            "You are {name}. You MUST stay in character as {name} at all times. Never say you are a large language model or AI assistant. You are {name}.\n\n\
+            {persona}\n\n\
+            {capabilities}\n\n\
+            ## Relevant Context\n{context}\n\n\
+            ## Rules\n\
+            - Always introduce yourself as {name} if asked who you are\n\
+            - Stay in character based on your Identity and Voice above\n\
+            - Be helpful and proactive\n\
+            - Ask clarifying questions when needed\n\
+            - Reference previous conversations when relevant\n\
+            - Keep responses concise and natural",
+            name = name,
             persona = self.persona.to_system_prompt(),
             capabilities = self.format_capabilities(),
             context = context,
@@ -192,20 +223,35 @@ impl PersonalAgent {
         "## Your Capabilities\n- Web search and research\n- File operations\n- Terminal commands (sandboxed)\n- Task scheduling\n- Multi-agent coordination\n- Memory and context awareness".to_string()
     }
 
+    /// Strip leaked chat template tokens from LLM output
+    fn clean_response(text: &str) -> String {
+        let mut cleaned = text.to_string();
+        // Strip Llama 3 chat template tokens
+        for token in &[
+            "<|end_header_id|>", "<|start_header_id|>", "<|eot_id|>",
+            "<|begin_of_text|>", "<|end_of_text|>", "<|finetune_right_pad_id|>",
+        ] {
+            cleaned = cleaned.replace(token, "");
+        }
+        // Also strip any remaining <|...|> patterns
+        while let Some(start) = cleaned.find("<|") {
+            if let Some(end) = cleaned[start..].find("|>") {
+                cleaned.replace_range(start..start + end + 2, "");
+            } else {
+                break;
+            }
+        }
+        cleaned.trim().to_string()
+    }
+
     /// Generate response using LLM
     async fn generate_response(
         &self,
         system_prompt: &str,
         msg: &gateway::Message,
     ) -> Result<String> {
-        // Build full prompt with system context
-        let full_prompt = format!(
-            "{system_prompt}\n\n## User Message\n{}\n\n## Your Response",
-            msg.content
-        );
-
-        // Generate response using Ollama
-        let result = self.llm.generate(&full_prompt).await;
+        // Use chat endpoint with conversation history
+        let result = self.llm.chat(system_prompt, &msg.content, &self.chat_history).await;
 
         if result.text.is_empty() || result.timed_out {
             // Fallback if LLM fails - provide helpful message
@@ -214,7 +260,7 @@ impl PersonalAgent {
                 name = self.persona.name
             ))
         } else {
-            Ok(result.text)
+            Ok(Self::clean_response(&result.text))
         }
     }
 
@@ -337,6 +383,22 @@ pub struct HeartbeatResult {
     pub action: String,
     pub success: bool,
     pub message: String,
+}
+
+/// Message handler that uses channels to communicate with the agent
+/// This avoids circular references between gateway and agent
+pub struct ChannelMessageHandler {
+    sender: mpsc::Sender<(gateway::Message, oneshot::Sender<String>)>,
+}
+
+#[async_trait::async_trait]
+impl gateway::MessageHandler for ChannelMessageHandler {
+    async fn handle(&self, msg: gateway::Message) -> anyhow::Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.sender.send((msg, tx)).await?;
+        let response = rx.await?;
+        Ok(response)
+    }
 }
 
 /// Get default HSM-II home directory

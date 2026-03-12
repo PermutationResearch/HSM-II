@@ -6,17 +6,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-// use std::collections::HashMap;  // TODO: Use when needed
+use std::sync::Arc;
+
+use crate::gateways::{RealDiscordBot, RealTelegramBot, DiscordConfig, TelegramConfig};
 
 /// Unified gateway for all platforms
 pub struct Gateway {
     config: Config,
     /// Platform-specific bots
-    discord: Option<DiscordBot>,
-    telegram: Option<TelegramBot>,
-    slack: Option<SlackBot>,
+    discord: Option<RealDiscordBot>,
+    telegram: Option<RealTelegramBot>,
     /// Message handler callback
-    handler: Option<Box<dyn MessageHandler>>,
+    handler: Option<Arc<dyn MessageHandler>>,
 }
 
 impl Gateway {
@@ -26,40 +27,55 @@ impl Gateway {
             config,
             discord: None,
             telegram: None,
-            slack: None,
             handler: None,
         }
     }
 
     /// Set message handler
     pub fn on_message<H: MessageHandler + 'static>(&mut self, handler: H) {
-        self.handler = Some(Box::new(handler));
+        self.handler = Some(Arc::new(handler));
     }
 
     /// Start all configured gateways
     pub async fn start(&mut self) -> Result<()> {
         // Start Discord if configured
         if let Some(token) = &self.config.discord_token {
-            let mut discord = DiscordBot::new(token.clone());
-            discord.start(self.handler.as_ref()).await?;
-            self.discord = Some(discord);
-            tracing::info!("Discord gateway started");
+            let discord_config = DiscordConfig {
+                token: token.clone(),
+                command_prefix: self.config.discord_prefix.clone().unwrap_or_else(|| "!hsm ".to_string()),
+                allowed_channels: vec!["all".to_string()],
+                presence_text: "Hyper-Stigmergic Morphogenesis II".to_string(),
+            };
+            
+            let mut discord = RealDiscordBot::new(discord_config);
+            
+            if let Some(handler) = &self.handler {
+                discord.start(handler.clone()).await?;
+                self.discord = Some(discord);
+                tracing::info!("Discord gateway started");
+            } else {
+                tracing::warn!("No message handler set for Discord");
+            }
         }
 
         // Start Telegram if configured
         if let Some(token) = &self.config.telegram_token {
-            let mut telegram = TelegramBot::new(token.clone());
-            telegram.start(self.handler.as_ref()).await?;
-            self.telegram = Some(telegram);
-            tracing::info!("Telegram gateway started");
-        }
-
-        // Start Slack if configured
-        if let Some(token) = &self.config.slack_token {
-            let mut slack = SlackBot::new(token.clone());
-            slack.start(self.handler.as_ref()).await?;
-            self.slack = Some(slack);
-            tracing::info!("Slack gateway started");
+            let telegram_config = TelegramConfig {
+                token: token.clone(),
+                allowed_chats: self.config.telegram_allowed_chats.clone().unwrap_or_default(),
+                parse_mode: teloxide::types::ParseMode::MarkdownV2,
+                max_message_length: 4096,
+            };
+            
+            let mut telegram = RealTelegramBot::new(telegram_config);
+            
+            if let Some(handler) = &self.handler {
+                telegram.start(handler.clone()).await?;
+                self.telegram = Some(telegram);
+                tracing::info!("Telegram gateway started");
+            } else {
+                tracing::warn!("No message handler set for Telegram");
+            }
         }
 
         Ok(())
@@ -78,12 +94,9 @@ impl Gateway {
                     telegram.send_message(channel, message).await?;
                 }
             }
-            Platform::Slack => {
-                if let Some(slack) = &self.slack {
-                    slack.send_message(channel, message).await?;
-                }
+            _ => {
+                tracing::warn!(?platform, "Platform not yet implemented");
             }
-            _ => {}
         }
         Ok(())
     }
@@ -101,9 +114,6 @@ impl Gateway {
         if let Some(telegram) = &mut self.telegram {
             telegram.shutdown().await?;
         }
-        if let Some(slack) = &mut self.slack {
-            slack.shutdown().await?;
-        }
         Ok(())
     }
 }
@@ -112,7 +122,9 @@ impl Gateway {
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub discord_token: Option<String>,
+    pub discord_prefix: Option<String>,
     pub telegram_token: Option<String>,
+    pub telegram_allowed_chats: Option<Vec<i64>>,
     pub slack_token: Option<String>,
     pub slack_signing_secret: Option<String>,
 }
@@ -170,87 +182,6 @@ impl std::fmt::Display for Platform {
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
     async fn handle(&self, msg: Message) -> Result<String>;
-}
-
-// Platform-specific implementations would go here
-// These are stubs - real implementations would use the respective APIs
-
-#[allow(dead_code)]
-pub struct DiscordBot {
-    token: String,
-}
-
-impl DiscordBot {
-    pub fn new(token: String) -> Self {
-        Self { token }
-    }
-
-    pub async fn start(&mut self, _handler: Option<&Box<dyn MessageHandler>>) -> Result<()> {
-        // TODO: Initialize serenity Discord client
-        tracing::info!("Discord bot would start here");
-        Ok(())
-    }
-
-    pub async fn send_message(&self, _channel: &str, _message: &str) -> Result<()> {
-        // TODO: Send Discord message
-        Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-pub struct TelegramBot {
-    token: String,
-}
-
-impl TelegramBot {
-    pub fn new(token: String) -> Self {
-        Self { token }
-    }
-
-    pub async fn start(&mut self, _handler: Option<&Box<dyn MessageHandler>>) -> Result<()> {
-        // TODO: Initialize teloxide bot
-        tracing::info!("Telegram bot would start here");
-        Ok(())
-    }
-
-    pub async fn send_message(&self, _channel: &str, _message: &str) -> Result<()> {
-        // TODO: Send Telegram message
-        Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-pub struct SlackBot {
-    token: String,
-}
-
-impl SlackBot {
-    pub fn new(token: String) -> Self {
-        Self { token }
-    }
-
-    pub async fn start(&mut self, _handler: Option<&Box<dyn MessageHandler>>) -> Result<()> {
-        // TODO: Initialize Slack client
-        tracing::info!("Slack bot would start here");
-        Ok(())
-    }
-
-    pub async fn send_message(&self, _channel: &str, _message: &str) -> Result<()> {
-        // TODO: Send Slack message
-        Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Convert message to stigmergic signal format
