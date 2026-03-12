@@ -1,0 +1,290 @@
+# Hyper-Stigmergic Morphogenesis II (HSM-II)
+
+[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**A self-organizing multi-agent system with stigmergic coordination, inspired by biological morphogenesis and collective intelligence.**
+
+HSM-II enables autonomous AI agents to coordinate through environmental markers (stigmergy), form dynamic councils for collective decision-making, and continuously improve through skill distillation.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) 1.75+ 
+- Docker (optional, for containerized deployment)
+- API key for OpenAI, Anthropic, or local Ollama
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/PermutationResearch/hyper-stigmergy.git
+cd hyper-stigmergy
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# Build and run
+cargo run --release
+```
+
+### Three Ways to Use HSM-II
+
+#### 1. Personal Agent (Easiest)
+```bash
+./run-personal-agent.command
+```
+Your AI companion with built-in coordination capabilities.
+
+#### 2. With Visualization
+```bash
+# Terminal 1: Personal agent
+./run-personal-agent.command
+
+# Terminal 2: Visual hypergraph
+./open-hypergraphd.command
+```
+
+#### 3. Full Research Stack
+```bash
+# Terminal 1: Research backend
+./run-hyper-stigmergy-II.command
+
+# Terminal 2: Personal agent
+./run-personal-agent.command --connect-hypergraph
+
+# Browser: View hypergraph
+./open-hypergraphd.command
+```
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         HSM-II System                           │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│  │   Agents    │  │   Council   │  │    CASS (Skills)        │ │
+│  │  ┌───────┐  │  │  ┌───────┐  │  │  ┌─────────────────┐    │ │
+│  │  │Roles  │  │  │  │Debate │  │  │  │Skill Learning   │    │ │
+│  │  │Drives │  │  │  │Vote   │  │  │  │Distillation     │    │ │
+│  │  │Coherence│ │  │  │Evidence│ │  │  │Versioning       │    │ │
+│  │  └───────┘  │  │  └───────┘  │  │  └─────────────────┘    │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+│         │                │                    │                 │
+│         └────────────────┼────────────────────┘                 │
+│                          ▼                                      │
+│              ┌─────────────────────┐                            │
+│              │   Stigmergic Field  │                            │
+│              │  (Hypergraph State) │                            │
+│              └─────────────────────┘                            │
+│                          │                                      │
+│         ┌────────────────┼────────────────┐                     │
+│         ▼                ▼                ▼                     │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+│  │    DKS      │  │   Social    │  │   Federation│             │
+│  │(Distributed │  │   Memory    │  │   (Multi-   │             │
+│  │ Knowledge)  │  │ (Promises,  │  │   Node)     │             │
+│  │             │  │ Reputation) │  │             │             │
+│  └─────────────┘  └─────────────┘  └─────────────┘             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## ✨ Key Features
+
+### 🧠 Core Systems
+
+| System | Description |
+|--------|-------------|
+| **Hypergraph Engine** | Stigmergic morphogenesis through environmental markers |
+| **Agent System** | Role-based agents with coherence scoring |
+| **Council System** | Multi-agent debate, evidence-based voting, mode switching |
+| **CASS** | Continuous Automated Skill Synthesis - learn and distill skills |
+| **Social Memory** | Promise tracking, reputation, capability evidence |
+| **DKS** | Distributed Knowledge System with selection pressure |
+
+### 🛠️ Tools (57 Real Implementations)
+
+| Category | Tools |
+|----------|-------|
+| Web/Browser | Web search, browser automation, scraping |
+| File Operations | Read, write, search, analyze files |
+| Shell/System | Execute commands, system info |
+| Git | Clone, commit, diff, blame, search |
+| API/Data | HTTP requests, JSON parsing, encoding |
+| Calculations | Math, statistics, unit conversion |
+| Text Processing | Regex, parsing, formatting |
+
+### 🤖 LLM Integration
+
+- **OpenAI** (GPT-4o, GPT-4o-mini)
+- **Anthropic** (Claude models)
+- **Ollama** (local models)
+- **Automatic failover** between providers
+- **Health monitoring** and retry logic
+
+### 🔐 Security & Auth
+
+- API key management with Argon2 hashing
+- JWT tokens with 24h expiry
+- Rate limiting per key
+- Permission-based access control
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [EASY_START.md](EASY_START.md) | Getting started guide |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Production deployment |
+| [COMMANDS_GUIDE.md](COMMANDS_GUIDE.md) | CLI commands reference |
+| [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Feature completeness |
+| [ANTIFRAGILE_ARCHITECTURE.md](ANTIFRAGILE_ARCHITECTURE.md) | Architecture deep-dive |
+| [PERSONAL_AGENT_README.md](PERSONAL_AGENT_README.md) | Personal agent guide |
+| [HERMES_INTEGRATION.md](HERMES_INTEGRATION.md) | Hermes bridge docs |
+
+---
+
+## 🐳 Docker Deployment
+
+```bash
+# Full stack with monitoring
+docker-compose up -d
+
+# Check health
+curl http://localhost:8080/health
+
+# View metrics
+curl http://localhost:9000/metrics
+```
+
+Services:
+- **HSM-II**: Main application (port 8080)
+- **Ollama**: Local LLM inference (port 11434)
+- **Prometheus**: Metrics (port 9090)
+- **Grafana**: Dashboards (port 3000)
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run library tests only
+cargo test --lib
+
+# Run with logging
+RUST_LOG=debug cargo test
+```
+
+---
+
+## 📁 Project Structure
+
+```
+hyper-stigmergy/
+├── src/
+│   ├── bin/                 # Executables
+│   │   ├── personal_agent.rs
+│   │   ├── hypergraphd.rs
+│   │   └── ...
+│   ├── agent_core/          # Agent runtime
+│   ├── council/             # Council decision-making
+│   ├── tools/               # 57 tool implementations
+│   ├── llm/                 # LLM client & providers
+│   ├── dks/                 # Distributed knowledge
+│   ├── cass/                # Skill learning
+│   ├── federation/          # Multi-node federation
+│   ├── gateways/            # Discord, Telegram, etc.
+│   └── ...
+├── hermes-bridge/           # Hermes integration
+├── scripts/                 # Python analysis scripts
+├── static/                  # Web UI
+├── config/                  # Prometheus/Grafana config
+├── tests/                   # Integration tests
+├── Cargo.toml
+├── docker-compose.yml
+└── Dockerfile
+```
+
+---
+
+## 🤝 Integration: Hermes Bridge
+
+HSM-II includes a bridge to [Hermes Agent](https://github.com/PermutationResearch/hermes) for extended capabilities:
+
+```rust
+use hermes_bridge::HermesClientBuilder;
+
+let client = HermesClientBuilder::new()
+    .endpoint("http://localhost:8000")
+    .build()?;
+
+let result = client.web_search("AI agents").await?;
+```
+
+See [hermes-bridge/README.md](hermes-bridge/README.md) for details.
+
+---
+
+## 📊 Metrics & Observability
+
+Prometheus metrics available at `:9000/metrics`:
+
+- `hsm_http_requests_total` - HTTP requests
+- `hsm_llm_requests_total` - LLM API calls
+- `hsm_llm_latency_milliseconds` - LLM response times
+- `hsm_tool_executions_total` - Tool usage
+- `hsm_failures_total` - Failed operations
+- `hsm_promises_kept_total` / `hsm_promises_broken_total` - Promise tracking
+
+---
+
+## 🛣️ Roadmap
+
+- [x] Core hypergraph engine
+- [x] Multi-agent council system
+- [x] 57 real tools
+- [x] Multi-provider LLM integration
+- [x] Docker deployment
+- [x] Discord gateway
+- [ ] Telegram/Slack gateways
+- [ ] Vector database integration
+- [ ] Job queue/scheduler
+- [ ] Advanced web UI
+
+---
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE)
+
+---
+
+## 🙏 Acknowledgments
+
+- Inspired by biological morphogenesis and stigmergic coordination in social insects
+- Built with [Rust](https://rust-lang.org) and [Tokio](https://tokio.rs)
+- Uses [Ollama](https://ollama.ai) for local inference
+
+---
+
+## 💬 Support
+
+- Issues: [GitHub Issues](https://github.com/PermutationResearch/hyper-stigmergy/issues)
+- Discussions: [GitHub Discussions](https://github.com/PermutationResearch/hyper-stigmergy/discussions)
+
+---
+
+**Built by Permutation Research** 🔄
