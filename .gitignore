@@ -135,3 +135,6 @@ viz/vendor/
 
 # Visual explainer output (generated)
 tools/visual-explainer/output/
+
+# Agent tools output (generated)
+agent_tools/visual-explainer/output/

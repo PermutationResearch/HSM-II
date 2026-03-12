@@ -71,7 +71,7 @@ Technical reports, test results, and analysis:
 ## 🗺️ Documentation Map
 
 ```
-docs/
+documentation/
 ├── README.md                    (you are here)
 ├── guides/                      🚀 Start here!
 │   ├── EASY_START.md

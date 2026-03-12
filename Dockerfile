@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y \
 
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
-COPY integrations/hermes/hermes-bridge/Cargo.toml integrations/hermes/hermes-bridge/
+COPY external_integrations/hermes/hermes-bridge/Cargo.toml external_integrations/hermes/hermes-bridge/
 
 # Copy source code
 COPY src ./src
-COPY integrations/hermes/hermes-bridge/src ./integrations/hermes/hermes-bridge/src
+COPY external_integrations/hermes/hermes-bridge/src ./external_integrations/hermes/hermes-bridge/src
 
 # Build release binary
 RUN cargo build --release --features gpu
@@ -45,7 +45,7 @@ COPY --from=builder /build/target/release/batch_experiment /usr/local/bin/
 COPY --from=builder /build/target/release/investigate /usr/local/bin/
 
 # Copy configuration files
-COPY ops/config ./config
+COPY infrastructure/config ./config
 COPY banner.txt ./
 
 # Set up directories

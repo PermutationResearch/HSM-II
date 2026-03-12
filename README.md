@@ -20,8 +20,8 @@ Think of it as *ants solving problems through pheromone trails* — except the a
 - [Rust](https://rustup.rs/) 1.75+ 
 - Docker (optional, for containerized deployment)
 - API key for OpenAI, Anthropic, or local Ollama
-- **macOS users**: Use the `.command` scripts in `tools/scripts/macos/`
-- **Linux users**: Use equivalent `cargo run` commands (see [docs/guides/COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md))
+- **macOS users**: Use the `.command` scripts in `agent_tools/scripts/macos/`
+- **Linux users**: Use equivalent `cargo run` commands (see [documentation/guides/COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md))
 
 ### Installation
 
@@ -42,29 +42,29 @@ cargo run --release
 
 #### 1. Personal Agent (Easiest)
 ```bash
-./tools/scripts/macos/run-personal-agent.command
+./agent_tools/scripts/macos/run-personal-agent.command
 ```
 Your AI companion with built-in coordination capabilities.
 
 #### 2. With Visualization
 ```bash
 # Terminal 1: Personal agent
-./tools/scripts/macos/run-personal-agent.command
+./agent_tools/scripts/macos/run-personal-agent.command
 
 # Terminal 2: Visual hypergraph
-./tools/scripts/macos/open-hypergraphd.command
+./agent_tools/scripts/macos/open-hypergraphd.command
 ```
 
 #### 3. Full Research Stack
 ```bash
 # Terminal 1: Research backend
-./tools/scripts/macos/run-hyper-stigmergy-II.command
+./agent_tools/scripts/macos/run-hyper-stigmergy-II.command
 
 # Terminal 2: Personal agent
-./tools/scripts/macos/run-personal-agent.command --connect-hypergraph
+./agent_tools/scripts/macos/run-personal-agent.command --connect-hypergraph
 
 # Browser: View hypergraph
-./tools/scripts/macos/open-hypergraphd.command
+./agent_tools/scripts/macos/open-hypergraphd.command
 ```
 
 ---
@@ -248,12 +248,12 @@ If one provider fails, the system automatically switches to another. No single p
 
 | Document | What You'll Learn |
 |----------|-------------------|
-| [EASY_START.md](docs/guides/EASY_START.md) | Get running in 5 minutes |
-| [DEPLOYMENT.md](docs/guides/DEPLOYMENT.md) | Production deployment guide |
-| [COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md) | CLI reference |
-| [ANTIFRAGILE_ARCHITECTURE.md](docs/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
-| [PERSONAL_AGENT_README.md](docs/guides/PERSONAL_AGENT_README.md) | Your AI companion |
-| [HERMES_INTEGRATION.md](docs/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |
+| [EASY_START.md](documentation/guides/EASY_START.md) | Get running in 5 minutes |
+| [DEPLOYMENT.md](documentation/guides/DEPLOYMENT.md) | Production deployment guide |
+| [COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md) | CLI reference |
+| [ANTIFRAGILE_ARCHITECTURE.md](documentation/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
+| [PERSONAL_AGENT_README.md](documentation/guides/PERSONAL_AGENT_README.md) | Your AI companion |
+| [HERMES_INTEGRATION.md](documentation/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |
 
 ---
 
@@ -320,12 +320,12 @@ HSM-II/
 │   ├── cass/               Skill learning
 │   ├── federation/         Multi-node coordination
 │   └── gateways/           Discord, web, etc.
-├── docs/                   Documentation
-├── integrations/hermes/    Hermes Agent bridge
-├── ops/                    Prometheus, Grafana, CI/CD
-├── tools/                  Scripts & visual-explainer
-├── web/                    Web UI & visualization
-└── tests/                  Integration tests
+├── documentation/          Guides, architecture, reports
+├── external_integrations/  Third-party connections (Hermes)
+├── infrastructure/         Prometheus, Grafana, CI/CD
+├── agent_tools/            Scripts & visual-explainer
+├── web_interface/          Web UI & visualization
+└── test_suite/             Integration tests
 ```
 
 ---

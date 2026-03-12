@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "hyper-stigmergy"
 
 [workspace]
-members = [".", "integrations/hermes/hermes-bridge"]
+members = [".", "external_integrations/hermes/hermes-bridge"]
 resolver = "2"
 
 [dependencies]
