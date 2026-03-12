@@ -144,13 +144,13 @@ Your AI companion with built-in coordination capabilities.
 
 | Document | Description |
 |----------|-------------|
-| [EASY_START.md](EASY_START.md) | Getting started guide |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Production deployment |
-| [COMMANDS_GUIDE.md](COMMANDS_GUIDE.md) | CLI commands reference |
-| [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Feature completeness |
-| [ANTIFRAGILE_ARCHITECTURE.md](ANTIFRAGILE_ARCHITECTURE.md) | Architecture deep-dive |
-| [PERSONAL_AGENT_README.md](PERSONAL_AGENT_README.md) | Personal agent guide |
-| [HERMES_INTEGRATION.md](HERMES_INTEGRATION.md) | Hermes bridge docs |
+| [EASY_START.md](docs/guides/EASY_START.md) | Getting started guide |
+| [DEPLOYMENT.md](docs/guides/DEPLOYMENT.md) | Production deployment |
+| [COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md) | CLI commands reference |
+| [IMPLEMENTATION_STATUS.md](docs/reports/IMPLEMENTATION_STATUS.md) | Feature completeness |
+| [ANTIFRAGILE_ARCHITECTURE.md](docs/architecture/ANTIFRAGILE_ARCHITECTURE.md) | Architecture deep-dive |
+| [PERSONAL_AGENT_README.md](docs/guides/PERSONAL_AGENT_README.md) | Personal agent guide |
+| [HERMES_INTEGRATION.md](docs/integrations/HERMES_INTEGRATION.md) | Hermes bridge docs |
 
 ---
 
