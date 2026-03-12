@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "hyper-stigmergy"
 
 [workspace]
-members = [".", "hermes-bridge"]
+members = [".", "integrations/hermes/hermes-bridge"]
 resolver = "2"
 
 [dependencies]
@@ -86,7 +86,7 @@ reedline = "0.10"
 dirs = "5"
 
 # Workspace dependencies - Hermes Bridge
-hermes-bridge = { path = "hermes-bridge", optional = true }
+hermes-bridge = { path = "integrations/hermes/hermes-bridge", optional = true }
 
 [features]
 default = ["gpu"]

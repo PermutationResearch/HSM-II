@@ -97,7 +97,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks:
       - hsm-network
@@ -116,7 +116,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     networks:
       - hsm-network

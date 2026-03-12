@@ -132,3 +132,6 @@ config/*.local
 
 # Viz vendor libraries (loaded from CDN)
 viz/vendor/
+
+# Visual explainer output (generated)
+tools/visual-explainer/output/
