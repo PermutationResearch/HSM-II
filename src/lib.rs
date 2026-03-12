@@ -28,6 +28,7 @@ pub mod property_graph;
 pub mod query_engine;
 pub mod reasoning_braid;
 pub mod rlm;
+pub mod rlm_v2;
 pub mod skill;
 pub mod transaction_layer;
 pub mod workflow;
@@ -144,6 +145,12 @@ pub use rlm::{
     rlm_from_world, BidConfig, Context, EmbeddingCache, LivingPrompt, OllamaHandle, RlmAction,
     RlmMessage, SelfImprovementCycle, SubAgent, RLM,
 };
+pub use rlm_v2::{
+    run_rlm, Context as RlmV2Context, ContextChunk, ContextMetadata, ExecutionResult, FinalAnswer,
+    LlmBridge, LlmBridgeConfig, LlmQuery, RlmConfig, RlmError as RlmV2Error, RlmExecutor,
+    RlmIteration, RlmRuntime, RlmStats, RlmStatus, SandboxConfig, SubQuery, SubQueryResponse,
+    Trajectory, TrajectoryStore, TrajectoryViewer, IterationSnapshot, RlmToolCall,
+};
 pub use skill::{ApplicabilityCondition, Skill, SkillBank, SkillLevel, SkillSource};
 pub use social_memory::{
     AgentReputation, CapabilityEvidence, CollaborationStats, DataSensitivity, DelegationCandidate,
@@ -170,6 +177,7 @@ pub use council::{
     debate::{Argument, DebateCouncil, DebateRound},
     llm_deliberation::{DebatePhase, LLMArgument, LLMDebateCouncil, LLMDeliberationConfig, Stance},
     orchestrate::{Command, OrchestratorCouncil, SubTask},
+    ralph::{AgentConfig, RalphConfig, RalphCouncil, RalphIteration, RalphState, RalphVerdict},
     simple::{SimpleCouncil, Vote},
     Council, CouncilDecision, CouncilDecisionMetadata, CouncilEvidence, CouncilEvidenceKind,
     CouncilFactory, CouncilGraphQuery, CouncilId, CouncilMember, CouncilMode, CouncilStatus,

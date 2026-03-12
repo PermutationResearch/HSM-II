@@ -5,8 +5,11 @@
 //! - LadybugDB persistence (vector + graph storage)
 //! - CASS (skill learning)
 //! - Council (deliberation for complex decisions)
+//! - Ralph Loop (iterative coding with worker-reviewer)
+//! - RLM (Recursive Language Model for large documents)
 //! - DKS (distributed knowledge)
 //! - JouleWork (thermodynamic compensation)
+//! - Tool Execution (60+ tools)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,19 +17,20 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 use async_trait::async_trait;
 
 use crate::{
-    CASS, CouncilMember, Proposal,
+    CASS, CouncilMember, Proposal, RalphCouncil, RalphConfig,
     DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis,
     EmbeddedGraphStore, AgentId, Role,
     cass::{ContextSnapshot, embedding::EmbeddingEngine},
     council::{CouncilEvidence, CouncilEvidenceKind, CouncilFactory, ModeConfig,
-              StigmergicCouncilContext, Decision},
+              StigmergicCouncilContext, Decision, RalphVerdict},
     personal::gateway::{Message, Platform},
-    tools::{ToolRegistry, ToolCall as ToolCallEntry},
+    tools::{Tool, ToolRegistry, ToolCall as ToolCallEntry, RlmProcessTool},
     rlm::LivingPrompt,
     ollama_client::{OllamaClient, OllamaConfig},
 };
@@ -118,6 +122,8 @@ pub struct EnhancedPersonalAgent {
     pub messages_since_reflection: u64,
     /// Gateway message channel
     pub gateway_tx: Option<mpsc::Sender<(Message, oneshot::Sender<String>)>>,
+    /// Gateway instance (kept alive to keep bots running)
+    pub gateway: Option<crate::personal::gateway::Gateway>,
 }
 
 /// Tracks agent contributions for JouleWork compensation
@@ -230,6 +236,7 @@ impl EnhancedPersonalAgent {
             last_save: Instant::now(),
             messages_since_reflection: 0,
             gateway_tx: None,
+            gateway: None,
         })
     }
     
@@ -340,10 +347,38 @@ impl EnhancedPersonalAgent {
             joulework_contributions: HashMap::new(),
         };
         
-        // Step 1: Determine if this needs council deliberation
-        let needs_council = self.should_use_council(&msg.content);
-        
-        let response = if needs_council && self.config.enable_council {
+        // Check for special commands first
+        let response = if msg.content.starts_with("/ralph") {
+            // Explicit Ralph Loop command
+            let task = msg.content.trim_start_matches("/ralph").trim();
+            if task.is_empty() {
+                AgentResponse {
+                    content: "Usage: /ralph <coding task description>".to_string(),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 1.0,
+                    skills_used: vec![],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                }
+            } else {
+                self.process_with_ralph(&msg, &mut context, task).await?
+            }
+        } else if msg.content.starts_with("/rlm") {
+            // Explicit RLM command for large documents
+            self.process_with_rlm_command(&msg, &mut context).await?
+        } else if msg.content.starts_with("/tool") {
+            // Tool execution command
+            self.process_tool_command(&msg, &mut context).await?
+        } else if self.should_use_ralph(&msg.content) {
+            // Auto-detect coding tasks for Ralph Loop
+            info!("Auto-detected coding task, using Ralph Loop");
+            self.process_with_ralph(&msg, &mut context, &msg.content).await?
+        } else if self.should_use_rlm(&msg.content) {
+            // Auto-detect large document processing
+            info!("Auto-detected document processing, using RLM");
+            self.process_with_rlm(&msg, &mut context).await?
+        } else if self.should_use_council(&msg.content) && self.config.enable_council {
             // Complex decision - use council
             self.process_with_council(&msg, &mut context).await?
         } else {
@@ -424,6 +459,377 @@ impl EnhancedPersonalAgent {
         let has_multiple_questions = content.matches('?').count() > 1;
         
         has_complex_keyword || (is_long && has_multiple_questions)
+    }
+    
+    /// Determine if message should use Ralph Loop (coding tasks)
+    fn should_use_ralph(&self, content: &str) -> bool {
+        let lower = content.to_lowercase();
+
+        // Keywords that suggest coding/development tasks
+        let coding_keywords = [
+            "code", "program", "function", "implement", "refactor",
+            "bug", "fix", "debug", "error", "compile", "build",
+            "write a script", "create a tool", "develop", "class",
+            "rust", "python", "javascript", "typescript", "java",
+            "file processing", "parse", "extract", "transform",
+        ];
+        
+        // Check for coding indicators
+        let has_coding_keyword = coding_keywords.iter().any(|kw| lower.contains(kw));
+        let mentions_file_with_code = lower.contains("file") && (lower.contains("code") || lower.contains("script"));
+        let asks_for_implementation = lower.contains("implement") || lower.contains("write") || lower.contains("create");
+        
+        // Ralph is best for implementation tasks that may need iteration
+        (has_coding_keyword && asks_for_implementation) || mentions_file_with_code
+    }
+    
+    /// Determine if message should use RLM (large document processing)
+    fn should_use_rlm(&self, content: &str) -> bool {
+        let lower = content.to_lowercase();
+        
+        // Keywords that suggest large document processing
+        let document_keywords = [
+            "summarize", "analyze document", "process file",
+            "read file", "extract from", "scan document",
+            "large text", "long document", "multiple files",
+            "directory", "folder", "codebase", "repository",
+        ];
+        
+        // File extensions that suggest large documents
+        let document_extensions = [".txt", ".md", ".pdf", ".doc", ".csv", ".json", ".xml"];
+        
+        let has_doc_keyword = document_keywords.iter().any(|kw| lower.contains(kw));
+        let mentions_file = document_extensions.iter().any(|ext| lower.contains(ext));
+        let mentions_directory = lower.contains("/") || lower.contains("\\") || lower.contains("directory");
+        
+        has_doc_keyword || mentions_file || mentions_directory
+    }
+    
+    /// Process message using Ralph Loop (worker-reviewer pattern)
+    async fn process_with_ralph(
+        &mut self,
+        msg: &Message,
+        context: &mut MessageContext,
+        task: &str,
+    ) -> Result<AgentResponse> {
+        info!("Using Ralph Loop for message: {}", msg.id);
+        
+        let start = Instant::now();
+        
+        // Create Ralph Council
+        let council_id = uuid::Uuid::new_v4();
+        let config = RalphConfig {
+            max_iterations: 10,
+            state_dir: self.base_path.join("ralph"),
+            ..Default::default()
+        };
+        
+        let mut ralph = RalphCouncil::new(council_id, config);
+        
+        // Run Ralph Loop
+        match ralph.execute(task).await {
+            Ok((verdict, decision)) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                
+                context.council_used = true;
+                
+                let content = match verdict {
+                    RalphVerdict::Ship => {
+                        format!(
+                            "✅ **Ralph Loop Complete**\n\nTask completed successfully after deliberation.\n\nConfidence: {:.2}",
+                            decision.confidence
+                        )
+                    }
+                    RalphVerdict::MaxIterationsReached => {
+                        format!(
+                            "⚠️ **Ralph Loop Incomplete**\n\nMaximum iterations reached without achieving consensus.\n\nThe task may need refinement or manual intervention."
+                        )
+                    }
+                    RalphVerdict::Blocked { reason } => {
+                        format!(
+                            "🚫 **Ralph Loop Blocked**\n\nReason: {}\n\nThe worker was unable to proceed. Please provide more specific instructions.",
+                            reason
+                        )
+                    }
+                    RalphVerdict::Revise { .. } => {
+                        // This shouldn't happen as execute() returns on Ship/MaxIter/Blocked
+                        format!(
+                            "📝 **Ralph Loop Iterating**\n\nThe task is being refined through iterations.\n\nCheck {} for progress.",
+                            ralph.state_dir().display()
+                        )
+                    }
+                };
+                
+                Ok(AgentResponse {
+                    content,
+                    primary_agent: 0,
+                    council_used: true,
+                    confidence: decision.confidence,
+                    skills_used: vec!["ralph_loop".to_string()],
+                    joulework_contributions: context.joulework_contributions.clone(),
+                    processing_time_ms: duration_ms,
+                })
+            }
+            Err(e) => {
+                warn!("Ralph Loop failed: {}", e);
+                Ok(AgentResponse {
+                    content: format!("❌ Ralph Loop failed: {}", e),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 0.0,
+                    skills_used: vec![],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: start.elapsed().as_millis() as u64,
+                })
+            }
+        }
+    }
+    
+    /// Process message using RLM for large documents
+    async fn process_with_rlm(
+        &mut self,
+        msg: &Message,
+        _context: &mut MessageContext,
+    ) -> Result<AgentResponse> {
+        info!("Using RLM for message: {}", msg.id);
+        
+        let start = Instant::now();
+        
+        // Extract file path from message
+        let file_path = self.extract_file_path(&msg.content);
+        
+        if file_path.is_none() {
+            return Ok(AgentResponse {
+                content: "📄 **RLM Document Processing**\n\nPlease specify a file path.\n\nExample: `Process this file: ./documents/report.txt`".to_string(),
+                primary_agent: 0,
+                council_used: false,
+                confidence: 0.0,
+                skills_used: vec![],
+                joulework_contributions: HashMap::new(),
+                processing_time_ms: 0,
+            });
+        }
+        
+        let file_path = file_path.unwrap();
+        let query = self.extract_query(&msg.content);
+        
+        // Use RLM tool
+        let tool = RlmProcessTool::new();
+        let params = json!({
+            "source": file_path,
+            "query": query,
+            "source_type": "file"
+        });
+        
+        let output = tool.execute(params).await;
+        
+        let content = if output.success {
+            format!(
+                "📊 **RLM Analysis Complete**\n\n{}",
+                output.result
+            )
+        } else {
+            format!(
+                "❌ **RLM Processing Failed**\n\nError: {}",
+                output.error.unwrap_or_else(|| "Unknown error".to_string())
+            )
+        };
+        
+        Ok(AgentResponse {
+            content,
+            primary_agent: 0,
+            council_used: false,
+            confidence: if output.success { 0.8 } else { 0.0 },
+            skills_used: vec!["rlm_process".to_string()],
+            joulework_contributions: HashMap::new(),
+            processing_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+    
+    /// Process RLM command with explicit arguments
+    async fn process_with_rlm_command(
+        &mut self,
+        msg: &Message,
+        _context: &mut MessageContext,
+    ) -> Result<AgentResponse> {
+        let args = msg.content.trim_start_matches("/rlm").trim();
+        
+        if args.is_empty() {
+            return Ok(AgentResponse {
+                content: "Usage: /rlm <file_path> [query]\n\nExample: `/rlm ./document.txt summarize this`".to_string(),
+                primary_agent: 0,
+                council_used: false,
+                confidence: 1.0,
+                skills_used: vec![],
+                joulework_contributions: HashMap::new(),
+                processing_time_ms: 0,
+            });
+        }
+        
+        // Parse args: first token is path, rest is query
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        let file_path = parts[0];
+        let query = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "Analyze this document".to_string());
+        
+        let start = Instant::now();
+        
+        let tool = RlmProcessTool::new();
+        let params = json!({
+            "source": file_path,
+            "query": query,
+            "source_type": "file"
+        });
+        
+        let output = tool.execute(params).await;
+        
+        let content = if output.success {
+            output.result
+        } else {
+            format!("Error: {}", output.error.unwrap_or_else(|| "Unknown error".to_string()))
+        };
+        
+        Ok(AgentResponse {
+            content,
+            primary_agent: 0,
+            council_used: false,
+            confidence: if output.success { 0.8 } else { 0.0 },
+            skills_used: vec!["rlm_process".to_string()],
+            joulework_contributions: HashMap::new(),
+            processing_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+    
+    /// Process tool command
+    async fn process_tool_command(
+        &mut self,
+        msg: &Message,
+        _context: &mut MessageContext,
+    ) -> Result<AgentResponse> {
+        let args = msg.content.trim_start_matches("/tool").trim();
+        
+        if args.is_empty() {
+            // List available tools
+            let tools = self.tool_registry.list_tools();
+            let tool_list: Vec<String> = tools.iter()
+                .map(|(name, desc)| format!("- `{}`: {}", name, desc))
+                .collect();
+            
+            return Ok(AgentResponse {
+                content: format!(
+                    "🔧 **Available Tools** ({} total)\n\n{}\n\nUsage: `/tool <tool_name> <parameters>`",
+                    tools.len(),
+                    tool_list.join("\n")
+                ),
+                primary_agent: 0,
+                council_used: false,
+                confidence: 1.0,
+                skills_used: vec![],
+                joulework_contributions: HashMap::new(),
+                processing_time_ms: 0,
+            });
+        }
+        
+        // Parse tool name and parameters
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        let tool_name = parts[0];
+        let params_str = parts.get(1).unwrap_or(&"{}");
+        
+        // Try to parse parameters as JSON
+        let params = serde_json::from_str(params_str).unwrap_or_else(|_| {
+            // If not valid JSON, use as single parameter
+            json!({ "input": params_str })
+        });
+        
+        let start = Instant::now();
+        
+        // Execute tool
+        let output = if let Some(tool) = self.tool_registry.get(tool_name) {
+            tool.execute(params).await
+        } else {
+            return Ok(AgentResponse {
+                content: format!("❌ Unknown tool: `{}`\n\nUse `/tool` to list available tools.", tool_name),
+                primary_agent: 0,
+                council_used: false,
+                confidence: 0.0,
+                skills_used: vec![],
+                joulework_contributions: HashMap::new(),
+                processing_time_ms: 0,
+            });
+        };
+        
+        let content = if output.success {
+            format!("✅ **Tool Result: {}**\n\n{}", tool_name, output.result)
+        } else {
+            format!("❌ **Tool Error: {}**\n\n{}", tool_name, output.error.unwrap_or_else(|| "Unknown error".to_string()))
+        };
+        
+        Ok(AgentResponse {
+            content,
+            primary_agent: 0,
+            council_used: false,
+            confidence: if output.success { 0.9 } else { 0.0 },
+            skills_used: vec![tool_name.to_string()],
+            joulework_contributions: HashMap::new(),
+            processing_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+    
+    /// Extract file path from message content
+    fn extract_file_path(&self, content: &str) -> Option<String> {
+        // Look for common file path patterns
+        let patterns = [
+            r"(?:file|path|document)[\s:]+([\w./\\~]+\.\w+)",
+            r"(?:from|in|at)[\s:]+([\w./\\~]+\.\w+)",
+        ];
+        
+        for pattern in &patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                if let Some(caps) = re.captures(content) {
+                    if let Some(path) = caps.get(1) {
+                        let path_str = path.as_str();
+                        // Verify it looks like a file path
+                        if path_str.contains('.') || path_str.starts_with('/') || path_str.starts_with("./") {
+                            return Some(path_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: look for words that look like paths
+        for word in content.split_whitespace() {
+            if (word.contains('/') || word.contains("\\")) && word.contains('.') {
+                return Some(word.to_string());
+            }
+        }
+        
+        None
+    }
+    
+    /// Extract query from message content
+    fn extract_query(&self, content: &str) -> String {
+        // Remove file paths and common filler words
+        let without_paths: String = content
+            .split_whitespace()
+            .filter(|w| !(w.contains('/') || w.contains("\\")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        
+        // Extract action words
+        let actions = ["summarize", "analyze", "extract", "find", "process", "read"];
+        let lower = without_paths.to_lowercase();
+        
+        for action in &actions {
+            if lower.contains(action) {
+                // Return from the action word onwards
+                if let Some(pos) = lower.find(action) {
+                    return without_paths[pos..].to_string();
+                }
+            }
+        }
+        
+        // Default query
+        "Analyze this document".to_string()
     }
     
     /// Process message using council deliberation with automatic mode selection
@@ -840,7 +1246,11 @@ impl EnhancedPersonalAgent {
         // Create handler that uses the channel
         let handler = ChannelMessageHandler { sender: tx };
         gateway.on_message(handler);
+        
         gateway.start().await?;
+        
+        // Store gateway to keep it alive (critical fix!)
+        self.gateway = Some(gateway);
         
         Ok(rx)
     }

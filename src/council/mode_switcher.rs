@@ -20,6 +20,9 @@ pub enum CouncilMode {
     /// LLM-powered deliberation with genuine agent reasoning
     /// (higher quality, increased latency)
     LLMDeliberation,
+    /// Ralph Loop - fresh context iteration with worker-reviewer split
+    /// Best for coding tasks requiring iterative refinement
+    Ralph,
 }
 
 /// Configuration for mode selection thresholds
@@ -65,7 +68,7 @@ impl Default for ModeConfig {
 pub struct ModeSwitcher {
     config: ModeConfig,
     history: VecDeque<ModeSwitchEvent>,
-    effectiveness_scores: [f64; 4], // Debate, Orchestrate, Simple, LLMDeliberation
+    effectiveness_scores: [f64; 5], // Debate, Orchestrate, Simple, LLMDeliberation, Ralph
 }
 
 /// Per-mode score breakdown used for runtime visualization and debugging.
@@ -109,7 +112,7 @@ impl ModeSwitcher {
         Self {
             config,
             history: VecDeque::new(),
-            effectiveness_scores: [0.75, 0.75, 0.75, 0.75], // Start with neutral scores
+            effectiveness_scores: [0.75, 0.75, 0.75, 0.75, 0.75], // Start with neutral scores
         }
     }
 
@@ -371,12 +374,13 @@ impl ModeSwitcher {
                     CouncilMode::Orchestrate => 1,
                     CouncilMode::Simple => 2,
                     CouncilMode::LLMDeliberation => 3,
+                    CouncilMode::Ralph => 4,
                 };
                 mode_scores[idx].push(score);
             }
         }
 
-        for i in 0..4 {
+        for i in 0..5 {
             if !mode_scores[i].is_empty() {
                 let avg: f64 = mode_scores[i].iter().sum::<f64>() / mode_scores[i].len() as f64;
                 // Smooth update with exponential moving average
@@ -386,7 +390,7 @@ impl ModeSwitcher {
     }
 
     /// Get current effectiveness scores for each mode
-    pub fn effectiveness_scores(&self) -> &[f64; 4] {
+    pub fn effectiveness_scores(&self) -> &[f64; 5] {
         &self.effectiveness_scores
     }
 

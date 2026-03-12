@@ -58,8 +58,6 @@ impl RealTelegramBot {
 
         let config = self.config.clone();
 
-        info!("Starting Telegram bot...");
-
         // Build the dispatcher with handler
         let dispatch_handler = dptree::entry()
             .branch(Update::filter_message().endpoint(handle_telegram_message));
@@ -234,12 +232,6 @@ async fn handle_telegram_message(
         attachments: vec![],
         reply_to: msg.reply_to_message().map(|m| m.id.0.to_string()),
     };
-
-    debug!(
-        user = %gateway_msg.user_name,
-        content = %gateway_msg.content,
-        "Telegram message received"
-    );
 
     // Show typing indicator
     let _ = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await;

@@ -17,6 +17,7 @@ pub mod debate;
 pub mod llm_deliberation;
 pub mod mode_switcher;
 pub mod orchestrate;
+pub mod ralph;
 pub mod simple;
 pub mod trace_summarizer;
 
@@ -28,6 +29,10 @@ pub use mode_switcher::{
     CouncilMode, ModeConfig, ModeScoreBreakdown, ModeSelectionReport, ModeSwitchEvent, ModeSwitcher,
 };
 pub use orchestrate::{Command, OrchestratorCouncil, SubTask};
+pub use ralph::{
+    AgentConfig, RalphConfig, RalphCouncil, RalphIteration, RalphState, RalphVerdict,
+    RalphVerdict as RalphDecision,
+};
 pub use simple::{SimpleCouncil, Vote};
 pub use trace_summarizer::{TraceSummarizer, TraceSummary, TraceBullet};
 
@@ -272,6 +277,7 @@ pub struct Council {
     orchestrate_instance: Option<OrchestratorCouncil>,
     simple_instance: Option<SimpleCouncil>,
     llm_instance: Option<llm_deliberation::LLMDebateCouncil>,
+    ralph_instance: Option<ralph::RalphCouncil>,
 }
 
 impl Council {
@@ -287,6 +293,7 @@ impl Council {
             orchestrate_instance: None,
             simple_instance: None,
             llm_instance: None,
+            ralph_instance: None,
         };
 
         match mode {
@@ -303,6 +310,10 @@ impl Council {
                 let config = llm_deliberation::LLMDeliberationConfig::default();
                 council.llm_instance =
                     Some(llm_deliberation::LLMDebateCouncil::new(id, members, config));
+            }
+            CouncilMode::Ralph => {
+                let config = ralph::RalphConfig::default();
+                council.ralph_instance = Some(ralph::RalphCouncil::new(id, config));
             }
         }
 
@@ -327,6 +338,7 @@ impl Council {
             orchestrate_instance: None,
             simple_instance: None,
             llm_instance: None,
+            ralph_instance: None,
         };
 
         match mode {
@@ -343,6 +355,10 @@ impl Council {
                 council.llm_instance = Some(llm_deliberation::LLMDebateCouncil::new(
                     id, members, llm_config,
                 ));
+            }
+            CouncilMode::Ralph => {
+                let config = ralph::RalphConfig::default();
+                council.ralph_instance = Some(ralph::RalphCouncil::new(id, config));
             }
         }
 
@@ -380,6 +396,15 @@ impl Council {
                     anyhow::bail!("LLM deliberation council not initialized")
                 }
             }
+            CouncilMode::Ralph => {
+                if let Some(ralph) = &mut self.ralph_instance {
+                    let task = &self.proposal.description;
+                    let (_, decision) = ralph.execute(task).await?;
+                    Ok(decision)
+                } else {
+                    anyhow::bail!("Ralph council not initialized")
+                }
+            }
         }
     }
 
@@ -406,6 +431,13 @@ impl Council {
                 .as_ref()
                 .map(|l| l.status())
                 .unwrap_or(CouncilStatus::NotStarted),
+            CouncilMode::Ralph => {
+                // Ralph council doesn't have a status method, infer from state
+                CouncilStatus::InProgress {
+                    step: "ralph_loop".to_string(),
+                    progress_pct: 0.5,
+                }
+            }
         }
     }
 }

@@ -6528,6 +6528,7 @@ impl App {
                 CouncilMode::Debate => "debate".to_string(),
                 CouncilMode::Orchestrate => "orchestrate".to_string(),
                 CouncilMode::LLMDeliberation => "llm".to_string(),
+                CouncilMode::Ralph => "ralph".to_string(),
             };
             return (mode, Some(report));
         }

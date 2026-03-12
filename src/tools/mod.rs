@@ -108,6 +108,10 @@ pub use flags_tools::{
     CreateFlagTool, CheckFlagTool, UpdateRolloutTool, EmergencyRollbackTool, FlagStatsTool, get_flag_tools,
 };
 
+// RLM tools
+pub mod rlm_tool;
+pub use rlm_tool::{RlmProcessTool, RlmTrajectoryTool};
+
 /// Tool trait - all tools implement this
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
@@ -291,4 +295,8 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(TextDiffTool::new()));
     registry.register(Arc::new(RegexExtractTool::new()));
     registry.register(Arc::new(TemplateTool::new()));
+    
+    // RLM tools
+    registry.register(Arc::new(RlmProcessTool::new()));
+    registry.register(Arc::new(RlmTrajectoryTool::new()));
 }
