@@ -39,15 +39,52 @@ pub struct OllamaConfig {
 impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
-            host: "http://localhost".to_string(),
-            port: 11434,
-            model: "hf.co/mradermacher/Llama-3.3-8B-Instruct-heretic-i1-GGUF:Q5_K_M".to_string(),
-            latency_budget_ms: 60000, // 60 seconds for first load
+            host: std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string()),
+            port: std::env::var("OLLAMA_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(11434),
+            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "auto".to_string()),
+            latency_budget_ms: 60000,
             enable_batching: false,
             batch_size: 4,
             batch_timeout_ms: 100,
             temperature: 0.7,
             max_tokens: 1024,
+        }
+    }
+}
+
+impl OllamaConfig {
+    /// Detect the best available model from Ollama.
+    /// Preference order: env OLLAMA_MODEL > largest installed model > "llama3.2" fallback.
+    pub async fn detect_model(host: &str, port: u16) -> String {
+        // If user explicitly set a model, use it
+        if let Ok(model) = std::env::var("OLLAMA_MODEL") {
+            if model != "auto" {
+                return model;
+            }
+        }
+
+        // Query Ollama for installed models
+        let url = format!("{}:{}/api/tags", host, port);
+        match reqwest::get(&url).await {
+            Ok(resp) => {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
+                        if !models.is_empty() {
+                            // Pick the first available model
+                            if let Some(name) = models[0].get("name").and_then(|n| n.as_str()) {
+                                eprintln!("[HSM-II] Auto-detected Ollama model: {}", name);
+                                return name.to_string();
+                            }
+                        }
+                    }
+                }
+                eprintln!("[HSM-II] No models found in Ollama. Run: ollama pull llama3.2");
+                "llama3.2".to_string()
+            }
+            Err(_) => {
+                eprintln!("[HSM-II] Cannot reach Ollama at {}:{}. Is it running?", host, port);
+                "llama3.2".to_string()
+            }
         }
     }
 }

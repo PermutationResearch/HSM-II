@@ -190,8 +190,12 @@ impl EnhancedPersonalAgent {
             (world, config)
         };
         
-        // Initialize LLM
-        let llm = OllamaClient::new(OllamaConfig::default());
+        // Initialize LLM with auto-detected model
+        let mut llm_config = OllamaConfig::default();
+        if llm_config.model == "auto" {
+            llm_config.model = OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
+        }
+        let llm = OllamaClient::new(llm_config);
         
         // Check Ollama availability
         let ollama_ready = llm.check_available().await;

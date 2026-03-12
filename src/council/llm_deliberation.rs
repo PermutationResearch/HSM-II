@@ -223,9 +223,11 @@ pub struct LLMDeliberationConfig {
 impl Default for LLMDeliberationConfig {
     fn default() -> Self {
         Self {
-            model: "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
-                .to_string(),
-            endpoint: "http://localhost:11434".to_string(),
+            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "auto".to_string()),
+            endpoint: format!("{}:{}",
+                std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string()),
+                std::env::var("OLLAMA_PORT").unwrap_or_else(|_| "11434".to_string()),
+            ),
             temperature: 0.7,
             max_tokens: 500,
             debate_rounds: 2,
@@ -656,6 +658,29 @@ impl LLMDebateCouncil {
         use reqwest::Client;
         use serde_json::json;
 
+        // Auto-detect model if set to "auto"
+        let model = if self.config.model == "auto" {
+            let tags_url = format!("{}/api/tags", self.config.endpoint);
+            match reqwest::get(&tags_url).await {
+                Ok(resp) => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        json.get("models")
+                            .and_then(|m| m.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|m| m.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("llama3.2")
+                            .to_string()
+                    } else {
+                        "llama3.2".to_string()
+                    }
+                }
+                Err(_) => "llama3.2".to_string(),
+            }
+        } else {
+            self.config.model.clone()
+        };
+
         let mut builder = Client::builder();
         if self.config.timeout_secs > 0 {
             builder = builder.timeout(std::time::Duration::from_secs(self.config.timeout_secs));
@@ -665,7 +690,7 @@ impl LLMDebateCouncil {
         let url = format!("{}/api/generate", self.config.endpoint);
 
         let request_body = json!({
-            "model": self.config.model,
+            "model": model,
             "prompt": prompt,
             "stream": false,
             "options": {

@@ -62,8 +62,11 @@ impl PersonalAgent {
         let memory = PersonalMemory::load(&base_path).await?;
         let heartbeat = Heartbeat::load(&base_path).await?;
 
-        // Initialize LLM client
-        let llm_config = OllamaConfig::default();
+        // Initialize LLM client with auto-detected model
+        let mut llm_config = OllamaConfig::default();
+        if llm_config.model == "auto" {
+            llm_config.model = OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
+        }
         let llm = OllamaClient::new(llm_config);
 
         // Check if Ollama is available (non-blocking)
@@ -106,8 +109,11 @@ impl PersonalAgent {
         let memory = PersonalMemory::bootstrap(&base_path).await?;
         let heartbeat = Heartbeat::default();
 
-        // Initialize LLM client
-        let llm_config = OllamaConfig::default();
+        // Initialize LLM client with auto-detected model
+        let mut llm_config = OllamaConfig::default();
+        if llm_config.model == "auto" {
+            llm_config.model = OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
+        }
         let llm = OllamaClient::new(llm_config);
 
         tracing::info!("New PersonalAgent created: {}", persona.name);
