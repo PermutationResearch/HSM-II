@@ -5,12 +5,7 @@
 
 > **Where swarms of AI agents think together, learn from each other, and grow smarter over time.**
 
-HSM-II is a **federated multi-agent hypergraph system** that brings emergent collective intelligence to life. Built in Rust, it combines:
-
-🧠 **Hypergraph Memory** — A living knowledge web where agents leave "trails" (stigmergy) for others to follow  
-⚖️ **Councils That Actually Deliberate** — Dynamic agent assemblies that debate, vote, and decide collectively  
-🎓 **Self-Improving Skills** — Agents distill and share what they learn, like a hive mind getting smarter  
-🌐 **Federated Trust** — Multiple HSM-II instances that sync, negotiate, and resolve conflicts
+HSM-II is a **federated multi-agent hypergraph system** that brings emergent collective intelligence to life. Built in Rust, it enables autonomous AI agents to coordinate without central control, learn from collective experience, and solve complex problems through shared knowledge structures.
 
 Think of it as *ants solving problems through pheromone trails* — except the ants are LLM-powered agents, the trails are hypergraph edges, and the colony learns to code, research, and coordinate autonomously.
 
@@ -74,94 +69,191 @@ Your AI companion with built-in coordination capabilities.
 
 ---
 
-## 🏗️ Architecture
+## 🧠 What HSM-II Does
+
+### Shared Memory Through Hypergraphs
+
+HSM-II stores knowledge as a **hypergraph** — a web where edges can connect multiple nodes at once. Agents read and write to this shared structure:
+
+- **Beliefs** — What agents think about the world
+- **Hyperedges** — Connections between multiple beliefs (emergent insights)
+- **Ontological Tags** — Categories for organizing knowledge
+- **Visibility Scopes** — Local, Shared, or Restricted access levels
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         HSM-II System                           │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │   Agents    │  │   Council   │  │    CASS (Skills)        │ │
-│  │  ┌───────┐  │  │  ┌───────┐  │  │  ┌─────────────────┐    │ │
-│  │  │Roles  │  │  │  │Debate │  │  │  │Skill Learning   │    │ │
-│  │  │Drives │  │  │  │Vote   │  │  │  │Distillation     │    │ │
-│  │  │Coherence│ │  │  │Evidence│ │  │  │Versioning       │    │ │
-│  │  └───────┘  │  │  └───────┘  │  │  └─────────────────┘    │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-│         │                │                    │                 │
-│         └────────────────┼────────────────────┘                 │
-│                          ▼                                      │
-│              ┌─────────────────────┐                            │
-│              │   Stigmergic Field  │                            │
-│              │  (Hypergraph State) │                            │
-│              └─────────────────────┘                            │
-│                          │                                      │
-│         ┌────────────────┼────────────────┐                     │
-│         ▼                ▼                ▼                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
-│  │    DKS      │  │   Social    │  │   Federation│             │
-│  │(Distributed │  │   Memory    │  │   (Multi-   │             │
-│  │ Knowledge)  │  │ (Promises,  │  │   Node)     │             │
-│  │             │  │ Reputation) │  │             │             │
-│  └─────────────┘  └─────────────┘  └─────────────┘             │
-└─────────────────────────────────────────────────────────────────┘
+Agent A ──believes──► "Neural networks are effective"
+                           │
+                           │ (hyperedge)
+                           ▼
+Agent B ──believes──► "For image classification" ◄───believes─── Agent C
+                           │
+                           │ (hyperedge)
+                           ▼
+                    "But require lots of data"
+```
+
+### Stigmergic Coordination
+
+Like ants leaving pheromone trails, agents leave "trails" in the hypergraph:
+
+1. **Agent solves a problem** → Creates/updates beliefs
+2. **Other agents detect changes** → Read the updated structure
+3. **Collective learning emerges** → No direct communication needed
+
+### Multi-Agent Council Deliberation
+
+When decisions matter, agents form **Councils**:
+
+| Mode | Use Case | How It Works |
+|------|----------|--------------|
+| **Simple** | Low complexity, high urgency | Single agent decides with coherence check |
+| **Orchestrate** | Medium complexity | Leader agent coordinates specialists |
+| **Debate** | High complexity, high stakes | Full deliberation with evidence and voting |
+
+Councils use **evidence contracts** — agents must provide proof for their positions.
+
+---
+
+## 🎓 Continuous Learning & Skill Improvement
+
+### CASS: Continuous Automated Skill Synthesis
+
+HSM-II doesn't just execute tasks — it **learns from them**:
+
+1. **Harvest** — Successful agent trajectories are captured
+2. **Distill** — Common patterns become reusable skills
+3. **Promote** — Skills pass through consensus jury validation
+4. **Version** — Skills evolve with semantic versioning
+
+### DKS: Distributed Knowledge System
+
+Knowledge spreads through the agent population like genetic evolution:
+
+- **Selection Pressure** — Better-performing knowledge survives
+- **Replication** — Successful patterns spread to other agents
+- **Mutation** — Variations are tested and rewarded
+- **Flux** — Knowledge flows between local and shared scopes
+
+---
+
+## 🌐 Federation & Multi-Node Coordination
+
+Multiple HSM-II instances can connect and form a **federation**:
+
+- **Trust Dynamics** — Bayesian trust scoring between nodes
+- **Conflict Resolution** — When beliefs diverge, councils negotiate
+- **Knowledge Sync** — Selective merging of hypergraph structures
+- **Anti-fragile** — The system improves under stress
+
+```
+┌─────────────┐      Trust Edges      ┌─────────────┐
+│  HSM-II     │◄─────────────────────►│  HSM-II     │
+│  Node A     │    (confidence: 0.85) │  Node B     │
+│  (Toronto)  │                       │  (London)   │
+└─────────────┘                       └─────────────┘
+       │                                     │
+       │         ┌─────────────┐             │
+       └────────►│  HSM-II     │◄────────────┘
+                 │  Node C     │
+                 │  (Tokyo)    │
+                 └─────────────┘
 ```
 
 ---
 
-## ✨ Key Features
+## 🛠️ Built-In Tool Suite (62+ Tools)
 
-### 🧠 Core Systems
+Agents come with real-world capabilities out of the box:
 
-| System | Description |
-|--------|-------------|
-| **Hypergraph Engine** | Stigmergic morphogenesis through environmental markers |
-| **Agent System** | Role-based agents with coherence scoring |
-| **Council System** | Multi-agent debate, evidence-based voting, mode switching |
-| **CASS** | Continuous Automated Skill Synthesis - learn and distill skills |
-| **Social Memory** | Promise tracking, reputation, capability evidence |
-| **DKS** | Distributed Knowledge System with selection pressure |
+| Category | What Agents Can Do |
+|----------|-------------------|
+| **Web & Browser** | Search, scrape, automate browsers, read PDFs |
+| **File Operations** | Read, write, search, analyze any file type |
+| **Shell & System** | Execute commands, gather system info |
+| **Git Operations** | Clone, commit, diff, blame, search repositories |
+| **APIs & Data** | HTTP requests, JSON parsing, encoding/decoding |
+| **Calculations** | Math, statistics, unit conversions |
+| **Text Processing** | Regex, parsing, formatting, diffing |
 
-### 🛠️ Tools (57 Real Implementations)
+Tools are **real implementations**, not mocks. Agents can actually modify files, browse websites, and run commands.
 
-| Category | Tools |
-|----------|-------|
-| Web/Browser | Web search, browser automation, scraping |
-| File Operations | Read, write, search, analyze files |
-| Shell/System | Execute commands, system info |
-| Git | Clone, commit, diff, blame, search |
-| API/Data | HTTP requests, JSON parsing, encoding |
-| Calculations | Math, statistics, unit conversion |
-| Text Processing | Regex, parsing, formatting |
+---
 
-### 🤖 LLM Integration
+## 🤖 LLM Integration & Provider Failover
 
-- **OpenAI** (GPT-4o, GPT-4o-mini)
-- **Anthropic** (Claude models)
-- **Ollama** (local models)
-- **Automatic failover** between providers
-- **Health monitoring** and retry logic
+HSM-II works with multiple LLM providers with automatic failover:
 
-### 🔐 Security & Auth
+- **OpenAI** — GPT-4o, GPT-4o-mini
+- **Anthropic** — Claude 3.5 Sonnet, Claude 3 Opus
+- **Ollama** — Local models (Llama, Mistral, etc.)
 
-- API key management with Argon2 hashing
-- JWT tokens with 24h expiry
-- Rate limiting per key
-- Permission-based access control
+If one provider fails, the system automatically switches to another. No single point of failure.
+
+---
+
+## 🔐 Security & Access Control
+
+- **API Key Management** — Argon2-hashed, revocable keys
+- **JWT Authentication** — 24-hour expiring tokens
+- **Rate Limiting** — Per-key quota enforcement
+- **Permission Levels** — Read, Write, Admin access control
+
+---
+
+## 🏗️ System Architecture
+
+```
+╔═══════════════════════════════════════════════════════════════════════╗
+║                         HSM-II SYSTEM                                 ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║                                                                       ║
+║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                ║
+║  │    AGENTS    │  │   COUNCIL    │  │     CASS     │                ║
+║  │              │  │              │  │   (Skills)   │                ║
+║  │ • Roles      │  │ • Debate     │  │              │                ║
+║  │ • Drives     │  │ • Vote       │  │ • Harvest    │                ║
+║  │ • Coherence  │  │ • Evidence   │  │ • Distill    │                ║
+║  │ • Beliefs    │  │ • Decide     │  │ • Promote    │                ║
+║  └──────────────┘  └──────────────┘  └──────────────┘                ║
+║         │                 │                 │                         ║
+║         └─────────────────┼─────────────────┘                         ║
+║                           ▼                                           ║
+║              ┌──────────────────────────┐                            ║
+║              │   HYPERGRAPH MEMORY      │                            ║
+║              │   (Stigmergic Field)     │                            ║
+║              │                          │                            ║
+║              │ • Nodes (beliefs)        │                            ║
+║              │ • Hyperedges (emergent)  │                            ║
+║              │ • Ontological tags       │                            ║
+║              │ • Visibility scopes      │                            ║
+║              └──────────────────────────┘                            ║
+║                           │                                           ║
+║         ┌─────────────────┼─────────────────┐                         ║
+║         ▼                 ▼                 ▼                         ║
+║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                ║
+║  │     DKS      │  │    SOCIAL    │  │  FEDERATION  │                ║
+║  │              │  │    MEMORY    │  │              │                ║
+║  │ • Selection  │  │              │  │ • Trust      │                ║
+║  │ • Replication│  │ • Promises   │  │ • Conflict   │                ║
+║  │ • Mutation   │  │ • Reputation │  │ • Sync       │                ║
+║  │ • Flux       │  │ • Evidence   │  │ • Consensus  │                ║
+║  └──────────────┘  └──────────────┘  └──────────────┘                ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+```
 
 ---
 
 ## 📚 Documentation
 
-| Document | Description |
-|----------|-------------|
-| [EASY_START.md](docs/guides/EASY_START.md) | Getting started guide |
-| [DEPLOYMENT.md](docs/guides/DEPLOYMENT.md) | Production deployment |
-| [COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md) | CLI commands reference |
-| [IMPLEMENTATION_STATUS.md](docs/reports/IMPLEMENTATION_STATUS.md) | Feature completeness |
-| [ANTIFRAGILE_ARCHITECTURE.md](docs/architecture/ANTIFRAGILE_ARCHITECTURE.md) | Architecture deep-dive |
-| [PERSONAL_AGENT_README.md](docs/guides/PERSONAL_AGENT_README.md) | Personal agent guide |
-| [HERMES_INTEGRATION.md](docs/integrations/HERMES_INTEGRATION.md) | Hermes bridge docs |
+| Document | What You'll Learn |
+|----------|-------------------|
+| [EASY_START.md](docs/guides/EASY_START.md) | Get running in 5 minutes |
+| [DEPLOYMENT.md](docs/guides/DEPLOYMENT.md) | Production deployment guide |
+| [COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md) | CLI reference |
+| [ANTIFRAGILE_ARCHITECTURE.md](docs/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
+| [PERSONAL_AGENT_README.md](docs/guides/PERSONAL_AGENT_README.md) | Your AI companion |
+| [HERMES_INTEGRATION.md](docs/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |
 
 ---
 
@@ -186,6 +278,20 @@ Services:
 
 ---
 
+## 📊 Observability & Metrics
+
+HSM-II exposes Prometheus metrics for monitoring:
+
+| Metric | What It Tracks |
+|--------|---------------|
+| `hsm_coherence_growth` | Agent synchronization over time |
+| `hsm_llm_requests_total` | LLM API call volume |
+| `hsm_council_decisions_total` | Council voting patterns |
+| `hsm_skills_harvested` | Skills learned from experience |
+| `hsm_promises_kept_total` / `hsm_promises_broken_total` | Social memory integrity |
+
+---
+
 ## 🧪 Testing
 
 ```bash
@@ -204,36 +310,29 @@ RUST_LOG=debug cargo test
 ## 📁 Project Structure
 
 ```
-hyper-stigmergy/
-├── src/
-│   ├── bin/                 # Executables
-│   │   ├── personal_agent.rs
-│   │   ├── hypergraphd.rs
-│   │   └── ...
-│   ├── agent_core/          # Agent runtime
-│   ├── council/             # Council decision-making
-│   ├── tools/               # 57 tool implementations
-│   ├── llm/                 # LLM client & providers
-│   ├── dks/                 # Distributed knowledge
-│   ├── cass/                # Skill learning
-│   ├── federation/          # Multi-node federation
-│   ├── gateways/            # Discord, Telegram, etc.
-│   └── ...
-├── hermes-bridge/           # Hermes integration
-├── scripts/                 # Python analysis scripts
-├── static/                  # Web UI
-├── config/                  # Prometheus/Grafana config
-├── tests/                   # Integration tests
-├── Cargo.toml
-├── docker-compose.yml
-└── Dockerfile
+HSM-II/
+├── src/                    Core Rust implementation
+│   ├── agent_core/         Agent runtime & lifecycle
+│   ├── council/            Deliberation & voting
+│   ├── tools/              62+ tool implementations
+│   ├── llm/                LLM clients & failover
+│   ├── dks/                Distributed knowledge
+│   ├── cass/               Skill learning
+│   ├── federation/         Multi-node coordination
+│   └── gateways/           Discord, web, etc.
+├── docs/                   Documentation
+├── integrations/hermes/    Hermes Agent bridge
+├── ops/                    Prometheus, Grafana, CI/CD
+├── tools/                  Scripts & visual-explainer
+├── web/                    Web UI & visualization
+└── tests/                  Integration tests
 ```
 
 ---
 
-## 🤝 Integration: Hermes Bridge
+## 🤝 Hermes Agent Integration
 
-HSM-II includes a bridge to [Hermes Agent](https://github.com/NousResearch/hermes-agent) (by [NousResearch](https://github.com/NousResearch)) for extended capabilities:
+HSM-II bridges to [Hermes Agent](https://github.com/NousResearch/hermes-agent) (by [NousResearch](https://github.com/NousResearch)) for extended capabilities:
 
 ```rust
 use hermes_bridge::HermesClientBuilder;
@@ -245,35 +344,19 @@ let client = HermesClientBuilder::new()
 let result = client.web_search("AI agents").await?;
 ```
 
-See [hermes-bridge/README.md](hermes-bridge/README.md) for details.
-
----
-
-## 📊 Metrics & Observability
-
-Prometheus metrics available at `:9000/metrics`:
-
-- `hsm_http_requests_total` - HTTP requests
-- `hsm_llm_requests_total` - LLM API calls
-- `hsm_llm_latency_milliseconds` - LLM response times
-- `hsm_tool_executions_total` - Tool usage
-- `hsm_failures_total` - Failed operations
-- `hsm_promises_kept_total` / `hsm_promises_broken_total` - Promise tracking
-
 ---
 
 ## 🛣️ Roadmap
 
-- [x] Core hypergraph engine
+- [x] Core hypergraph memory engine
 - [x] Multi-agent council system
-- [x] 57 real tools
-- [x] Multi-provider LLM integration
+- [x] 62+ real tools
+- [x] Multi-provider LLM with failover
 - [x] Docker deployment
-- [x] Discord gateway
-- [ ] Telegram/Slack gateways
+- [x] Hermes Agent integration
 - [ ] Vector database integration
 - [ ] Job queue/scheduler
-- [ ] Advanced web UI
+- [ ] Advanced web dashboard
 
 ---
 
@@ -288,13 +371,6 @@ MIT License - see [LICENSE](LICENSE)
 - Inspired by biological morphogenesis and stigmergic coordination in social insects
 - Built with [Rust](https://rust-lang.org) and [Tokio](https://tokio.rs)
 - Uses [Ollama](https://ollama.ai) for local inference
-
----
-
-## 💬 Support
-
-- Issues: [GitHub Issues](https://github.com/PermutationResearch/hyper-stigmergy/issues)
-- Discussions: [GitHub Discussions](https://github.com/PermutationResearch/hyper-stigmergy/discussions)
 
 ---
 
