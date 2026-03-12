@@ -43,6 +43,8 @@ visual-explainer/output/
 training/
 lars/
 paper.tex
+paper/
+fig_*.pdf
 
 # Test scripts output
 test_output/
