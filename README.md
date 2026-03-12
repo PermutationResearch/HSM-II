@@ -3,9 +3,18 @@
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**A self-organizing multi-agent system with stigmergic coordination, inspired by biological morphogenesis and collective intelligence.**
+> **Where swarms of AI agents think together, learn from each other, and grow smarter over time.**
 
-HSM-II enables autonomous AI agents to coordinate through environmental markers (stigmergy), form dynamic councils for collective decision-making, and continuously improve through skill distillation.
+HSM-II is a **federated multi-agent hypergraph system** that brings emergent collective intelligence to life. Built in Rust, it combines:
+
+🧠 **Hypergraph Memory** — A living knowledge web where agents leave "trails" (stigmergy) for others to follow  
+⚖️ **Councils That Actually Deliberate** — Dynamic agent assemblies that debate, vote, and decide collectively  
+🎓 **Self-Improving Skills** — Agents distill and share what they learn, like a hive mind getting smarter  
+🌐 **Federated Trust** — Multiple HSM-II instances that sync, negotiate, and resolve conflicts
+
+Think of it as *ants solving problems through pheromone trails* — except the ants are LLM-powered agents, the trails are hypergraph edges, and the colony learns to code, research, and coordinate autonomously.
+
+**[📄 Read the Paper](https://github.com/PermutationResearch/HSM-II/blob/main/paper.pdf)** | **[🚀 Quick Start](#-quick-start)** | **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)**
 
 ---
 
@@ -23,8 +32,8 @@ HSM-II enables autonomous AI agents to coordinate through environmental markers 
 
 ```bash
 # Clone the repository
-git clone https://github.com/PermutationResearch/hyper-stigmergy.git
-cd hyper-stigmergy
+git clone https://github.com/PermutationResearch/HSM-II.git
+cd HSM-II
 
 # Configure environment
 cp .env.example .env
