@@ -120,8 +120,8 @@ echo ""
 export HSM_API_HOST=127.0.0.1
 export HSM_API_PORT=9000
 echo -e "${CYAN}  ✓  API target: http://127.0.0.1:9000${RESET}"
-echo -e "${DIM}  Start UI proxy with: open-hypergraphd.command${RESET}"
-echo -e "${DIM}  Start personal agent with: run-personal-agent.command${RESET}"
+echo -e "${DIM}  Start UI proxy with: scripts/macos/open-hypergraphd.command${RESET}"
+echo -e "${DIM}  Start personal agent with: scripts/macos/run-personal-agent.command${RESET}"
 echo ""
 
 cargo run --release -- --headless --roodb 127.0.0.1:3307

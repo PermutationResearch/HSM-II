@@ -14,7 +14,7 @@ echo "  HSM-II Studio Launcher"
 echo "========================================="
 echo ""
 
-# Make sure hypergraphd knows how to reach RooDB created by run-hyper-stigmergy-II.command.
+# Make sure hypergraphd knows how to reach RooDB created by scripts/macos/run-hyper-stigmergy-II.command.
 export HSM_ROODB_URL="127.0.0.1:3307"
 export HSM_ROODB="127.0.0.1:3307"
 

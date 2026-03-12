@@ -26,6 +26,12 @@ secrets/
 /logs/
 /vault/secrets/
 
+# Generated JSON data
+hyper_graph.json
+
+# Test markers
+.sandbox_test_ok
+
 # =============================================================================
 # Generated outputs
 # =============================================================================
@@ -37,6 +43,9 @@ visual-explainer/output/
 training/
 lars/
 paper.tex
+
+# Test scripts output
+test_output/
 
 # =============================================================================
 # Certificates (security)

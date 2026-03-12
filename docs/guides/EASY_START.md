@@ -8,29 +8,29 @@
 
 ### Option 1: Just the Personal Agent (Easiest)
 ```bash
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 ```
 That's it. No other setup needed.
 
 ### Option 2: Personal Agent + Visualization
 ```bash
 # Terminal 1: Start your AI companion
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # Terminal 2: See what it's thinking
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 ### Option 3: Full Stack (Research + Personal + Viz)
 ```bash
 # Terminal 1: Start research backend
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Terminal 2: Personal agent (connects to backend)
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # Browser: Visualization
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 ---
@@ -49,20 +49,20 @@ That's it. No other setup needed.
 
 ```bash
 # 1. First time only - setup
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 # → "What's your name?"
 # → "What are your goals?"
 # → "Choose personality..."
 
 # 2. Daily use - just chat
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 Ash> Help me research stigmergy
 
 # 3. The agent does the work using HSM-II internally
 [Spawns subagents → Coordinates → Returns results]
 
 # 4. (Optional) Watch it work
-./open-hypergraphd.command  # See the hypergraph in browser
+./scripts/macos/open-hypergraphd.command  # See the hypergraph in browser
 ```
 
 ---
@@ -70,7 +70,7 @@ Ash> Help me research stigmergy
 ## Example Session
 
 ```bash
-$ ./run-personal-agent.command
+$ ./scripts/macos/run-personal-agent.command
 
 🌱 Welcome to HSM-II Personal Agent
 Let's set up your AI companion...
@@ -117,10 +117,10 @@ The personal agent **can** connect to your existing HSM-II setup:
 
 ```bash
 # If you already run this:
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # The personal agent can use it:
-./run-personal-agent.command --connect-hypergraph
+./scripts/macos/run-personal-agent.command --connect-hypergraph
 
 # Benefits:
 # - Uses same database
@@ -137,13 +137,13 @@ But it also works **standalone** if you just want a personal AI.
 
 ```bash
 # Personal agent (NEW - easiest way to use HSM-II)
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # Traditional research mode (unchanged)
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Visualization (unchanged)
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 
 # Manual CLI commands
 cargo run --bin personal_agent -- start
@@ -161,8 +161,8 @@ A: No! `run-personal-agent.command` works standalone. The backend is optional.
 **Q: Can I use the visualization with the personal agent?**  
 A: Yes! Start both:
 ```bash
-./run-personal-agent.command   # Terminal 1
-./open-hypergraphd.command     # Terminal 2
+./scripts/macos/run-personal-agent.command   # Terminal 1
+./scripts/macos/open-hypergraphd.command     # Terminal 2
 ```
 
 **Q: What if I was using HSM-II for research?**  
@@ -175,6 +175,6 @@ A: Yes! Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 
 ## One-Liner Summary
 
-> `./run-personal-agent.command` = Easiest way to use HSM-II as your AI companion
+> `./scripts/macos/run-personal-agent.command` = Easiest way to use HSM-II as your AI companion
 
 The research and visualization commands still work exactly as before. The personal agent is a **new, easier layer** on top.

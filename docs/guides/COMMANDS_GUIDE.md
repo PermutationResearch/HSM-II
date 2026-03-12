@@ -58,7 +58,7 @@ HSM-II now operates in **three distinct modes**:
 
 ```bash
 # Start research backend
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Then in another terminal, run experiments
 cargo run --release --bin batch_experiment -- 100 1000
@@ -88,7 +88,7 @@ cargo run --release --bin batch_experiment -- 100 1000
 
 ```bash
 # Open visualization (requires backend running)
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 
 # Or manually open
 open viz/index.html
@@ -119,7 +119,7 @@ open viz/index.html
 
 ```bash
 # Start personal agent (interactive)
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # Or with specific options
 cargo run --release --bin personal_agent -- start --discord
@@ -176,13 +176,13 @@ Visualization Mode
 
 ```bash
 # 1. Start backend
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # 2. In another terminal, run experiments
 cargo run --release --bin batch_experiment -- 50 500
 
 # 3. Visualize
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 
 # 4. Analyze results
 python scripts/plot_results.py
@@ -192,29 +192,29 @@ python scripts/plot_results.py
 
 ```bash
 # 1. First-time setup
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 # → "What's your name?"
 # → "Choose personality..."
 
 # 2. Daily use
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 Ash> Research quantum computing advances
 
 # 3. Daemon mode (24/7)
-./run-personal-agent.command --daemon --discord
+./scripts/macos/run-personal-agent.command --daemon --discord
 ```
 
 ### Workflow C: Combined (Research + Assistant)
 
 ```bash
 # Terminal 1: Start backend for both
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Terminal 2: Use personal agent (connects to same backend)
 cargo run --release --bin personal_agent -- start
 
 # Browser: Visualize what's happening
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 ---
@@ -225,25 +225,25 @@ If you've been using `run-hyper-stigmergy-II.command`:
 
 ### Your existing workflow still works:
 ```bash
-./run-hyper-stigmergy-II.command  # Unchanged
-./open-hypergraphd.command         # Unchanged
+./scripts/macos/run-hyper-stigmergy-II.command  # Unchanged
+./scripts/macos/open-hypergraphd.command         # Unchanged
 ```
 
 ### New option available:
 ```bash
-./run-personal-agent.command       # NEW - Try it!
+./scripts/macos/run-personal-agent.command       # NEW - Try it!
 ```
 
 ### They can run together:
 ```bash
 # Tab 1: Research backend
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Tab 2: Personal agent (uses same backend)
 cargo run --release --bin personal_agent -- start
 
 # Tab 3: Visualization
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 ---
@@ -254,7 +254,7 @@ cargo run --release --bin personal_agent -- start
 
 ```bash
 # Just want an AI assistant?
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # That's it. You'll be guided through setup.
 ```
@@ -263,10 +263,10 @@ cargo run --release --bin personal_agent -- start
 
 ```bash
 # Keep using what you know
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # But also try the new personal agent
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 ```
 
 ---

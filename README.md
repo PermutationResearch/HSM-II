@@ -16,6 +16,8 @@ HSM-II enables autonomous AI agents to coordinate through environmental markers 
 - [Rust](https://rustup.rs/) 1.75+ 
 - Docker (optional, for containerized deployment)
 - API key for OpenAI, Anthropic, or local Ollama
+- **macOS users**: Use the `.command` scripts in `scripts/macos/`
+- **Linux users**: Use equivalent `cargo run` commands (see [docs/guides/COMMANDS_GUIDE.md](docs/guides/COMMANDS_GUIDE.md))
 
 ### Installation
 
@@ -36,29 +38,29 @@ cargo run --release
 
 #### 1. Personal Agent (Easiest)
 ```bash
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 ```
 Your AI companion with built-in coordination capabilities.
 
 #### 2. With Visualization
 ```bash
 # Terminal 1: Personal agent
-./run-personal-agent.command
+./scripts/macos/run-personal-agent.command
 
 # Terminal 2: Visual hypergraph
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 #### 3. Full Research Stack
 ```bash
 # Terminal 1: Research backend
-./run-hyper-stigmergy-II.command
+./scripts/macos/run-hyper-stigmergy-II.command
 
 # Terminal 2: Personal agent
-./run-personal-agent.command --connect-hypergraph
+./scripts/macos/run-personal-agent.command --connect-hypergraph
 
 # Browser: View hypergraph
-./open-hypergraphd.command
+./scripts/macos/open-hypergraphd.command
 ```
 
 ---
