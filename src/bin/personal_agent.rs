@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 use hyper_stigmergy::personal::{
-    gateway, hsmii_home, EnhancedPersonalAgent, EnhancedAgentConfig,
+    gateway, hsmii_home, EnhancedPersonalAgent,
 };
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use std::sync::Arc;
@@ -168,9 +168,12 @@ async fn main() -> Result<()> {
 
 /// Start the agent
 async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) -> Result<()> {
-    // Check if initialized
-    if !home.join("SOUL.md").exists() {
-        println!("Agent not initialized. Run `hsmii bootstrap` first.");
+    // Check if initialized (LadybugDB format)
+    let initialized = hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() 
+        || home.join("config.json").exists();
+    
+    if !initialized {
+        println!("Enhanced agent not initialized. Run `hsmii bootstrap` first.");
         return Ok(());
     }
 
@@ -179,10 +182,14 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
 
     println!("🚀 Starting Enhanced HSM-II Personal Agent");
     println!("   Agents: {}", agent.world.agents.len());
+    for (i, a) in agent.world.agents.iter().enumerate() {
+        let jw = a.calculate_jw(agent.world.global_coherence(), 3);
+        println!("     {}. {:?} (JW: {:.3})", i + 1, a.role, jw);
+    }
     println!("   Coherence: {:.3}", agent.world.global_coherence());
-    println!("   Council: {}", if agent.config.enable_council { "enabled" } else { "disabled" });
-    println!("   CASS: {}", if agent.config.enable_cass { "enabled" } else { "disabled" });
-    println!("   LadybugDB: active\n");
+    println!("   Council: {}", if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" });
+    println!("   CASS: {}", if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" });
+    println!("   LadybugDB: ✓ active\n");
 
     // Setup gateway if requested
     let mut msg_rx = None;
@@ -248,7 +255,16 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
             }
         });
 
-        println!("Agent is running. Press Ctrl+C to stop.");
+        println!("✓ Agent is running in daemon mode");
+        if telegram {
+            println!("  Telegram bot: active (polling for messages)");
+        }
+        if discord {
+            println!("  Discord bot: active");
+        }
+        println!("  DKS evolution: every 60s");
+        println!("  Auto-save: enabled\n");
+        println!("Press Ctrl+C to stop.");
 
         // Wait for shutdown signal
         tokio::signal::ctrl_c().await?;
@@ -502,15 +518,21 @@ async fn cmd_bootstrap(home: &PathBuf) -> Result<()> {
 
     println!("🌱 Bootstrapping Enhanced HSM-II Personal Agent\n");
     
-    let agent = EnhancedPersonalAgent::initialize(home).await?;
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
     
-    println!("✨ Created {} agents:", agent.world.agents.len());
+    // Calculate initial JW scores for display
+    let coherence = agent.world.global_coherence();
+    println!("✨ Created {} agents (coherence: {:.3}):", agent.world.agents.len(), coherence);
     for (i, agent_info) in agent.world.agents.iter().enumerate() {
+        let jw = agent_info.calculate_jw(coherence, 3);
         println!("  {}. {:?} - JW: {:.3}", 
-            i + 1, agent_info.role, agent_info.jw);
+            i + 1, agent_info.role, jw);
     }
     
-    println!("\n✓ LadybugDB initialized");
+    // Save the initial world state
+    agent.save().await?;
+    
+    println!("\n✓ LadybugDB initialized and saved");
     println!("✓ CASS skill system ready");
     println!("✓ Council deliberation enabled");
     println!("✓ DKS evolution active");

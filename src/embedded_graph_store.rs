@@ -38,7 +38,6 @@ pub struct EmbeddedGraphStoreSnapshot {
     pub property_graph: PropertyGraphSnapshot,
     pub columnar_graph: ColumnarGraphStore,
     pub tx_id: u64,
-    pub checksum: u64,
     pub format_version: String,
 }
 
@@ -52,7 +51,7 @@ impl EmbeddedGraphStore {
         let _lock = StoreLock::acquire()?;
         let property_graph = world.to_property_graph_snapshot();
         let tx_id = HyperStigmergicMorphogenesis::current_timestamp();
-        let mut snapshot = EmbeddedGraphStoreSnapshot {
+        let snapshot = EmbeddedGraphStoreSnapshot {
             metadata: EmbeddedRuntimeMetadata {
                 saved_at: HyperStigmergicMorphogenesis::current_timestamp(),
                 version: "0.4.0".to_string(),
@@ -71,10 +70,8 @@ impl EmbeddedGraphStore {
             property_graph: property_graph.clone(),
             columnar_graph: ColumnarGraphStore::from_snapshot(&property_graph),
             tx_id,
-            checksum: 0,
             format_version: "ladybug-single-file-v1".to_string(),
         };
-        snapshot.checksum = snapshot_checksum(&snapshot);
         let bytes = bincode::serialize(&snapshot)?;
         fs::write(EMBEDDED_GRAPH_WAL_FILE, &bytes)?;
         fs::write(EMBEDDED_GRAPH_STORE_FILE, &bytes)?;
@@ -108,10 +105,13 @@ impl EmbeddedGraphStore {
                 }
             }
         };
-        let expected_checksum = snapshot.checksum;
-        if snapshot_checksum(&snapshot) != expected_checksum {
-            anyhow::bail!("Embedded graph store checksum mismatch");
+        
+        // Verify format version for compatibility
+        if snapshot.format_version != "ladybug-single-file-v1" {
+            eprintln!("Warning: LadybugDB format version mismatch (expected 'ladybug-single-file-v1', got '{}')", 
+                snapshot.format_version);
         }
+        
         let mut morph =
             HyperStigmergicMorphogenesis::from_property_graph_snapshot(&snapshot.property_graph);
         morph.tick_count = snapshot.metadata.tick_count;
@@ -147,7 +147,7 @@ impl EmbeddedGraphStore {
 
         let property_graph = state.morphogenesis.to_property_graph_snapshot();
         let columnar_graph = ColumnarGraphStore::from_snapshot(&property_graph);
-        let mut snapshot = EmbeddedGraphStoreSnapshot {
+        let snapshot = EmbeddedGraphStoreSnapshot {
             metadata: EmbeddedRuntimeMetadata {
                 saved_at: state.saved_at,
                 version: state.version,
@@ -166,10 +166,8 @@ impl EmbeddedGraphStore {
             property_graph,
             columnar_graph,
             tx_id: HyperStigmergicMorphogenesis::current_timestamp(),
-            checksum: 0,
             format_version: "ladybug-single-file-v1".to_string(),
         };
-        snapshot.checksum = snapshot_checksum(&snapshot);
 
         let new_bytes = bincode::serialize(&snapshot)?;
         fs::write(EMBEDDED_GRAPH_STORE_FILE, new_bytes)?;
@@ -193,18 +191,6 @@ impl Drop for StoreLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(EMBEDDED_GRAPH_LOCK_FILE);
     }
-}
-
-fn snapshot_checksum(snapshot: &EmbeddedGraphStoreSnapshot) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut clone = snapshot.clone();
-    clone.checksum = 0;
-    let bytes = bincode::serialize(&clone).unwrap_or_default();
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]

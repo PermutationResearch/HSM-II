@@ -698,7 +698,9 @@ impl HyperStigmergicMorphogenesis {
         world.delegation_frames.clear();
 
         for node in &snapshot.nodes {
-            if node.labels.iter().any(|l| l == "Agent") {
+            // Load actual agents (has "Agent" label but NOT "Vertex" label)
+            // Vertex_meta entries with kind=Agent have both labels, so we skip them here
+            if node.labels.iter().any(|l| l == "Agent") && !node.labels.iter().any(|l| l == "Vertex") {
                 let agent_id = get_int(&node.properties, "agent_id").unwrap_or(0) as u64;
                 let mut agent = Agent::new(
                     agent_id,

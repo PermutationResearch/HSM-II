@@ -10,27 +10,25 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, RwLock};
-use tracing::{error, info, warn};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{info, warn};
 use async_trait::async_trait;
 
 use crate::{
-    CASS, Council, CouncilDecision, CouncilMember, CouncilMode, Proposal,
-    DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis, InMemoryEmbeddingIndex,
-    EmbeddedGraphStore, Action, AgentId, Role, Drives,
-    cass::{ContextSnapshot, embedding::{EmbeddingEngine, SkillEmbedding}},
-    council::{CouncilEvidence, CouncilEvidenceKind, Proposal as CouncilProposal, StigmergicCouncilContext, Decision},
+    CASS, Council, CouncilMember, CouncilMode, Proposal,
+    DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis,
+    EmbeddedGraphStore, AgentId, Role,
+    cass::{ContextSnapshot, embedding::EmbeddingEngine},
+    council::{CouncilEvidence, CouncilEvidenceKind, StigmergicCouncilContext, Decision},
     personal::gateway::{Message, Platform},
     tools::ToolRegistry,
     ollama_client::{OllamaClient, OllamaConfig},
 };
-use crate::hyper_stigmergy::{VertexKind, HyperEdge, Belief, BeliefSource};
+use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource};
 
 /// Configuration for the enhanced agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
