@@ -222,7 +222,7 @@ hyper-stigmergy/
 
 ## 🤝 Integration: Hermes Bridge
 
-HSM-II includes a bridge to [Hermes Agent](https://github.com/PermutationResearch/hermes) for extended capabilities:
+HSM-II includes a bridge to [Hermes Agent](https://github.com/NousResearch/hermes-agent) (by [NousResearch](https://github.com/NousResearch)) for extended capabilities:
 
 ```rust
 use hermes_bridge::HermesClientBuilder;

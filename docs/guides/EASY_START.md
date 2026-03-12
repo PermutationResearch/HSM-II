@@ -169,7 +169,7 @@ A: Yes! Start both:
 A: Keep using `run-hyper-stigmergy-II.command`. The personal agent is a new option, not a replacement.
 
 **Q: Is this like Hermes?**  
-A: Yes! Inspired by Hermes Agent but powered by HSM-II's advanced coordination.
+A: Yes! Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent) but powered by HSM-II's advanced coordination.
 
 ---
 

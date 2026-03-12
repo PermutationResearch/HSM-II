@@ -1,6 +1,7 @@
 //! Hermes Bridge - Integration between HSM-II and Hermes Agent
 //!
-//! This crate provides a bridge between HSM-II (Rust) and Hermes Agent (Python),
+//! This crate provides a bridge between HSM-II (Rust) and
+//! [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Python),
 //! enabling HSM-II to leverage Hermes's tool ecosystem, persistent memory,
 //! and multi-platform gateways.
 

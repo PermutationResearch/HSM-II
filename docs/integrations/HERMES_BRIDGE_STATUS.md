@@ -1,7 +1,7 @@
 # Hermes Bridge Integration Status
 
 ## Overview
-The hermes-bridge crate provides integration between HSM-II (Rust) and Hermes Agent (Python),
+The hermes-bridge crate provides integration between HSM-II (Rust) and [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Python),
 enabling HSM-II to leverage Hermes's tool ecosystem, persistent memory, and multi-platform gateways.
 
 ## Architecture

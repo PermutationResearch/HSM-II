@@ -1,6 +1,6 @@
 # Hermes Bridge for HSM-II
 
-Bridge between Hyper-Stigmergic Morphogenesis II (Rust) and Hermes Agent (Python).
+Bridge between Hyper-Stigmergic Morphogenesis II (Rust) and [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Python) by [NousResearch](https://github.com/NousResearch).
 
 ## Quick Start
 

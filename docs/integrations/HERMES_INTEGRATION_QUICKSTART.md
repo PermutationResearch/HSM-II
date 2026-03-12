@@ -1,6 +1,6 @@
 # Hermes Integration Quickstart
 
-This guide gets you running with Hermes Agent integration in HSM-II in 5 minutes.
+This guide gets you running with [Hermes Agent](https://github.com/NousResearch/hermes-agent) integration in HSM-II in 5 minutes.
 
 ## Prerequisites
 

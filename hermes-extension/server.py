@@ -1,7 +1,7 @@
 """
 Hermes Extension Server for HSM-II Integration
 
-This FastAPI server extends Hermes Agent with endpoints for HSM-II communication,
+This FastAPI server extends [Hermes Agent](https://github.com/NousResearch/hermes-agent) with endpoints for HSM-II communication,
 enabling the Rust-based HSM-II system to leverage Hermes's tool ecosystem.
 """
 
