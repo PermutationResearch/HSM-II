@@ -1,0 +1,12 @@
+{
+  "sources": [
+    {
+      "name": "sample_jsonl",
+      "type": "jsonl",
+      "path": "training/data/manifest.sample.jsonl",
+      "text_a": "text_a",
+      "text_b": "text_b",
+      "label": "label"
+    }
+  ]
+}

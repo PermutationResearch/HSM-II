@@ -1,0 +1,43 @@
+cascade_id: agent_health
+description: |
+  Semantic agent health report: scores each agent's description for
+  stability, curiosity-harmony balance, and growth trajectory.
+
+cells:
+  - name: agent_data
+    type: sql_data
+    tool_inputs:
+      query: |
+        SELECT
+          a.agent_id,
+          a.role,
+          a.description,
+          ROUND(a.curiosity, 3)      AS curiosity,
+          ROUND(a.harmony, 3)        AS harmony,
+          ROUND(a.growth, 3)         AS growth,
+          ROUND(a.transcendence, 3)  AS transcendence,
+          ROUND(a.learning_rate, 4)  AS learning_rate,
+          ROUND(a.bid_bias, 3)       AS bid_bias,
+          -- Semantic health score
+          ASK('Rate the stability of this agent description from 0.0 to 1.0. Return only the number.', a.description) AS stability_score,
+          -- Semantic role fit
+          ASK('Does this description match the role ' || a.role || '? Answer yes or no.', a.description) AS role_fit
+        FROM hyper_stigmergy.agents a
+        WHERE a.snapshot_id = (SELECT MAX(snapshot_id) FROM hyper_stigmergy.agents)
+        ORDER BY a.agent_id
+
+  - name: health_report
+    instructions: |
+      You are analyzing the health of agents in a self-evolving hypergraph system.
+
+      Agent data with semantic scores:
+      {{ outputs.agent_data }}
+
+      Produce a concise health report covering:
+      - Which agents are most/least stable
+      - Role-fit anomalies (agents acting outside their archetype)
+      - Drive imbalances (curiosity vs harmony extremes)
+      - Agents most likely to benefit from a bid-bias adjustment
+      - Overall population health assessment
+    context:
+      from: [agent_data]

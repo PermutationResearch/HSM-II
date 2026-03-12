@@ -1,0 +1,233 @@
+<think>
+Okay, I need to create an HTML file based on the user's provided template that visualizes the architecture of their agent system. The user has given specific rules, so I should follow them carefully.
+
+First, I'll start by understanding the structure of the existing HTML and CSS. The original code includes a Mermaid diagram for network automation and several sections with inner grids and callouts. My task is to adapt this into an architecture visualization, focusing on their agent system.
+
+I notice that the user wants a complete, self-contained HTML file. So I'll need to include all styles inline within a <style> tag. The color palette should be adapted using the provided colors, but I can choose appropriate shades for better readability and aesthetics.
+
+The user mentioned supporting both light and dark themes using `prefers-color-scheme`. I'll add that media query to switch between color schemes. Subtle animations and hover effects will enhance the user experience, so I'll define CSS transitions for elements like source pills and callouts.
+
+For responsiveness, I'll ensure the layout adjusts on smaller screens, especially for mobile devices. The inner grid might change its column count at lower resolutions to maintain readability without clutter.
+
+Looking at the sections, I need to structure them using the provided classes. The sources can be styled as rounded pills with appropriate colors and hover effects. Callouts should have a recessed background to stand out as secondary information.
+
+I'll also consider adding Mermaid.js for the architecture diagram. Since it's not included in the original code, I'll include it via CDN. This way, the diagram is interactive and user-friendly.
+
+In the pipeline section, I'll adjust the steps to reflect the agent system's flow, ensuring each step is clearly visible with appropriate colors and spacing. The legend will help users understand different components quickly.
+
+Finally, I'll test the design for responsiveness and ensure all elements are visually appealing and functional across devices.
+</think>
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture of Our Agent System</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mermaid/9.7.5/mermin.js">
+    <style>
+        :root {
+            --primary: #4CAF50;
+            --secondary: #2196F3;
+            --accent: #FFC107;
+            --dark-primary: #121212;
+            --light-bg: #f8f9fa;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            background-color: var(--light-bg);
+        }
+
+        h1, .section-label {
+            color: var(--dark-primary);
+        }
+
+        .diagram {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* Sources styling */
+        .sources {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .source {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background-color: white;
+            color: var(--dark-primary);
+            transition: all 0.2s;
+        }
+
+        .source:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        /* Callout styling */
+        .callout {
+            background-color: white;
+            border-radius: 15px;
+            padding: 16px;
+            margin-top: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        /* Pipeline steps styling */
+        .pipeline-step {
+            background-color: white;
+            border-radius: 10px;
+            padding: 12px;
+            margin: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .inner-grid {
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            }
+            
+            .three-col {
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            }
+        }
+
+        /* Dark theme */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: var(--dark-bg);
+                color: white;
+            }
+            
+            .source:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 -1px 6px rgba(255,255,255,0.1);
+            }
+        }
+    </style>
+</head>
+<body>
+
+<h1>System Architecture of Our Agent System</h1>
+<p class="subtitle">Reference template &mdash; architecture diagram pattern</p>
+
+<div class="diagram">
+    <!-- Input Sources -->
+    <div class="section section--hero" style="--i:0">
+        <div class="section-label"><span class="dot"></span> Input Sources</div>
+        <div class="sources">
+            <div class="source">💬 Slack</div>
+            <div class="source">🐙 GitHub</div>
+            <div class="source">📧 Email</div>
+        </div>
+    </div>
+
+    <!-- Flow arrow -->
+    <div class="flow-arrow" style="--i:1">
+        <svg viewBox="0 0 20 20"><path d="M10 4 L10 16 M6 12 L10 16 L14 12"/></svg>
+        incoming events
+    </div>
+
+    <!-- Gateway Layer -->
+    <div class="section section--accent" style="--i:2">
+        <div class="section-label"><span class="dot"></span> Gateway Layer</div>
+        <div class="inner-grid">
+            <div class="inner-card">
+                <div class="title">Router</div>
+                <div class="desc">Routes messages to agents via resolveRoute()</div>
+            </div>
+            <div class="inner-card">
+                <div class="title">HTTP Server</div>
+                <div class="desc">Plugin routes + handlers for webhooks and API</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flow arrow -->
+    <div class="flow-arrow" style="--i:3">
+        <svg viewBox="0 0 20 20"><path d="M10 4 L10 16 M6 12 L10 16 L14 12"/></svg>
+        pipeline entry
+    </div>
+
+    <!-- Processing Pipeline -->
+    <div class="section section--green" style="--i:4">
+        <div class="section-label"><span class="dot"></span> Processing Pipeline</div>
+        <div class="legend" style="margin-bottom:14px">
+            <div class="legend-item"><div class="legend-swatch" style="background:var(--teal-dim);border:1px solid var(--teal)"></div>no LLM</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:var(--sage-dim);border:1px solid var(--sage)"></div>LLM call</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:var(--orange-dim);border:1px solid var(--orange)"></div>embedding</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:var(--green-dim);border:1px solid var(--green)"></div>DB write</div>
+        </div>
+        <div class="pipeline">
+            <div class="pipeline-step pipeline-step--teal">
+                <div class="step-num">STEP 0</div>
+                <div class="step-name">Pre-filter</div>
+                <div class="step-detail">Allowlist, bots,<br>dedup check</div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-step pipeline-step--sage">
+                <div class="step-num">STEP 1</div>
+                <div class="step-name">Relevance</div>
+                <div class="step-detail">Cheap LLM<br>boolean check</div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-step pipeline-step--sage">
+                <div class="step-num">STEP 2</div>
+                <div class="step-name">Classify</div>
+                <div class="step-detail">JSON schema<br>validated output</div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-parallel">
+                <div class="pipeline-step pipeline-step--orange">
+                    <div class="step-num">STEP 3</div>
+                    <div class="step-name">Embed</div>
+                    <div class="step-detail">Vector embedding</div>
+                </div>
+                <div class="pipeline-step pipeline-step--teal">
+                    <div class="step-num">STEP 5</div>
+                    <div class="step-name">Enrich</div>
+                    <div class="step-detail">User resolution</div>
+                </div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-step pipeline-step--green">
+                <div class="step-num">STEP 4</div>
+                <div class="step-name">Normalize</div>
+                <div class="step-detail">Data normalization</div>
+            </div>
+            <div class="pipeline-arrow">→</div>
+            <div class="pipeline-step pipeline-step--green">
+                <div class="step-num">STEP 5</div>
+                <div class="step-name">Store</div>
+                <div class="step-detail">Data storage</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flow arrow -->
+    <div class="flow-arrow" style="--i:6">
+        <svg viewBox="0 0 20 20"><path d="M10 4 L10 16 M6 12 L10 16 L14 12"/></svg>
+        events stored
+    </div>
+
+    <!-- Callout -->
+    <div class="callout" style="--i:7">
+        <h3>Callouts</h3>
+        <p>📦 API Gateway (Cloud-based)</p>
+        <p>🛠️ Message Queue (Async Processing)</p>
+        <p>🗺️ Database (PostgreSQL/NoSQL)</p>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/9.7.5/mermin.js"></script>
+</body>
+</html>
+```

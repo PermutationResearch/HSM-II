@@ -1,0 +1,219 @@
+use std::fs;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::columnar_engine::ColumnarGraphStore;
+use crate::embedding_index::InMemoryEmbeddingIndex;
+use crate::hyper_stigmergy::{HyperStigmergicMorphogenesis, ImprovementEvent};
+use crate::property_graph::PropertyGraphSnapshot;
+use crate::social_memory::SocialMemory;
+
+pub const EMBEDDED_GRAPH_STORE_FILE: &str = "world_state.ladybug.bincode";
+pub const EMBEDDED_GRAPH_WAL_FILE: &str = "world_state.ladybug.wal.bincode";
+pub const EMBEDDED_GRAPH_LOCK_FILE: &str = "world_state.ladybug.lock";
+pub const LEGACY_WORLD_STATE_FILE: &str = "world_state.bincode";
+pub const LEGACY_EMBEDDING_INDEX_FILE: &str = "embedding_index.bincode";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddedRuntimeMetadata {
+    pub saved_at: u64,
+    pub version: String,
+    pub tick_count: u64,
+    pub decay_rate: f64,
+    pub prev_coherence: f64,
+    pub improvement_history: Vec<ImprovementEvent>,
+    pub current_intent: Option<String>,
+    pub avoid_hints: Vec<String>,
+    pub social_memory: SocialMemory,
+    pub skill_bank: crate::skill::SkillBank,
+    pub federation_config: Option<crate::federation::types::FederationConfig>,
+    pub rlm_state: Option<crate::rlm::RLMState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddedGraphStoreSnapshot {
+    pub metadata: EmbeddedRuntimeMetadata,
+    pub embedding_index: InMemoryEmbeddingIndex,
+    pub property_graph: PropertyGraphSnapshot,
+    pub columnar_graph: ColumnarGraphStore,
+    pub tx_id: u64,
+    pub checksum: u64,
+    pub format_version: String,
+}
+
+pub struct EmbeddedGraphStore;
+
+impl EmbeddedGraphStore {
+    pub fn save_world(
+        world: &HyperStigmergicMorphogenesis,
+        rlm_state: Option<&crate::rlm::RLMState>,
+    ) -> anyhow::Result<usize> {
+        let _lock = StoreLock::acquire()?;
+        let property_graph = world.to_property_graph_snapshot();
+        let tx_id = HyperStigmergicMorphogenesis::current_timestamp();
+        let mut snapshot = EmbeddedGraphStoreSnapshot {
+            metadata: EmbeddedRuntimeMetadata {
+                saved_at: HyperStigmergicMorphogenesis::current_timestamp(),
+                version: "0.4.0".to_string(),
+                tick_count: world.tick_count,
+                decay_rate: world.decay_rate,
+                prev_coherence: world.prev_coherence,
+                improvement_history: world.improvement_history.clone(),
+                current_intent: world.current_intent.clone(),
+                avoid_hints: world.avoid_hints.clone(),
+                social_memory: world.social_memory.clone(),
+                skill_bank: world.skill_bank.clone(),
+                federation_config: world.federation_config.clone(),
+                rlm_state: rlm_state.cloned(),
+            },
+            embedding_index: world.embedding_index.clone(),
+            property_graph: property_graph.clone(),
+            columnar_graph: ColumnarGraphStore::from_snapshot(&property_graph),
+            tx_id,
+            checksum: 0,
+            format_version: "ladybug-single-file-v1".to_string(),
+        };
+        snapshot.checksum = snapshot_checksum(&snapshot);
+        let bytes = bincode::serialize(&snapshot)?;
+        fs::write(EMBEDDED_GRAPH_WAL_FILE, &bytes)?;
+        fs::write(EMBEDDED_GRAPH_STORE_FILE, &bytes)?;
+        let _ = fs::remove_file(EMBEDDED_GRAPH_WAL_FILE);
+        Ok(bytes.len())
+    }
+
+    pub fn load_world(
+    ) -> anyhow::Result<(HyperStigmergicMorphogenesis, Option<crate::rlm::RLMState>)> {
+        let bytes = match fs::read(EMBEDDED_GRAPH_STORE_FILE) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
+                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
+                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
+                    wal_bytes
+                } else {
+                    return Err(err.into());
+                }
+            }
+        };
+        let snapshot: EmbeddedGraphStoreSnapshot = match bincode::deserialize(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(main_err) => {
+                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
+                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
+                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
+                    bincode::deserialize(&wal_bytes)?
+                } else {
+                    return Err(main_err.into());
+                }
+            }
+        };
+        let expected_checksum = snapshot.checksum;
+        if snapshot_checksum(&snapshot) != expected_checksum {
+            anyhow::bail!("Embedded graph store checksum mismatch");
+        }
+        let mut morph =
+            HyperStigmergicMorphogenesis::from_property_graph_snapshot(&snapshot.property_graph);
+        morph.tick_count = snapshot.metadata.tick_count;
+        morph.decay_rate = snapshot.metadata.decay_rate;
+        morph.prev_coherence = snapshot.metadata.prev_coherence;
+        morph.improvement_history = snapshot.metadata.improvement_history.clone();
+        morph.current_intent = snapshot.metadata.current_intent.clone();
+        morph.avoid_hints = snapshot.metadata.avoid_hints.clone();
+        morph.social_memory = snapshot.metadata.social_memory.clone();
+        morph.skill_bank = snapshot.metadata.skill_bank.clone();
+        morph.federation_config = snapshot.metadata.federation_config.clone();
+        morph.embedding_index = snapshot.embedding_index;
+        Ok((morph, snapshot.metadata.rlm_state))
+    }
+
+    pub fn exists() -> bool {
+        Path::new(EMBEDDED_GRAPH_STORE_FILE).exists() || Path::new(EMBEDDED_GRAPH_WAL_FILE).exists()
+    }
+
+    pub fn migrate_legacy_files() -> anyhow::Result<bool> {
+        if Self::exists() || !Path::new(LEGACY_WORLD_STATE_FILE).exists() {
+            return Ok(false);
+        }
+
+        let bytes = fs::read(LEGACY_WORLD_STATE_FILE)?;
+        let state: crate::hyper_stigmergy::SystemState = bincode::deserialize(&bytes)?;
+        let embedding_index = if Path::new(LEGACY_EMBEDDING_INDEX_FILE).exists() {
+            let index_bytes = fs::read(LEGACY_EMBEDDING_INDEX_FILE)?;
+            bincode::deserialize(&index_bytes).unwrap_or_default()
+        } else {
+            InMemoryEmbeddingIndex::default()
+        };
+
+        let property_graph = state.morphogenesis.to_property_graph_snapshot();
+        let columnar_graph = ColumnarGraphStore::from_snapshot(&property_graph);
+        let mut snapshot = EmbeddedGraphStoreSnapshot {
+            metadata: EmbeddedRuntimeMetadata {
+                saved_at: state.saved_at,
+                version: state.version,
+                tick_count: state.morphogenesis.tick_count,
+                decay_rate: state.morphogenesis.decay_rate,
+                prev_coherence: state.morphogenesis.prev_coherence,
+                improvement_history: state.morphogenesis.improvement_history.clone(),
+                current_intent: state.morphogenesis.current_intent.clone(),
+                avoid_hints: state.morphogenesis.avoid_hints.clone(),
+                social_memory: state.morphogenesis.social_memory.clone(),
+                skill_bank: state.morphogenesis.skill_bank.clone(),
+                federation_config: state.morphogenesis.federation_config.clone(),
+                rlm_state: state.rlm_state,
+            },
+            embedding_index,
+            property_graph,
+            columnar_graph,
+            tx_id: HyperStigmergicMorphogenesis::current_timestamp(),
+            checksum: 0,
+            format_version: "ladybug-single-file-v1".to_string(),
+        };
+        snapshot.checksum = snapshot_checksum(&snapshot);
+
+        let new_bytes = bincode::serialize(&snapshot)?;
+        fs::write(EMBEDDED_GRAPH_STORE_FILE, new_bytes)?;
+        Ok(true)
+    }
+}
+
+struct StoreLock;
+
+impl StoreLock {
+    fn acquire() -> anyhow::Result<Self> {
+        if Path::new(EMBEDDED_GRAPH_LOCK_FILE).exists() {
+            anyhow::bail!("Embedded graph store is already locked");
+        }
+        fs::write(EMBEDDED_GRAPH_LOCK_FILE, b"locked")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(EMBEDDED_GRAPH_LOCK_FILE);
+    }
+}
+
+fn snapshot_checksum(snapshot: &EmbeddedGraphStoreSnapshot) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut clone = snapshot.clone();
+    clone.checksum = 0;
+    let bytes = bincode::serialize(&clone).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_store_filename_is_single_file() {
+        assert!(EMBEDDED_GRAPH_STORE_FILE.ends_with(".bincode"));
+        assert!(EMBEDDED_GRAPH_STORE_FILE.contains("ladybug"));
+    }
+}

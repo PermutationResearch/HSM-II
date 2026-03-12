@@ -1,0 +1,138 @@
+# HSM-II Production Deployment
+# Usage: docker-compose up -d
+
+version: '3.8'
+
+services:
+  hsm-ii:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hsm-ii:latest
+    container_name: hsm-ii
+    restart: unless-stopped
+    
+    ports:
+      - "8080:8080"  # HTTP API
+      - "9000:9000"  # Metrics
+    
+    environment:
+      # LLM Configuration (required)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-gpt-4o-mini}
+      
+      # Browser Automation (optional)
+      - BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
+      - BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
+      
+      # Cloudflare (optional)
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
+      - CF_API_TOKEN=${CF_API_TOKEN}
+      
+      # Database (optional - defaults to SQLite)
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///app/data/hsm.db}
+      
+      # Observability
+      - RUST_LOG=${RUST_LOG:-info}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=hsm-ii
+      
+      # HSM Configuration
+      - HSM_DATA_DIR=/app/data
+      - HSM_LOG_DIR=/app/logs
+      - HSM_MODE=${HSM_MODE:-production}
+    
+    volumes:
+      - hsm-data:/app/data
+      - hsm-logs:/app/logs
+      - ./experiments:/app/experiments:rw
+    
+    networks:
+      - hsm-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # Optional: Local Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hsm-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - hsm-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+    # Uncomment to enable GPU support
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hsm-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - hsm-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+  # Optional: Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hsm-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - hsm-network
+
+volumes:
+  hsm-data:
+    driver: local
+  hsm-logs:
+    driver: local
+  ollama-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  hsm-network:
+    driver: bridge

@@ -1,0 +1,135 @@
+{
+  "name": "HSM-II-Training-v1",
+  "description": "Multi-scenario training for Hyper-Stigmergic Morphogenesis II",
+  "version": "1.0.0",
+  
+  "compute": {
+    "gpu_type": "A100",
+    "gpu_count": 1,
+    "memory_required_gb": 40,
+    "disk_required_gb": 100
+  },
+  
+  "training": {
+    "runs_per_scenario": 50,
+    "ticks_per_run": 5000,
+    "parallel_runs": 4,
+    "checkpoint_interval_ticks": 500,
+    "seed_range_start": 1000,
+    
+    "scenarios": [
+      {
+        "name": "coding_collaboration",
+        "description": "Multi-agent coding tasks with code review",
+        "agent_count": 15,
+        "focus": ["skill_distillation", "council_decisions"],
+        "enable_dks": true,
+        "enable_federation": true,
+        "enable_llm_deliberation": true,
+        "custom_drive_bias": {
+          "curiosity": 0.8,
+          "harmony": 0.6,
+          "growth": 0.9,
+          "transcendence": 0.7
+        }
+      },
+      {
+        "name": "conflict_resolution",
+        "description": "Agents with contradictory goals learning to resolve",
+        "agent_count": 20,
+        "focus": ["belief_convergence", "ontology_consistency"],
+        "enable_dks": true,
+        "enable_federation": false,
+        "enable_llm_deliberation": true,
+        "adversarial_ratio": 0.3
+      },
+      {
+        "name": "emergent_topology",
+        "description": "Hypergraph structure emergence from local rules",
+        "agent_count": 50,
+        "focus": ["edge_density", "emergent_coverage", "clustering"],
+        "enable_dks": true,
+        "enable_federation": false,
+        "enable_llm_deliberation": false
+      },
+      {
+        "name": "federated_learning",
+        "description": "Multiple federated peers with trust dynamics",
+        "agent_count": 10,
+        "focus": ["trust_graph", "knowledge_federation"],
+        "enable_dks": false,
+        "enable_federation": true,
+        "enable_llm_deliberation": true,
+        "peer_count": 5,
+        "adversarial_peers": 1
+      },
+      {
+        "name": "skill_evolution",
+        "description": "Long-term skill distillation and evolution",
+        "agent_count": 12,
+        "focus": ["skill_bank", "evolution_cycles", "jury_validation"],
+        "enable_dks": true,
+        "enable_federation": false,
+        "enable_llm_deliberation": true,
+        "skill_evolution_interval": 200
+      }
+    ]
+  },
+  
+  "llm": {
+    "provider": "ollama",
+    "host": "localhost",
+    "port": 11434,
+    "models": {
+      "council": "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+      "distillation": "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+      "fallback": "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
+    },
+    "latency_budget_ms": 15000,
+    "temperature": 0.7,
+    "max_tokens": 512,
+    "batch_size": 4,
+    "request_timeout_ms": 30000,
+    "retry_attempts": 3,
+    "cache_arguments": true,
+    "cache_ttl_seconds": 600
+  },
+  
+  "data": {
+    "output_base_dir": "training_data",
+    "export_formats": ["csv", "json", "bincode"],
+    "compression": "zstd",
+    "retention": {
+      "keep_snapshots": true,
+      "snapshot_interval": 100,
+      "max_storage_gb": 50
+    }
+  },
+  
+  "monitoring": {
+    "wandb": {
+      "enabled": true,
+      "project": "hsm-ii-training",
+      "entity": "your-username",
+      "tags": ["multi-scenario", "v1.0"]
+    },
+    "tensorboard": {
+      "enabled": true,
+      "port": 6006
+    },
+    "metrics_interval_seconds": 10,
+    "alert_on": {
+      "coherence_drop_threshold": 0.3,
+      "llm_timeout_rate_threshold": 0.2,
+      "memory_usage_threshold_gb": 35
+    }
+  },
+  
+  "checkpointing": {
+    "enabled": true,
+    "interval_minutes": 30,
+    "keep_last_n": 5,
+    "compression": true,
+    "auto_resume": true
+  }
+}

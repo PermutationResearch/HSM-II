@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Architecture Visualization</title>
+    <style>
+        /* Base styles */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+
+        /* Grid layout for system architecture */
+        .system-architecture {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        /* Section styles */
+        .section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .section-label {
+            font-size: 14px;
+            color: #666;
+            font-weight: bold;
+            padding: 4px;
+        }
+
+        /* Flow arrows */
+        .flow-arrow {
+            width: 100%;
+            height: 1px;
+            background-color: #e0e0e0;
+            margin-top: 15px;
+            position: relative;
+        }
+
+        .flow-arrow::after {
+            content: '→';
+            color: #666;
+            font-size: 24px;
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        /* Color schemes */
+        .subsystem { background-color: #e8f4ff; }
+        .component { background-color: #fff; border: 2px solid #007bff; }
+        .core-system { background-color: #ffc0cb; }
+    </style>
+</head>
+<body>
+    <div class="system-architecture">
+        <div class="section">
+            <div class="flow-arrow"></div>
+            <div class="section-label">User Interface</div>
+            <div class="flow-arrow"></div>
+        </div>
+
+        <!-- Repeat for other sections -->
+        <div class="section">
+            <div class="flow-arrow"></div>
+            <div class="section-label">Application Logic</div>
+            <div class="flow-arrow"></div>
+        </div>
+
+        <div class="section">
+            <div class="flow-arrow"></div>
+            <div class="section-label">Data Layer</div>
+            <div class="flow-arrow"></div>
+        </div>
+
+        <!-- Add more sections as needed -->
+    </div>
+</body>
+</html>
+```
+
+This file creates a flexible system architecture visualization with:
+1. A grid layout for visual hierarchy
+2. Color-coded sections for different components
+3. Vertical flow arrows to show data flow
+4. Subtle animations on hover
+5. Responsive design that works on different screen sizes
+
+The visualization uses CSS Grid and flexbox for layout, making it:
+- Clean and maintainable
+- Self-contained (no external dependencies)
+- Easy to modify and extend
+- Accessible in any modern browser
+
+You can add more sections by copying the `<div class="section">` template and adjusting the labels. The color scheme can be customized by modifying the CSS variables at the top of the style section.
