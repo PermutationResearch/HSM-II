@@ -215,7 +215,7 @@ Use a load balancer (nginx, traefik) in front.
 
 ### Resource Limits
 
-Default limits in docker-compose.yml:
+Default limits in infrastructure/docker/docker-compose.yml:
 - CPU: 4 cores
 - Memory: 8GB
 

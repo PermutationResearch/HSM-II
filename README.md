@@ -9,7 +9,7 @@ HSM-II is a **federated multi-agent hypergraph system** that brings emergent col
 
 Think of it as *ants solving problems through pheromone trails* — except the ants are LLM-powered agents, the trails are hypergraph edges, and the colony learns to code, research, and coordinate autonomously.
 
-**[📄 Read the Paper](./paper.pdf)** | **[🚀 Quick Start](#-quick-start)** | **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)**
+**[📄 Read the Paper](./documentatio./documentation/paper.pdf)** | **[🚀 Quick Start](#-quick-start)** | **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)**
 
 ---
 
