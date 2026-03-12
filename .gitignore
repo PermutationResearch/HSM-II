@@ -129,3 +129,6 @@ __pycache__/
 # =============================================================================
 config/local.*
 config/*.local
+
+# Viz vendor libraries (loaded from CDN)
+viz/vendor/
