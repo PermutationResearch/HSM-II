@@ -216,7 +216,7 @@ pub struct LLMDeliberationConfig {
     pub enable_rebuttals: bool,
     /// Whether to extract key points automatically
     pub extract_key_points: bool,
-    /// Timeout for LLM calls in seconds
+    /// Timeout for LLM calls in seconds (0 = no timeout)
     pub timeout_secs: u64,
 }
 
@@ -231,7 +231,7 @@ impl Default for LLMDeliberationConfig {
             debate_rounds: 2,
             enable_rebuttals: true,
             extract_key_points: true,
-            timeout_secs: 30,
+            timeout_secs: 0, // No timeout - let council deliberation complete
         }
     }
 }
@@ -656,9 +656,11 @@ impl LLMDebateCouncil {
         use reqwest::Client;
         use serde_json::json;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
-            .build()?;
+        let mut builder = Client::builder();
+        if self.config.timeout_secs > 0 {
+            builder = builder.timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        }
+        let client = builder.build()?;
 
         let url = format!("{}/api/generate", self.config.endpoint);
 

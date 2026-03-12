@@ -109,19 +109,16 @@ impl OllamaClient {
                     .num_predict(self.config.max_tokens as i32),
             );
 
-        // Apply timeout based on latency budget
-        let timeout_duration = Duration::from_millis(self.config.latency_budget_ms);
-
-        // Clone Arc for the async block
+        // No timeout - let LLM take as long as it needs
         let ollama = self.ollama.clone();
 
-        let result = match timeout(timeout_duration, async move {
+        let result = match async move {
             let ollama = ollama.lock().await;
             ollama.generate(request).await
-        })
+        }
         .await
         {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 let latency = start.elapsed().as_millis() as u64;
 
                 // Record latency for adaptive budgeting
@@ -135,16 +132,9 @@ impl OllamaClient {
                     timed_out: false,
                 }
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("Ollama error: {}", e);
                 self.fallback_result("Error calling LLM")
-            }
-            Err(_) => {
-                eprintln!(
-                    "LLM call timed out after {}ms",
-                    self.config.latency_budget_ms
-                );
-                self.fallback_result("LLM call timed out")
             }
         };
 
@@ -171,16 +161,16 @@ impl OllamaClient {
 
         let request = ChatMessageRequest::new(self.config.model.clone(), messages);
 
-        let timeout_duration = Duration::from_millis(self.config.latency_budget_ms);
+        // No timeout - let LLM take as long as it needs
         let ollama = self.ollama.clone();
 
-        let result = match timeout(timeout_duration, async move {
+        let result = match async move {
             let ollama = ollama.lock().await;
             ollama.send_chat_messages(request).await
-        })
+        }
         .await
         {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 let latency = start.elapsed().as_millis() as u64;
                 self.record_latency(latency).await;
 
@@ -192,16 +182,9 @@ impl OllamaClient {
                     timed_out: false,
                 }
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("Ollama chat error: {}", e);
                 self.fallback_result("Error calling LLM")
-            }
-            Err(_) => {
-                eprintln!(
-                    "LLM chat call timed out after {}ms",
-                    self.config.latency_budget_ms
-                );
-                self.fallback_result("LLM call timed out")
             }
         };
 

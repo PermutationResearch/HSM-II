@@ -95,26 +95,18 @@ impl ToolRegistry {
             .collect()
     }
     
-    /// Execute a single tool call
+    /// Execute a single tool call (no timeout - let tools complete)
     pub async fn execute(&mut self, call: ToolCall) -> ToolCallResult {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
-        
+
         let output = if let Some(tool) = self.tools.get(&call.name) {
             debug!("Executing tool: {} with params: {:?}", call.name, call.parameters);
-            
-            // Execute with timeout
-            match tokio::time::timeout(self.timeout, tool.execute(call.parameters.clone())).await {
-                Ok(result) => {
-                    self.update_stats(&call.name, result.success, start.elapsed());
-                    result
-                }
-                Err(_) => {
-                    warn!("Tool {} timed out after {:?}", call.name, self.timeout);
-                    self.update_stats(&call.name, false, start.elapsed());
-                    ToolOutput::error(format!("Tool timed out after {}s", self.timeout.as_secs()))
-                }
-            }
+
+            // Execute without timeout
+            let result = tool.execute(call.parameters.clone()).await;
+            self.update_stats(&call.name, result.success, start.elapsed());
+            result
         } else {
             warn!("Tool not found: {}", call.name);
             ToolOutput::error(format!("Tool '{}' not found", call.name))

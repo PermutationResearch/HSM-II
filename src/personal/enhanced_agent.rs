@@ -19,13 +19,15 @@ use tracing::{info, warn};
 use async_trait::async_trait;
 
 use crate::{
-    CASS, Council, CouncilMember, CouncilMode, Proposal,
+    CASS, CouncilMember, Proposal,
     DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis,
     EmbeddedGraphStore, AgentId, Role,
     cass::{ContextSnapshot, embedding::EmbeddingEngine},
-    council::{CouncilEvidence, CouncilEvidenceKind, StigmergicCouncilContext, Decision},
+    council::{CouncilEvidence, CouncilEvidenceKind, CouncilFactory, ModeConfig,
+              StigmergicCouncilContext, Decision},
     personal::gateway::{Message, Platform},
-    tools::ToolRegistry,
+    tools::{ToolRegistry, ToolCall as ToolCallEntry},
+    rlm::LivingPrompt,
     ollama_client::{OllamaClient, OllamaConfig},
 };
 use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource};
@@ -100,6 +102,10 @@ pub struct EnhancedPersonalAgent {
     pub llm: OllamaClient,
     /// Tool registry
     pub tool_registry: ToolRegistry,
+    /// Council factory for automatic mode selection
+    pub council_factory: CouncilFactory,
+    /// RLM Living Prompt for self-evolving system prompt enrichment
+    pub living_prompt: LivingPrompt,
     /// Recent message history
     pub chat_history: Vec<(String, String)>,
     /// Active message contexts
@@ -108,6 +114,8 @@ pub struct EnhancedPersonalAgent {
     pub agent_metrics: AgentMetrics,
     /// Last save timestamp
     pub last_save: Instant,
+    /// Messages since last RLM reflection
+    pub messages_since_reflection: u64,
     /// Gateway message channel
     pub gateway_tx: Option<mpsc::Sender<(Message, oneshot::Sender<String>)>>,
 }
@@ -191,12 +199,22 @@ impl EnhancedPersonalAgent {
         // Initialize tool registry
         let tool_registry = ToolRegistry::with_default_tools();
         info!("Loaded {} tools", tool_registry.list_tools().len());
-        
+
+        // Initialize council factory with automatic mode selection
+        let council_factory = CouncilFactory::new(ModeConfig::default());
+        info!("Council factory initialized with automatic mode selection (Debate/Orchestrate/Simple/LLM)");
+
+        // Initialize RLM LivingPrompt for self-evolving prompt enrichment
+        let living_prompt = LivingPrompt::new(
+            "You are an HSM-II multi-agent system. Use your tools when the user asks you to perform actions like searching, reading files, running commands, or calculations. Respond with a JSON tool call when appropriate.",
+        );
+        info!("RLM LivingPrompt initialized for prompt evolution");
+
         // Load metrics
         let agent_metrics = Self::load_metrics(&base_path).await.unwrap_or_default();
-        
+
         info!("EnhancedPersonalAgent initialized with {} agents", world.agents.len());
-        
+
         Ok(Self {
             base_path,
             config,
@@ -204,10 +222,13 @@ impl EnhancedPersonalAgent {
             services,
             llm,
             tool_registry,
+            council_factory,
+            living_prompt,
             chat_history: Vec::new(),
             active_contexts: HashMap::new(),
             agent_metrics,
             last_save: Instant::now(),
+            messages_since_reflection: 0,
             gateway_tx: None,
         })
     }
@@ -332,22 +353,57 @@ impl EnhancedPersonalAgent {
         
         // Track JouleWork contributions
         self.track_contributions(&context, &response).await?;
-        
+
         // Update world state
         self.world.tick();
-        
+
         // Run DKS tick if enabled
         if self.config.enable_dks {
             let dks_tick = self.services.dks.tick();
             self.services.last_dks_tick = Some(dks_tick);
         }
-        
+
+        // RLM: Feed message into living prompt for context tracking
+        self.living_prompt.add_message(crate::rlm::RlmMessage {
+            role: "user".to_string(),
+            content: msg.content.clone(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+        self.living_prompt.add_message(crate::rlm::RlmMessage {
+            role: "assistant".to_string(),
+            content: response.content.clone(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+
+        // RLM: Evolve living prompt based on coherence changes every 5 messages
+        self.messages_since_reflection += 1;
+        if self.messages_since_reflection >= 5 {
+            let coherence_before = self.world.global_coherence();
+            // Generate beliefs from recent improvement history
+            self.world.generate_beliefs_from_history();
+            self.world.decay_beliefs();
+            let coherence_after = self.world.global_coherence();
+            let summary = format!(
+                "Processed {} messages. Confidence: {:.2}. Skills used: {:?}",
+                self.messages_since_reflection, response.confidence, response.skills_used
+            );
+            self.living_prompt.evolve(&summary, coherence_before, coherence_after);
+            self.messages_since_reflection = 0;
+            info!("RLM: Living prompt evolved (coherence {:.4} → {:.4})", coherence_before, coherence_after);
+        }
+
         // Save if needed
         self.maybe_save().await?;
-        
+
         // Store context
         self.active_contexts.insert(message_id, context);
-        
+
         Ok(response.content)
     }
     
@@ -370,14 +426,14 @@ impl EnhancedPersonalAgent {
         has_complex_keyword || (is_long && has_multiple_questions)
     }
     
-    /// Process message using council deliberation
+    /// Process message using council deliberation with automatic mode selection
     async fn process_with_council(
         &mut self,
         msg: &Message,
         context: &mut MessageContext,
     ) -> Result<AgentResponse> {
         info!("Using council deliberation for message: {}", msg.id);
-        
+
         // Create members from world agents
         let members: Vec<CouncilMember> = self.world.agents.iter()
             .take(5)
@@ -388,15 +444,16 @@ impl EnhancedPersonalAgent {
                 participation_weight: 1.0,
             })
             .collect();
-        
-        // Create proposal
+
+        // Create proposal with complexity estimation
         let mut proposal = Proposal::new(
             &format!("msg-{}", msg.id),
             "User Query",
             &msg.content,
             0, // System agent
         );
-        
+        proposal.estimate_complexity(); // Auto-estimate complexity from content
+
         // Add stigmergic context
         let stig_ctx = StigmergicCouncilContext {
             preferred_agent: None,
@@ -413,19 +470,22 @@ impl EnhancedPersonalAgent {
             graph_queries: vec![],
         };
         proposal.stigmergic_context = Some(stig_ctx);
-        
-        // Create and run council
-        let mut council = Council::new(CouncilMode::Debate, proposal, members);
-        
+
+        // Use CouncilFactory for automatic mode selection (Debate/Orchestrate/Simple/LLM)
+        // instead of hardcoding CouncilMode::Debate
+        let mut council = self.council_factory.create_council(&proposal, members)?;
+        info!("Council mode selected: {:?} (complexity={:.2}, urgency={:.2})",
+              council.mode, proposal.complexity, proposal.urgency);
+
         // Run evaluation
         let start = Instant::now();
         let decision = council.evaluate().await?;
         let deliberation_time = start.elapsed().as_millis() as u64;
-        
+
         // Record council usage
         context.council_used = true;
         self.agent_metrics.council_invocations += 1;
-        
+
         // Track agent contributions
         for member in &council.members {
             let jw = self.world.agents.get(member.agent_id as usize)
@@ -433,25 +493,45 @@ impl EnhancedPersonalAgent {
                 .unwrap_or(0.5);
             context.joulework_contributions.insert(member.agent_id, jw);
         }
-        
-        // Generate response based on decision
-        let decision_text = match decision.decision {
+
+        // Generate response: use LLM to synthesize council decision into human-readable answer
+        let decision_text = match &decision.decision {
             Decision::Approve => "Approved".to_string(),
             Decision::Reject => "Rejected".to_string(),
             Decision::Amend { .. } => "Amended".to_string(),
             Decision::Defer { reason } => format!("Deferred: {}", reason),
         };
-        
-        let content = format!(
-            "[Council {} - Confidence: {:.2}]\nAgents: {:?}",
+
+        // Build enriched prompt with RLM LivingPrompt context
+        let enriched_prompt = self.living_prompt.render();
+        let council_prompt = format!(
+            "{}\n\n## Council Decision\nMode: {:?}\nOutcome: {}\nConfidence: {:.2}\nAgents: {:?}\n\nBased on the council's deliberation above, provide a helpful response to the user's query:\n{}",
+            enriched_prompt,
+            decision.mode_used,
             decision_text,
             decision.confidence,
-            decision.participating_agents
+            decision.participating_agents,
+            msg.content
         );
-        
+
+        // Use LLM to generate a natural response based on council decision
+        let llm_result = self.llm.generate(&council_prompt).await;
+        let content = if llm_result.timed_out || llm_result.text.is_empty() {
+            // Fallback to structured council output
+            format!(
+                "[Council {:?} → {} | Confidence: {:.2}]\nAgents: {:?}",
+                decision.mode_used,
+                decision_text,
+                decision.confidence,
+                decision.participating_agents
+            )
+        } else {
+            Self::clean_response(&llm_result.text)
+        };
+
         // Get primary agent from participating agents
         let primary_agent = decision.participating_agents.first().copied().unwrap_or(0);
-        
+
         Ok(AgentResponse {
             content,
             primary_agent,
@@ -463,7 +543,7 @@ impl EnhancedPersonalAgent {
         })
     }
     
-    /// Process message using CASS skills and single agent
+    /// Process message using CASS skills, tool execution, and single agent
     async fn process_with_skills(
         &mut self,
         msg: &Message,
@@ -481,10 +561,10 @@ impl EnhancedPersonalAgent {
                 }
             }
         }
-        
+
         // Get relevant beliefs from world
-        let _beliefs = self.get_relevant_beliefs(&msg.content).await?;
-        
+        let beliefs = self.get_relevant_beliefs(&msg.content).await?;
+
         // Create context snapshot
         let context_snapshot = ContextSnapshot {
             timestamp: current_timestamp(),
@@ -496,34 +576,117 @@ impl EnhancedPersonalAgent {
             error_rate: 0.0,
             coherence_score: self.world.global_coherence(),
         };
-        
+
         self.services.cass.update_context(context_snapshot.clone());
-        
+
         // Search for skills
         let skill_matches = self.services.cass.search(&msg.content, Some(context_snapshot), 3).await;
-        
+
         // Select agent based on message type
         let selected_agent = self.select_agent_for_message(&msg.content);
         context.assigned_agents.push(selected_agent);
-        
-        // Generate response
-        let start = Instant::now();
-        let content = if !skill_matches.is_empty() {
-            let best_match = &skill_matches[0];
-            context.skills_accessed.push(best_match.skill.id.clone());
-            format!(
-                "[Skill: {} - {:.2}]\n{}",
-                best_match.skill.title,
-                best_match.semantic_score,
-                self.llm.generate(&msg.content).await.text
-            )
+
+        // Build enriched system prompt with RLM LivingPrompt + tool schemas
+        let enriched_prompt = self.living_prompt.render();
+        let tools_description = self.tool_registry.list_tools()
+            .iter()
+            .map(|(name, desc)| format!("- {}: {}", name, desc))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let belief_context = if !beliefs.is_empty() {
+            let belief_strs: Vec<String> = beliefs.iter()
+                .take(3)
+                .map(|b| format!("- [{:.0}%] {}", b.confidence * 100.0, b.content))
+                .collect();
+            format!("\n\n## Relevant Beliefs\n{}", belief_strs.join("\n"))
         } else {
-            // Fall back to LLM
-            self.llm.generate(&msg.content).await.text
+            String::new()
         };
-        
+
+        let skill_context = if !skill_matches.is_empty() {
+            let best = &skill_matches[0];
+            context.skills_accessed.push(best.skill.id.clone());
+            format!("\n\n## Matched Skill: {} (score: {:.2})\n{}", best.skill.title, best.semantic_score, best.skill.principle)
+        } else {
+            String::new()
+        };
+
+        let system_prompt = format!(
+            "{enriched_prompt}{belief_context}{skill_context}\n\n\
+             ## Available Tools\n{tools_description}\n\n\
+             ## Tool Usage\n\
+             When the user asks you to perform an action (search, read files, run commands, calculate, etc.), \
+             respond with a JSON tool call:\n\
+             {{\"tool\": \"tool_name\", \"parameters\": {{\"param\": \"value\"}}}}\n\n\
+             If no tool is needed, respond normally with helpful text."
+        );
+
+        // Generate response with tool-aware prompt
+        let start = Instant::now();
+        let llm_result = self.llm.chat(&system_prompt, &msg.content, &self.chat_history).await;
+
+        let mut final_content = if llm_result.timed_out || llm_result.text.is_empty() {
+            // LLM unavailable fallback
+            format!("I'd like to help with '{}', but the LLM is currently unavailable.", msg.content)
+        } else {
+            Self::clean_response(&llm_result.text)
+        };
+
+        // Tool execution loop: parse tool calls from LLM response and execute them
+        let mut tool_used = false;
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&final_content) {
+            if let Some(tool_name) = json.get("tool").and_then(|v| v.as_str()) {
+                if let Some(params) = json.get("parameters") {
+                    if self.tool_registry.has(tool_name) {
+                        info!("Tool call detected: {} with params: {:?}", tool_name, params);
+                        let call = ToolCallEntry {
+                            name: tool_name.to_string(),
+                            parameters: params.clone(),
+                            call_id: uuid::Uuid::new_v4().to_string(),
+                        };
+
+                        let result = self.tool_registry.execute(call).await;
+                        tool_used = true;
+
+                        let tool_output = if result.output.success {
+                            result.output.result.clone()
+                        } else {
+                            result.output.error.clone().unwrap_or_else(|| "Tool execution failed".to_string())
+                        };
+
+                        info!("Tool {} executed: success={}", tool_name, result.output.success);
+
+                        // Feed tool result back to LLM for synthesis
+                        let synthesis_prompt = format!(
+                            "You executed the tool '{}' and got this result:\n\n{}\n\n\
+                             Now provide a helpful, concise response to the user based on this result.",
+                            tool_name, tool_output
+                        );
+                        let synthesis = self.llm.chat(&system_prompt, &synthesis_prompt, &self.chat_history).await;
+                        final_content = if synthesis.timed_out || synthesis.text.is_empty() {
+                            // Fallback: return raw tool output
+                            format!("[Tool: {}]\n{}", tool_name, tool_output)
+                        } else {
+                            Self::clean_response(&synthesis.text)
+                        };
+                    } else {
+                        warn!("LLM requested unknown tool: {}", tool_name);
+                    }
+                }
+            }
+        }
+
+        // Track tool execution contribution type
+        if tool_used {
+            if let Some(agent) = self.world.agents.get(selected_agent as usize) {
+                let jw = agent.calculate_jw(self.world.global_coherence(), 3);
+                context.joulework_contributions.insert(selected_agent, jw);
+            }
+        }
+
         let processing_time = start.elapsed().as_millis() as u64;
-        
+
         // Calculate JouleWork for this agent
         let _jw = if let Some(agent) = self.world.agents.get(selected_agent as usize) {
             let jw = agent.calculate_jw(self.world.global_coherence(), 3);
@@ -532,9 +695,9 @@ impl EnhancedPersonalAgent {
         } else {
             0.5
         };
-        
+
         Ok(AgentResponse {
-            content,
+            content: final_content,
             primary_agent: selected_agent,
             council_used: false,
             confidence: if !skill_matches.is_empty() { skill_matches[0].semantic_score } else { 0.6 },
@@ -575,6 +738,25 @@ impl EnhancedPersonalAgent {
             .unwrap_or(0)
     }
     
+    /// Strip leaked chat template tokens from LLM output
+    fn clean_response(text: &str) -> String {
+        let mut cleaned = text.to_string();
+        for token in &[
+            "<|end_header_id|>", "<|start_header_id|>", "<|eot_id|>",
+            "<|begin_of_text|>", "<|end_of_text|>", "<|finetune_right_pad_id|>",
+        ] {
+            cleaned = cleaned.replace(token, "");
+        }
+        while let Some(start) = cleaned.find("<|") {
+            if let Some(end) = cleaned[start..].find("|>") {
+                cleaned.replace_range(start..start + end + 2, "");
+            } else {
+                break;
+            }
+        }
+        cleaned.trim().to_string()
+    }
+
     /// Get relevant beliefs from world based on content (public for CLI access)
     pub async fn get_relevant_beliefs(&self, content: &str) -> Result<Vec<crate::hyper_stigmergy::Belief>> {
         // Simple keyword matching - could be enhanced with embeddings
@@ -615,6 +797,8 @@ impl EnhancedPersonalAgent {
                         ContributionType::CouncilDeliberation
                     } else if !response.skills_used.is_empty() {
                         ContributionType::SkillApplication
+                    } else if response.content.contains("[Tool:") {
+                        ContributionType::ToolExecution
                     } else {
                         ContributionType::ResponseGeneration
                     },
