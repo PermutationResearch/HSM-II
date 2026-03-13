@@ -15,56 +15,143 @@ Think of it as *ants solving problems through pheromone trails* — except the a
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Option A: Run Locally with Ollama (Free, Private)
 
-- [Rust](https://rustup.rs/) 1.75+ 
-- Docker (optional, for containerized deployment)
-- API key for OpenAI, Anthropic, or local Ollama
-- **macOS users**: Use the `.command` scripts in `agent_tools/scripts/macos/`
-- **Linux users**: Use equivalent `cargo run` commands (see [documentation/guides/COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md))
+Your data never leaves your machine. HSM-II auto-detects whatever model you have installed.
 
-### Installation
+#### 1. Install Rust
+
+**macOS / Linux:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+**Windows:**
+Download and run [rustup-init.exe](https://rustup.rs/) then restart your terminal.
+
+#### 2. Install Ollama
+
+**macOS:**
+```bash
+brew install ollama
+```
+
+**Linux:**
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+**Windows:**
+Download the installer from [ollama.com](https://ollama.com/download)
+
+#### 3. Pull Any Model and Run
 
 ```bash
-# Clone the repository
+ollama serve &
+ollama pull llama3.2        # or mistral, qwen2.5, phi3, gemma2, etc.
+
 git clone https://github.com/PermutationResearch/HSM-II.git
 cd HSM-II
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# Build and run
-cargo run --release
+cargo run --bin personal_agent -- bootstrap
+TELEGRAM_TOKEN="your_bot_token_here" cargo run --bin personal_agent -- start --telegram --daemon
 ```
 
-### Three Ways to Use HSM-II
+---
 
-#### 1. Personal Agent (Easiest)
+### Option B: Use Claude, GPT-4, or Any Cloud API
+
+No local GPU needed. Connect to Anthropic, OpenAI, or any OpenAI-compatible API.
+
+#### 1. Install Rust
+
+**macOS / Linux:**
 ```bash
-./agent_tools/scripts/macos/run-personal-agent.command
-```
-Your AI companion with built-in coordination capabilities.
-
-#### 2. With Visualization
-```bash
-# Terminal 1: Personal agent
-./agent_tools/scripts/macos/run-personal-agent.command
-
-# Terminal 2: Visual hypergraph
-./agent_tools/scripts/macos/open-hypergraphd.command
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
 ```
 
-#### 3. Full Research Stack
+**Windows:**
+Download and run [rustup-init.exe](https://rustup.rs/) then restart your terminal.
+
+#### 2. Clone and Bootstrap
+
 ```bash
-# Terminal 1: Research backend
-./agent_tools/scripts/macos/run-hyper-stigmergy-II.command
+git clone https://github.com/PermutationResearch/HSM-II.git
+cd HSM-II
+cargo run --bin personal_agent -- bootstrap
+```
 
-# Terminal 2: Personal agent
-./agent_tools/scripts/macos/run-personal-agent.command --connect-hypergraph
+#### 3. Set Your API Key and Run
 
-# Browser: View hypergraph
-./agent_tools/scripts/macos/open-hypergraphd.command
+**With Claude (Anthropic):**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+TELEGRAM_TOKEN="your_bot_token_here" cargo run --bin personal_agent -- start --telegram --daemon
+```
+
+**With GPT-4 (OpenAI):**
+```bash
+export OPENAI_API_KEY="sk-..."
+TELEGRAM_TOKEN="your_bot_token_here" cargo run --bin personal_agent -- start --telegram --daemon
+```
+
+**With any OpenAI-compatible API** (Groq, Together, Mistral, etc.):
+```bash
+export OPENAI_API_KEY="your-key"
+export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
+TELEGRAM_TOKEN="your_bot_token_here" cargo run --bin personal_agent -- start --telegram --daemon
+```
+
+Once running, switch models in Telegram with `/model claude` or `/model gpt-4` or `/model list`.
+
+---
+
+### Create Your Telegram Bot
+
+Both options need a Telegram bot token:
+
+1. Open [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot` and follow the prompts
+3. Copy the token it gives you
+4. Use it as `TELEGRAM_TOKEN` above
+
+Message your bot and HSM-II responds with council deliberation, tools, and memory.
+
+---
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TELEGRAM_TOKEN` | *(required)* | Your Telegram bot token |
+| `OLLAMA_HOST` | `http://localhost` | Ollama server address |
+| `OLLAMA_PORT` | `11434` | Ollama server port |
+| `OLLAMA_MODEL` | `auto` (detects installed) | Force a specific Ollama model |
+| `ANTHROPIC_API_KEY` | *(optional)* | Anthropic API key for Claude |
+| `OPENAI_API_KEY` | *(optional)* | OpenAI API key for GPT-4 |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom OpenAI-compatible endpoint |
+
+### Re-bootstrapping (Reset)
+
+```bash
+rm -f world_state.ladybug*.bincode ~/.hsmii/config.json
+cargo run --bin personal_agent -- bootstrap
+```
+
+### Other Ways to Run
+
+#### With Visualization
+```bash
+cargo run --bin personal_agent -- start --telegram &
+cargo run --bin hypergraphd
+```
+
+#### Full Research Stack
+```bash
+cargo run --release &
+cargo run --bin personal_agent -- start --telegram &
+cargo run --bin hypergraphd
 ```
 
 ---
