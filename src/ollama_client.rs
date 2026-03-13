@@ -38,9 +38,19 @@ pub struct OllamaConfig {
 
 impl Default for OllamaConfig {
     fn default() -> Self {
+        // `OLLAMA_HOST` is frequently set as `http://127.0.0.1:11434` (includes port),
+        // and sometimes as `.../v1` (OpenAI-compat base). Normalize it so the rest of the
+        // code can rely on `host` sans port/path + explicit `port`.
+        let raw_host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());
+        let raw_port = std::env::var("OLLAMA_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(11434);
+        let (host, port) = normalize_ollama_host_port(&raw_host, raw_port);
+
         Self {
-            host: std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string()),
-            port: std::env::var("OLLAMA_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(11434),
+            host,
+            port,
             model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "auto".to_string()),
             latency_budget_ms: 60000,
             enable_batching: false,
@@ -52,9 +62,52 @@ impl Default for OllamaConfig {
     }
 }
 
+fn normalize_ollama_host_port(host: &str, default_port: u16) -> (String, u16) {
+    // Accept:
+    // - `http://localhost`
+    // - `http://localhost:11434`
+    // - `localhost:11434`
+    // - `http://localhost:11434/v1` (strip `/v1`)
+    // Returns `(host_without_port_or_path, port)`.
+    let mut h = host.trim().trim_end_matches('/').to_string();
+    if h.ends_with("/v1") {
+        h.truncate(h.len().saturating_sub(3));
+        h = h.trim_end_matches('/').to_string();
+    }
+
+    let (scheme, rest) = if let Some((s, r)) = h.split_once("://") {
+        (Some(s), r)
+    } else {
+        (None, h.as_str())
+    };
+
+    // Remove any path component.
+    let authority = rest.split('/').next().unwrap_or(rest);
+
+    // Parse optional `:port` on the authority (simple IPv4/hostname handling).
+    if let Some((host_part, port_part)) = authority.rsplit_once(':') {
+        if let Ok(port) = port_part.parse::<u16>() {
+            let host_no_port = match scheme {
+                Some(s) => format!("{}://{}", s, host_part),
+                None => format!("http://{}", host_part),
+            };
+            return (host_no_port, port);
+        }
+    }
+
+    let host_no_port = match scheme {
+        Some(s) => format!("{}://{}", s, authority),
+        None => format!("http://{}", authority),
+    };
+    (host_no_port, default_port)
+}
+
 impl OllamaConfig {
     /// Detect the best available model from Ollama.
-    /// Preference order: env OLLAMA_MODEL > largest installed model > "llama3.2" fallback.
+    /// Preference order:
+    /// - `OLLAMA_MODEL` if explicitly set (and not `auto`)
+    /// - best available chat/instruct model (skips embedding-only models)
+    /// - `"llama3.2"` fallback
     pub async fn detect_model(host: &str, port: u16) -> String {
         // If user explicitly set a model, use it
         if let Ok(model) = std::env::var("OLLAMA_MODEL") {
@@ -63,22 +116,179 @@ impl OllamaConfig {
             }
         }
 
-        // Query Ollama for installed models
-        let url = format!("{}:{}/api/tags", host, port);
+        fn is_embedding_model(name: &str) -> bool {
+            let n = name.to_ascii_lowercase();
+            // Common embedding models in Ollama model registries.
+            n.contains("embed")
+                || n.contains("embedding")
+                || n.contains("text-embedding")
+                || n.contains("nomic-embed")
+                || n.contains("bge-") && n.contains("embed")
+                || n.contains("gte-") && n.contains("embed")
+                || n.contains("e5-") && n.contains("embed")
+                || n.contains("snowflake-arctic-embed")
+                || n.contains("mxbai-embed")
+        }
+
+        // Parse a parameter count like `7B`, `1.5B`, `500M` (from either model name or Ollama tags metadata).
+        // Returns value in "billions of parameters" (B).
+        fn parse_param_count_b(name_or_size: &str) -> Option<f64> {
+            let lower = name_or_size.to_ascii_lowercase();
+            let bytes = lower.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if !(c as char).is_ascii_digit() {
+                    i += 1;
+                    continue;
+                }
+
+                // Parse number with optional decimal point.
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    let ch = bytes[i] as char;
+                    if ch.is_ascii_digit() || ch == '.' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if i >= bytes.len() {
+                    break;
+                }
+
+                let unit = bytes[i] as char;
+                if unit != 'b' && unit != 'm' {
+                    continue;
+                }
+
+                // Avoid matching substrings inside words (very rough boundary check).
+                if start > 0 {
+                    let prev = bytes[start - 1] as char;
+                    if prev.is_ascii_alphabetic() {
+                        continue;
+                    }
+                }
+
+                let num_str = &lower[start..i];
+                let num = num_str.parse::<f64>().ok()?;
+                return match unit {
+                    'b' => Some(num),
+                    'm' => Some(num / 1000.0),
+                    _ => None,
+                };
+            }
+            None
+        }
+
+        fn model_score(name: &str) -> i64 {
+            let n = name.to_ascii_lowercase();
+            let mut score: i64 = 0;
+
+            // Strong priors for common high-quality chat families.
+            // (Order matters only via score magnitudes.)
+            if n.contains("llama3.3") {
+                score += 8000;
+            } else if n.contains("llama3.2") {
+                score += 7000;
+            } else if n.contains("llama3.1") {
+                score += 6500;
+            } else if n.contains("llama3") {
+                score += 6000;
+            } else if n.contains("qwen3") {
+                score += 5800;
+            } else if n.contains("qwen2.5") {
+                score += 5600;
+            } else if n.contains("mistral") {
+                score += 5200;
+            } else if n.contains("mixtral") {
+                score += 5400;
+            } else if n.contains("deepseek") {
+                score += 5400;
+            } else if n.contains("gemma") {
+                score += 5000;
+            }
+
+            // Prefer instruct/chat tuned variants.
+            if n.contains("instruct") || n.contains("chat") || n.contains("-it") {
+                score += 600;
+            }
+            if n.contains("coder") {
+                score += 150;
+            }
+
+            // Deprioritize multimodal/vision for text-only chat surfaces like Telegram.
+            if n.contains("llava") || n.contains("vision") {
+                score -= 200;
+            }
+
+            // Prefer larger models when detectable from name.
+            if let Some(params_b) = parse_param_count_b(name) {
+                score += (params_b * 100.0) as i64;
+                if params_b < 1.0 {
+                    score -= 400;
+                }
+            }
+
+            score
+        }
+
+        let (norm_host, norm_port) = normalize_ollama_host_port(host, port);
+        let url = format!("{}:{}/api/tags", norm_host, norm_port);
         match reqwest::get(&url).await {
             Ok(resp) => {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
-                        if !models.is_empty() {
-                            // Pick the first available model
-                            if let Some(name) = models[0].get("name").and_then(|n| n.as_str()) {
-                                eprintln!("[HSM-II] Auto-detected Ollama model: {}", name);
-                                return name.to_string();
-                            }
+                        #[derive(Clone)]
+                        struct Candidate {
+                            name: String,
+                            size_bytes: Option<u64>,
+                            params_b: Option<f64>,
+                            score: i64,
+                        }
+
+                        let mut candidates: Vec<Candidate> = models
+                            .iter()
+                            .filter_map(|m| {
+                                let name = m.get("name")?.as_str()?.to_string();
+                                if is_embedding_model(&name) {
+                                    return None;
+                                }
+                                let size_bytes = m.get("size").and_then(|s| s.as_u64());
+                                let params_b = m
+                                    .get("details")
+                                    .and_then(|d| d.get("parameter_size"))
+                                    .and_then(|p| p.as_str())
+                                    .and_then(parse_param_count_b)
+                                    .or_else(|| parse_param_count_b(&name));
+                                let score = model_score(&name);
+                                Some(Candidate {
+                                    name,
+                                    size_bytes,
+                                    params_b,
+                                    score,
+                                })
+                            })
+                            .collect();
+
+                        if !candidates.is_empty() {
+                            // Prefer the largest installed chat model, then best chat heuristics.
+                            candidates.sort_by(|a, b| {
+                                b.params_b
+                                    .partial_cmp(&a.params_b)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+                                    .then_with(|| b.score.cmp(&a.score))
+                                    .then_with(|| a.name.cmp(&b.name))
+                            });
+                            let chosen = candidates[0].name.clone();
+                            eprintln!("[HSM-II] Auto-detected Ollama chat model: {}", chosen);
+                            return chosen;
                         }
                     }
                 }
-                eprintln!("[HSM-II] No models found in Ollama. Run: ollama pull llama3.2");
+                eprintln!("[HSM-II] No suitable chat models found in Ollama. Run: ollama pull llama3.2");
                 "llama3.2".to_string()
             }
             Err(_) => {
@@ -120,6 +330,11 @@ use tokio::sync::oneshot;
 impl OllamaClient {
     /// Create a new Ollama client
     pub fn new(config: OllamaConfig) -> Self {
+        let mut config = config;
+        let (host, port) = normalize_ollama_host_port(&config.host, config.port);
+        config.host = host;
+        config.port = port;
+
         let ollama = Ollama::new(&config.host, config.port);
 
         Self {

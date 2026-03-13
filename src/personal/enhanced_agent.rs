@@ -33,8 +33,9 @@ use crate::{
     tools::{Tool, ToolRegistry, ToolCall as ToolCallEntry, RlmProcessTool},
     rlm::LivingPrompt,
     ollama_client::{OllamaClient, OllamaConfig},
+    social_memory::DataSensitivity,
 };
-use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource};
+use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource, Experience, ExperienceOutcome};
 
 /// Configuration for the enhanced agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -400,6 +401,102 @@ impl EnhancedPersonalAgent {
         if self.config.enable_dks {
             let dks_tick = self.services.dks.tick();
             self.services.last_dks_tick = Some(dks_tick);
+        }
+
+        // Update chat history for conversation context (keep last 20 exchanges)
+        self.chat_history.push(("user".to_string(), msg.content.clone()));
+        self.chat_history.push(("assistant".to_string(), response.content.clone()));
+        if self.chat_history.len() > 40 {
+            // Trim oldest messages, keep last 40 entries (20 exchanges)
+            let drain_count = self.chat_history.len() - 40;
+            self.chat_history.drain(..drain_count);
+        }
+
+        // Social memory: record promise if agent committed to something
+        {
+            let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let lower_resp = response.content.to_lowercase();
+            let made_commitment = lower_resp.contains("i'll ") || lower_resp.contains("i will ")
+                || lower_resp.contains("let me ") || lower_resp.contains("here's what i'll do");
+            if made_commitment {
+                let agent_id = response.primary_agent;
+                let promise_id = self.world.social_memory.record_promise(
+                    agent_id,
+                    None, // beneficiary = user (external)
+                    &msg.content[..msg.content.len().min(80)],
+                    &response.content[..response.content.len().min(120)],
+                    DataSensitivity::Public,
+                    now_ts,
+                    None,
+                );
+                info!("Social memory: recorded promise {} from agent {}", promise_id, agent_id);
+            }
+
+            // Resolve previous promises if response indicates completion
+            let completed = lower_resp.contains("done") || lower_resp.contains("completed")
+                || lower_resp.contains("here's the result") || lower_resp.contains("finished");
+            if completed {
+                // Find and resolve pending promises from this agent
+                let pending: Vec<String> = self.world.social_memory.promises.iter()
+                    .filter(|(_, p)| p.status == crate::social_memory::PromiseStatus::Pending)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for pid in pending.iter().take(1) {
+                    self.world.social_memory.resolve_promise(
+                        pid,
+                        crate::social_memory::PromiseStatus::Kept,
+                        Some(response.primary_agent),
+                        now_ts,
+                        Some(response.confidence),
+                        Some(true),
+                        Some(true),
+                        &[],
+                    );
+                    info!("Social memory: resolved promise {}", pid);
+                }
+            }
+        }
+
+        // CASS: Record experience for skill distillation
+        {
+            let _coherence = self.world.global_coherence();
+            let outcome = if response.confidence > 0.7 {
+                ExperienceOutcome::Positive { coherence_delta: response.confidence - 0.5 }
+            } else {
+                ExperienceOutcome::Negative { coherence_delta: response.confidence - 0.5 }
+            };
+            let exp = Experience {
+                id: self.world.experiences.len(),
+                description: msg.content[..msg.content.len().min(200)].to_string(),
+                context: format!("council={} skills={:?} confidence={:.2}",
+                    response.council_used, response.skills_used, response.confidence),
+                outcome,
+                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                tick: self.world.tick_count,
+                embedding: None,
+            };
+            self.world.experiences.push(exp);
+
+            // Attempt distillation every 10 experiences
+            if self.world.experiences.len() % 10 == 0 && self.world.experiences.len() >= 3 {
+                let result = self.world.skill_bank.distill_from_experiences(
+                    &self.world.experiences,
+                    &self.world.improvement_history,
+                );
+                if result.new_skills > 0 {
+                    info!("CASS: Distilled {} new skills from {} experiences",
+                        result.new_skills, self.world.experiences.len());
+                    self.agent_metrics.skills_distilled += result.new_skills as u64;
+                }
+            }
+        }
+
+        // DKS: Trigger evolution on meaningful interactions (council or high-confidence)
+        if self.config.enable_dks && (response.council_used || response.confidence > 0.8) {
+            let dks_tick = self.services.dks.tick();
+            self.services.last_dks_tick = Some(dks_tick);
+            info!("DKS: Event-driven evolution tick (council={}, confidence={:.2})",
+                response.council_used, response.confidence);
         }
 
         // RLM: Feed message into living prompt for context tracking
