@@ -304,37 +304,37 @@ If one provider fails, the system automatically switches to another. No single p
 ║                         HSM-II SYSTEM                                 ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║                                                                       ║
-║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                ║
-║  │    AGENTS    │  │   COUNCIL    │  │     CASS     │                ║
-║  │              │  │              │  │   (Skills)   │                ║
-║  │ • Roles      │  │ • Debate     │  │              │                ║
-║  │ • Drives     │  │ • Vote       │  │ • Harvest    │                ║
-║  │ • Coherence  │  │ • Evidence   │  │ • Distill    │                ║
-║  │ • Beliefs    │  │ • Decide     │  │ • Promote    │                ║
-║  └──────────────┘  └──────────────┘  └──────────────┘                ║
-║         │                 │                 │                         ║
-║         └─────────────────┼─────────────────┘                         ║
-║                           ▼                                           ║
-║              ┌──────────────────────────┐                            ║
-║              │   HYPERGRAPH MEMORY      │                            ║
-║              │   (Stigmergic Field)     │                            ║
-║              │                          │                            ║
-║              │ • Nodes (beliefs)        │                            ║
-║              │ • Hyperedges (emergent)  │                            ║
-║              │ • Ontological tags       │                            ║
-║              │ • Visibility scopes      │                            ║
-║              └──────────────────────────┘                            ║
-║                           │                                           ║
-║         ┌─────────────────┼─────────────────┐                         ║
-║         ▼                 ▼                 ▼                         ║
-║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                ║
-║  │     DKS      │  │    SOCIAL    │  │  FEDERATION  │                ║
-║  │              │  │    MEMORY    │  │              │                ║
-║  │ • Selection  │  │              │  │ • Trust      │                ║
-║  │ • Replication│  │ • Promises   │  │ • Conflict   │                ║
-║  │ • Mutation   │  │ • Reputation │  │ • Sync       │                ║
-║  │ • Flux       │  │ • Evidence   │  │ • Consensus  │                ║
-║  └──────────────┘  └──────────────┘  └──────────────┘                ║
+║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
+║       │    AGENTS    │  │   COUNCIL    │  │     CASS     │            ║
+║       │              │  │              │  │   (Skills)   │            ║
+║       │ • Roles      │  │ • Debate     │  │              │            ║
+║       │ • Drives     │  │ • Vote       │  │ • Harvest    │            ║
+║       │ • Coherence  │  │ • Evidence   │  │ • Distill    │            ║
+║       │ • Beliefs    │  │ • Decide     │  │ • Promote    │            ║
+║       └──────────────┘  └──────────────┘  └──────────────┘            ║
+║              │                 │                 │                    ║
+║              └─────────────────┼─────────────────┘                    ║
+║                                ▼                                      ║
+║                   ┌──────────────────────────┐                        ║
+║                   │   HYPERGRAPH MEMORY      │                        ║
+║                   │   (Stigmergic Field)     │                        ║
+║                   │                          │                        ║
+║                   │ • Nodes (beliefs)        │                        ║
+║                   │ • Hyperedges (emergent)  │                        ║
+║                   │ • Ontological tags       │                        ║
+║                   │ • Visibility scopes      │                        ║
+║                   └──────────────────────────┘                        ║
+║                                │                                      ║
+║              ┌─────────────────┼─────────────────┐                    ║
+║              ▼                 ▼                 ▼                    ║
+║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
+║       │     DKS      │  │    SOCIAL    │  │  FEDERATION  │            ║
+║       │              │  │    MEMORY    │  │              │            ║
+║       │ • Selection  │  │              │  │ • Trust      │            ║
+║       │ • Replication│  │ • Promises   │  │ • Conflict   │            ║
+║       │ • Mutation   │  │ • Reputation │  │ • Sync       │            ║
+║       │ • Flux       │  │ • Evidence   │  │ • Consensus  │            ║
+║       └──────────────┘  └──────────────┘  └──────────────┘            ║
 ║                                                                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 ```
