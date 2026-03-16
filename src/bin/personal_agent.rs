@@ -94,6 +94,20 @@ enum Commands {
         file: String,
     },
 
+    /// Run MiroFish trajectory prediction
+    Predict {
+        /// Scenario template: pricing, market-entry, growth, marketing, competitive, cost
+        #[arg(short, long)]
+        template: Option<String>,
+
+        /// Custom topic (if not using a template)
+        topic: Option<String>,
+
+        /// List available templates
+        #[arg(long)]
+        list: bool,
+    },
+
     /// Check agent status
     Status,
 }
@@ -172,6 +186,9 @@ async fn main() -> Result<()> {
         }
         Commands::Ingest { file } => {
             cmd_ingest(&home, &file).await?;
+        }
+        Commands::Predict { template, topic, list } => {
+            cmd_predict(&home, template, topic, list).await?;
         }
         Commands::Status => {
             cmd_status(&home).await?;
@@ -590,6 +607,201 @@ async fn cmd_onboard(home: &PathBuf) -> Result<()> {
     );
     println!("  Run `hsmii memory show` to review your beliefs");
     println!("  Run `hsmii start` to chat with business-aware HSM-II");
+
+    Ok(())
+}
+
+/// Run MiroFish trajectory prediction
+async fn cmd_predict(
+    home: &PathBuf,
+    template_id: Option<String>,
+    topic: Option<String>,
+    list_templates: bool,
+) -> Result<()> {
+    use hyper_stigmergy::mirofish::{builtin_templates, MiroFishEngine};
+    use std::collections::HashMap;
+
+    // List templates mode
+    if list_templates {
+        println!("\n📊 Available MiroFish Scenario Templates\n");
+        for t in builtin_templates() {
+            println!("  {} — {}", t.id, t.name);
+            println!("    Domain: {}", t.domain);
+            println!("    Required: {}", t.required_variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", "));
+            println!("    Variants: {}", t.suggested_variants.join(", "));
+            println!();
+        }
+        println!("Usage: hsmii predict --template pricing_strategy");
+        println!("       hsmii predict \"What happens if we raise prices 20%?\"");
+        return Ok(());
+    }
+
+    if !hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+        println!("Agent not initialized. Run `hsmii bootstrap` first.");
+        return Ok(());
+    }
+
+    let agent = EnhancedPersonalAgent::initialize(home).await?;
+    let mut llm_config = hyper_stigmergy::ollama_client::OllamaConfig::default();
+    if llm_config.model == "auto" {
+        llm_config.model = hyper_stigmergy::ollama_client::OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
+    }
+    let llm = hyper_stigmergy::ollama_client::OllamaClient::new(llm_config);
+    let engine = MiroFishEngine::new(llm);
+
+    if let Some(tid) = template_id {
+        // Template-based prediction
+        let templates = builtin_templates();
+        let template = templates
+            .iter()
+            .find(|t| t.id == tid)
+            .ok_or_else(|| anyhow::anyhow!("Template '{}' not found. Use --list to see available templates.", tid))?;
+
+        println!("\n🐟 MiroFish Trajectory Analysis: {}\n", template.name);
+
+        // Collect required variables interactively
+        use tokio::io::{stdin, AsyncBufReadExt, BufReader};
+        let stdin_reader = BufReader::new(stdin());
+        let mut lines = stdin_reader.lines();
+        let mut variables = HashMap::new();
+
+        for var in &template.required_variables {
+            println!("  {} (e.g., {})", var.description, var.example);
+            print!("  > ");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            let answer = lines.next_line().await?.unwrap_or_default();
+            variables.insert(var.name.clone(), answer.trim().to_string());
+        }
+
+        for var in &template.optional_variables {
+            let default = var.default.as_deref().unwrap_or("skip");
+            println!("  {} [default: {}]", var.description, default);
+            print!("  > ");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            let answer = lines.next_line().await?.unwrap_or_default();
+            let value = if answer.trim().is_empty() {
+                var.default.clone().unwrap_or_default()
+            } else {
+                answer.trim().to_string()
+            };
+            if !value.is_empty() {
+                variables.insert(var.name.clone(), value);
+            }
+        }
+
+        println!("\n⏳ Running trajectory analysis...\n");
+
+        let analysis = engine
+            .analyze_with_template(template, &variables, &agent.world.beliefs)
+            .await?;
+
+        // Display results
+        println!("📈 TRAJECTORY ANALYSIS RESULTS");
+        println!("{}\n", "═".repeat(60));
+
+        println!("🎯 Most Likely Outcome: {}", analysis.most_likely_outcome);
+        println!("📊 Expected Impact: {:.1}/10", analysis.expected_impact);
+        println!();
+
+        println!("🔀 PROBABILITY FLOW ({} time steps)", analysis.flow_network.time_steps);
+        println!("{}", "─".repeat(40));
+        for state in &analysis.flow_network.states {
+            if state.probability > 0.01 {
+                let bar_len = (state.probability * 30.0) as usize;
+                let bar = "█".repeat(bar_len);
+                println!(
+                    "  {:30} {:5.1}% {}",
+                    state.description,
+                    state.probability * 100.0,
+                    bar
+                );
+            }
+        }
+        println!();
+
+        println!("📋 ACTION TRAJECTORY ({} steps)", analysis.trajectory.steps.len());
+        println!("{}", "─".repeat(40));
+        for step in &analysis.trajectory.steps {
+            println!(
+                "  Step {}: {} (p={:.0}%, {})",
+                step.step, step.action, step.success_probability * 100.0, step.time_horizon
+            );
+            if !step.risks.is_empty() {
+                println!("    ⚠ Risks: {}", step.risks.join(", "));
+            }
+        }
+        println!(
+            "  → Cumulative probability: {:.0}%",
+            analysis.trajectory.cumulative_probability * 100.0
+        );
+        println!();
+
+        if !analysis.scenario_report.branches.is_empty() {
+            println!("🌿 SCENARIO BRANCHES");
+            println!("{}", "─".repeat(40));
+            for branch in &analysis.scenario_report.branches {
+                println!(
+                    "  {} ({:.0}%): {}",
+                    branch.variant,
+                    branch.confidence * 100.0,
+                    &branch.prediction[..branch.prediction.len().min(120)]
+                );
+            }
+            println!();
+        }
+
+        if !analysis.scenario_report.synthesis.is_empty() {
+            println!("🧩 SYNTHESIS");
+            println!("{}", "─".repeat(40));
+            println!("  {}", analysis.scenario_report.synthesis);
+        }
+
+        // Save to file
+        let results_dir = home.join("predictions");
+        std::fs::create_dir_all(&results_dir).ok();
+        let filename = format!(
+            "mirofish_{}.json",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S")
+        );
+        let filepath = results_dir.join(&filename);
+        if let Ok(json) = serde_json::to_string_pretty(&analysis) {
+            std::fs::write(&filepath, json).ok();
+            println!("\n💾 Saved to {}", filepath.display());
+        }
+    } else if let Some(topic) = topic {
+        // Free-form prediction (uses base scenario simulator)
+        println!("\n🐟 MiroFish Prediction: {}\n", topic);
+
+        let seeds: Vec<String> = agent
+            .world
+            .beliefs
+            .iter()
+            .take(5)
+            .map(|b| b.content.clone())
+            .collect();
+
+        let config = hyper_stigmergy::scenario_simulator::ScenarioSimulatorConfig::default();
+        let simulator = hyper_stigmergy::scenario_simulator::ScenarioSimulator::new(config);
+        let report = simulator
+            .simulate(&topic, &seeds, None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        println!("📊 Overall confidence: {:.0}%\n", report.overall_confidence * 100.0);
+        for branch in &report.branches {
+            println!(
+                "  {} ({:.0}%): {}",
+                branch.variant,
+                branch.confidence * 100.0,
+                &branch.prediction[..branch.prediction.len().min(120)]
+            );
+        }
+        println!("\n🧩 Synthesis: {}", report.synthesis);
+    } else {
+        println!("Usage: hsmii predict --template <id>     (template-based analysis)");
+        println!("       hsmii predict \"topic question\"     (free-form prediction)");
+        println!("       hsmii predict --list               (show available templates)");
+    }
 
     Ok(())
 }
