@@ -391,10 +391,13 @@ pub use investigation_tools::{InvestigationToolRegistry, ToolCallRecord};
 // MiroFish Trajectory Engine — full trajectory mechanics for business decisions
 pub mod mirofish;
 pub use mirofish::{
-    builtin_templates, compute_calibration, recalibrate_confidence, CalibrationStats,
-    FlowState, FlowTransition, MiroFishEngine, PredictionRecord, ProbabilityFlowNetwork,
-    ProjectionCurve, ProjectionPoint, RefinementRound, RefinementSession, ScenarioDomain,
-    ScenarioTemplate, Trajectory as MiroFishTrajectory, TrajectoryAnalysis, TrajectoryStep, VariableSpec,
+    builtin_templates, compute_calibration, recalibrate_confidence, validate_variables,
+    AnalysisComparison, CalibrationStats, FlowState, FlowTransition, LlmBackend,
+    LlmBackendResult, MiroFishEngine, PredictionRecord, PredictionStore,
+    ProbabilityFlowNetwork, ProjectionCurve, ProjectionPoint, RefinementRound,
+    RefinementSession, ScenarioDomain, ScenarioTemplate, StoredAnalysis,
+    Trajectory as MiroFishTrajectory, TrajectoryAnalysis, TrajectoryStep,
+    ValidationResult as MiroFishValidation, VariableSpec, VariableType,
 };
 
 // Onboarding, Belief Extraction, and Document Ingestion
