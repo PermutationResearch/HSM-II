@@ -64,7 +64,7 @@ pub struct LlmRequest {
 impl Default for LlmRequest {
     fn default() -> Self {
         Self {
-            model: "gpt-4o-mini".to_string(),
+            model: crate::ollama_client::resolve_model_from_env("gpt-4o-mini"),
             messages: Vec::new(),
             temperature: 0.7,
             max_tokens: Some(2000),
@@ -215,7 +215,7 @@ impl LlmClient {
             providers,
             retry_config: RetryConfig::default(),
             default_model: std::env::var("DEFAULT_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                .unwrap_or_else(|_| crate::ollama_client::resolve_model_from_env("gpt-4o-mini")),
             metrics: Arc::new(LlmMetrics::default()),
         })
     }

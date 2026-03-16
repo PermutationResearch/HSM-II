@@ -400,6 +400,15 @@ pub use mirofish::{
     ValidationResult as MiroFishValidation, VariableSpec, VariableType,
 };
 
+// Autonomous Business Team — role-based agent personas, channel connectors, campaign feedback
+pub mod autonomous_team;
+pub use autonomous_team::{
+    build_persona as build_team_persona, BrandContext, BrandVoice, BusinessRole, Campaign,
+    CampaignSnapshot, CampaignStatus, CampaignStore, ChannelConnector, ChannelPerformanceSummary,
+    ChannelType, CommunitySignal, ContentMetric, ContentPiece, DomainPerformance,
+    LocalFileConnector, MemberStatus, PublishResult, SignalType, TeamMember, TeamOrchestrator,
+};
+
 // Onboarding, Belief Extraction, and Document Ingestion
 pub mod onboard;
 pub use onboard::{

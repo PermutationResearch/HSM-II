@@ -890,11 +890,7 @@ async fn ab_benchmark_plain_vs_enriched() {
         }
     };
 
-    // Determine model name for display
-    let model = std::env::var("DEFAULT_LLM_MODEL")
-        .or_else(|_| std::env::var("OLLAMA_MODEL"))
-        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
-
+    // Determine provider first, then select appropriate model default
     let provider = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
         "anthropic"
     } else if std::env::var("OPENAI_API_KEY").is_ok() {
@@ -902,6 +898,14 @@ async fn ab_benchmark_plain_vs_enriched() {
     } else {
         "ollama"
     };
+
+    let model = std::env::var("DEFAULT_LLM_MODEL").unwrap_or_else(|_| {
+        match provider {
+            "anthropic" => "claude-sonnet-4-20250514".to_string(),
+            "openai" => "gpt-4o-mini".to_string(),
+            _ => hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2"),
+        }
+    });
 
     eprintln!(
         "\n  🧪 A/B Benchmark starting | Model: {} | Provider: {}\n",
