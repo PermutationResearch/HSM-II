@@ -919,12 +919,14 @@ fn score_output(output: &str, reference: &str) -> f64 {
         || output.contains("Validation:")
         || output.contains("<observation>")
         || output.contains("<validation>");
-    if has_claim {
+    // Base format bonuses — XML tags subsume plain Claim:/Evidence:
+    if has_claim || has_xml_claim {
         score += 0.3;
     }
-    if has_evidence {
+    if has_evidence || has_xml_evidence {
         score += 0.3;
     }
+    // Additional XML structure bonus (on top of base)
     if has_xml_claim {
         score += 0.15;
     }

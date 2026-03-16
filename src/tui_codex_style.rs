@@ -602,7 +602,7 @@ impl CodexState {
                 ),
             )],
             agent_name: agent_name.to_string(),
-            model: "llama3.2".to_string(),
+            model: crate::ollama_client::resolve_model_from_env("llama3.2"),
             version: "v0.1.0".to_string(),
             current_dir: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())

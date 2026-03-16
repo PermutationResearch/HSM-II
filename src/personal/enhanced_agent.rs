@@ -34,6 +34,7 @@ use crate::{
     rlm::LivingPrompt,
     ollama_client::{OllamaClient, OllamaConfig},
     social_memory::DataSensitivity,
+    autocontext::{AutoContextLoop, AutoContextStore, LoopConfig},
 };
 use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource, Experience, ExperienceOutcome};
 
@@ -125,6 +126,8 @@ pub struct EnhancedPersonalAgent {
     pub gateway_tx: Option<mpsc::Sender<(Message, oneshot::Sender<String>)>>,
     /// Gateway instance (kept alive to keep bots running)
     pub gateway: Option<crate::personal::gateway::Gateway>,
+    /// AutoContext closed-loop learning system
+    pub autocontext: AutoContextLoop,
 }
 
 /// Tracks agent contributions for JouleWork compensation
@@ -207,8 +210,9 @@ impl EnhancedPersonalAgent {
         // Initialize runtime services
         let services = Self::initialize_services(&world).await?;
         
-        // Initialize tool registry
-        let tool_registry = ToolRegistry::with_default_tools();
+        // Initialize tool registry with ALL tools (60+)
+        let mut tool_registry = ToolRegistry::new();
+        crate::tools::register_all_tools(&mut tool_registry);
         info!("Loaded {} tools", tool_registry.list_tools().len());
 
         // Initialize council factory with automatic mode selection
@@ -223,6 +227,18 @@ impl EnhancedPersonalAgent {
 
         // Load metrics
         let agent_metrics = Self::load_metrics(&base_path).await.unwrap_or_default();
+
+        // Initialize AutoContext learning loop
+        let ac_store = AutoContextStore::new(base_path.join("autocontext"));
+        let mut autocontext = AutoContextLoop::new(ac_store, LoopConfig::default());
+        if let Err(e) = autocontext.load().await {
+            warn!("AutoContext load failed (starting fresh): {}", e);
+        }
+        info!(
+            "AutoContext initialized: {} playbooks, {} hints",
+            autocontext.knowledge_base.playbooks.len(),
+            autocontext.knowledge_base.hints.len()
+        );
 
         info!("EnhancedPersonalAgent initialized with {} agents", world.agents.len());
 
@@ -242,6 +258,7 @@ impl EnhancedPersonalAgent {
             messages_since_reflection: 0,
             gateway_tx: None,
             gateway: None,
+            autocontext,
         })
     }
     
@@ -266,9 +283,13 @@ impl EnhancedPersonalAgent {
         }
         
         // Initialize with some default beliefs
+        let content0 = "The user is a human seeking assistance from a multi-agent system";
+        let (l0_0, l1_0) = crate::memory::derive_hierarchy(content0);
         world.beliefs.push(Belief {
             id: 0,
-            content: "The user is a human seeking assistance from a multi-agent system".to_string(),
+            content: content0.to_string(),
+            abstract_l0: Some(l0_0),
+            overview_l1: Some(l1_0),
             confidence: 0.9,
             source: BeliefSource::UserProvided,
             supporting_evidence: vec!["Initial setup".to_string()],
@@ -277,10 +298,14 @@ impl EnhancedPersonalAgent {
             updated_at: current_timestamp(),
             update_count: 0,
         });
-        
+
+        let content1 = "Complex decisions benefit from multi-agent council deliberation";
+        let (l0_1, l1_1) = crate::memory::derive_hierarchy(content1);
         world.beliefs.push(Belief {
             id: 1,
-            content: "Complex decisions benefit from multi-agent council deliberation".to_string(),
+            content: content1.to_string(),
+            abstract_l0: Some(l0_1),
+            overview_l1: Some(l1_1),
             confidence: 0.85,
             source: BeliefSource::Inference,
             supporting_evidence: vec!["System design".to_string()],
@@ -457,6 +482,44 @@ impl EnhancedPersonalAgent {
             }
         }
 
+        // AutoContext: Record interaction and optionally trigger learning loop
+        {
+            let ac_ctx = self.autocontext.retrieve_context(&msg.content);
+            if !ac_ctx.playbooks.is_empty() || !ac_ctx.hints.is_empty() {
+                info!(
+                    "AutoContext: {} playbooks, {} hints matched for '{}'",
+                    ac_ctx.playbooks.len(),
+                    ac_ctx.hints.len(),
+                    &msg.content[..msg.content.len().min(50)]
+                );
+            }
+
+            // Feed outcome back to autocontext on every 20th message
+            if self.agent_metrics.total_messages_processed > 0
+                && self.agent_metrics.total_messages_processed % 20 == 0
+            {
+                let scenario = msg.content[..msg.content.len().min(100)].to_string();
+                match self
+                    .autocontext
+                    .tick(&scenario, &mut self.tool_registry, &self.llm)
+                    .await
+                {
+                    Ok(result) => {
+                        info!(
+                            "AutoContext gen #{}: best={:.3}, playbooks_new={}, hints={}",
+                            result.generation_id,
+                            result.best_score,
+                            result.playbooks_created,
+                            result.hints_created
+                        );
+                    }
+                    Err(e) => {
+                        warn!("AutoContext tick failed: {}", e);
+                    }
+                }
+            }
+        }
+
         // CASS: Record experience for skill distillation
         {
             let _coherence = self.world.global_coherence();
@@ -465,11 +528,15 @@ impl EnhancedPersonalAgent {
             } else {
                 ExperienceOutcome::Negative { coherence_delta: response.confidence - 0.5 }
             };
+            let desc = msg.content[..msg.content.len().min(200)].to_string();
+            let (exp_l0, exp_l1) = crate::memory::derive_hierarchy(&desc);
             let exp = Experience {
                 id: self.world.experiences.len(),
-                description: msg.content[..msg.content.len().min(200)].to_string(),
+                description: desc,
                 context: format!("council={} skills={:?} confidence={:.2}",
                     response.council_used, response.skills_used, response.confidence),
+                abstract_l0: Some(exp_l0),
+                overview_l1: Some(exp_l1),
                 outcome,
                 timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                 tick: self.world.tick_count,
@@ -1119,8 +1186,25 @@ impl EnhancedPersonalAgent {
             String::new()
         };
 
+        // Inject AutoContext hints for this query
+        let ac_ctx = self.autocontext.retrieve_context(&msg.content);
+        let autocontext_section = if !ac_ctx.hints.is_empty() || !ac_ctx.playbooks.is_empty() {
+            let hints_text = ac_ctx.hints.iter().take(3)
+                .map(|h| format!("- [hint {:.0}%] {}", h.confidence * 100.0, h.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let pb_text = ac_ctx.playbooks.iter().take(2)
+                .map(|p| format!("- [playbook {:.0}%] {}: {}", p.quality_score * 100.0, p.name, p.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n\n## AutoContext Guidance\n{}{}", hints_text,
+                if pb_text.is_empty() { String::new() } else { format!("\n{}", pb_text) })
+        } else {
+            String::new()
+        };
+
         let system_prompt = format!(
-            "{enriched_prompt}{belief_context}{skill_context}\n\n\
+            "{enriched_prompt}{belief_context}{skill_context}{autocontext_section}\n\n\
              ## Available Tools\n{tools_description}\n\n\
              ## Tool Usage\n\
              When the user asks you to perform an action (search, read files, run commands, calculate, etc.), \
@@ -1359,16 +1443,21 @@ impl EnhancedPersonalAgent {
     /// Save full state to LadybugDB
     pub async fn save(&mut self) -> Result<()> {
         info!("Saving world state to LadybugDB...");
-        
+
         // Save world state
         EmbeddedGraphStore::save_world(&self.world, None)?;
-        
+
         // Save metrics
         self.save_metrics().await?;
-        
+
         // Save config
         self.save_config().await?;
-        
+
+        // Save AutoContext knowledge base
+        if let Err(e) = self.autocontext.save().await {
+            warn!("AutoContext save failed: {}", e);
+        }
+
         info!("Save complete");
         Ok(())
     }

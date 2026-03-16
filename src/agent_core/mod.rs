@@ -218,8 +218,9 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".to_string(),
-            model: "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
-                .to_string(),
+            model: crate::ollama_client::resolve_model_from_env(
+                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+            ),
             api_url: "http://localhost:11434".to_string(),
             api_key: None,
             temperature: 0.7,

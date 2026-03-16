@@ -29,9 +29,15 @@ pub struct LlmBridgeConfig {
 
 impl Default for LlmBridgeConfig {
     fn default() -> Self {
+        let endpoint = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let model = match std::env::var("OLLAMA_MODEL") {
+            Ok(m) if !m.is_empty() && m != "auto" => m,
+            _ => "qwen2.5:14b".to_string(),
+        };
         Self {
-            endpoint: "http://localhost:11434".to_string(),
-            model: "qwen2.5:14b".to_string(),
+            endpoint,
+            model,
             timeout_secs: 60,
             temperature: 0.7,
             max_tokens: 2000,

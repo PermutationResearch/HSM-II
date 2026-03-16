@@ -659,6 +659,7 @@ impl LLMDebateCouncil {
         use serde_json::json;
 
         // Auto-detect model if set to "auto"
+        let fallback = crate::ollama_client::resolve_model_from_env("llama3.2");
         let model = if self.config.model == "auto" {
             let tags_url = format!("{}/api/tags", self.config.endpoint);
             match reqwest::get(&tags_url).await {
@@ -669,13 +670,13 @@ impl LLMDebateCouncil {
                             .and_then(|arr| arr.first())
                             .and_then(|m| m.get("name"))
                             .and_then(|n| n.as_str())
-                            .unwrap_or("llama3.2")
+                            .unwrap_or(&fallback)
                             .to_string()
                     } else {
-                        "llama3.2".to_string()
+                        fallback
                     }
                 }
-                Err(_) => "llama3.2".to_string(),
+                Err(_) => fallback,
             }
         } else {
             self.config.model.clone()

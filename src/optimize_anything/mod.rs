@@ -30,8 +30,9 @@ impl Default for OptimizationConfig {
             max_iterations: 10,
             population_size: 5,
             temperature: 0.7,
-            model: "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
-                .to_string(),
+            model: crate::ollama_client::resolve_model_from_env(
+                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+            ),
             enable_reflection: true,
             early_stopping_patience: 3,
             improvement_threshold: 0.01,

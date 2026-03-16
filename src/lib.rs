@@ -79,6 +79,9 @@ pub mod gateways;
 // Job scheduler for cron and background tasks
 pub mod scheduler;
 
+// MiroFish-inspired scenario simulation engine
+pub mod scenario_simulator;
+
 // Codex-style TUI - Dark minimalist terminal aesthetic
 pub mod tui_codex_style;
 
@@ -324,6 +327,22 @@ pub use pi_ai_compat::{
     complete, complete_streaming, getModel, prelude as pi_ai_prelude, CompleteOptions,
     Context as PiContext, Message as PiMessage, Model as PiModel, PiAiError,
     Response as PiResponse, Role as PiRole, ToolDef as PiToolDef, Usage as PiUsage,
+};
+
+// AutoContext — Closed-loop learning (Competitor → Analyst → Coach → Curator)
+pub mod autocontext;
+pub use autocontext::{
+    AutoContextLoop, AutoContextStore, DistillationRouter, FrontierConfig, HarnessResult, Hint,
+    KnowledgeBase, LoopConfig as AutoContextLoopConfig, LoopResult, ModelTier, Playbook,
+    PlaybookHarness, RetrievedContext, ScenarioBuilder, StorageConfig, TrainingExample,
+    ValidationPipeline, ValidationResult, ValidationStage,
+};
+
+// Stigmergic Dream Consolidation — offline experience replay + temporal pattern learning
+pub mod dream;
+pub use dream::{
+    CrystallizedPattern, DreamConfig, DreamCycleResult, ProtoSkill, StigmergicDreamEngine,
+    TemporalMotif,
 };
 
 // optimize_anything

@@ -114,9 +114,9 @@ impl Default for BatchConfig {
             enable_llm_deliberation: true,
             enable_stigmergic_entities: true,
             use_real_llm: false, // Default to simulation for reproducibility
-            ollama_model:
-                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
-                    .to_string(),
+            ollama_model: crate::ollama_client::resolve_model_from_env(
+                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+            ),
             llm_latency_budget_ms: 5000,
             enable_credit_assignment: true,
             credit_replay_samples: 5,

@@ -96,6 +96,7 @@ default = ["gpu"]
 gpu = ["wgpu", "bytemuck", "pollster"]
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio-test = "0.4"
 wat = "1"
 

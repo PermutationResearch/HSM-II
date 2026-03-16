@@ -65,12 +65,14 @@ impl CypherParser {
             None => (match_part.trim(), None),
         };
 
-        let match_clause = if pattern_str.contains(")-[") {
+        let match_clause = if pattern_str.contains("]->(") {
+            // Directed path: (a)-[r]->(b)
             Self::parse_path_match(pattern_str)?
-        } else if pattern_str.starts_with('(') {
-            Self::parse_node_match(pattern_str)?
         } else if pattern_str.starts_with("()-[") {
+            // Undirected relationship: ()-[r]-()
             Self::parse_relationship_match(pattern_str)?
+        } else if pattern_str.starts_with('(') && !pattern_str.contains(")-[") {
+            Self::parse_node_match(pattern_str)?
         } else {
             return None;
         };
@@ -129,8 +131,7 @@ impl CypherParser {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let rel_inner = rel_part.strip_suffix(']')?;
-        let mut rel_parts = rel_inner.split(':');
+        let mut rel_parts = rel_part.split(':');
         let relationship_variable = rel_parts.next()?.trim().to_string();
         let relationship_type = rel_parts
             .next()

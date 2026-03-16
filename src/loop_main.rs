@@ -17,8 +17,9 @@ impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             tick_interval: Duration::from_secs(2),
-            model: "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL"
-                .to_string(),
+            model: crate::ollama_client::resolve_model_from_env(
+                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+            ),
             max_ticks: None,
             auto_evolve_interval: 10,
             reflection_interval: 3,

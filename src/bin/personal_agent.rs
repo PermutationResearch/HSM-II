@@ -448,6 +448,7 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
                     BeliefSource::Observation => "👁️",
                     BeliefSource::Reflection => "💭",
                     BeliefSource::Inference => "🔗",
+                    BeliefSource::Prediction => "🔮",
                 };
                 println!("{} [{:.2}] {}", source_icon, belief.confidence, belief.content);
             }
@@ -472,9 +473,12 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            let (l0, l1) = hyper_stigmergy::memory::derive_hierarchy(&content);
             agent.world.beliefs.push(Belief {
                 id,
                 content: content.clone(),
+                abstract_l0: Some(l0),
+                overview_l1: Some(l1),
                 confidence: 0.9,
                 source: BeliefSource::UserProvided,
                 supporting_evidence: vec!["User added via CLI".to_string()],

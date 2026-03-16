@@ -84,13 +84,13 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<()> {
                     state.input.pop();
                 }
                 CodexEvent::ChangeModel => {
-                    // Cycle models
+                    // Cycle models (start from OLLAMA_MODEL if set)
+                    let env_model = hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2");
                     state.model = match state.model.as_str() {
-                        "llama3.2" => "claude-3.5-sonnet",
-                        "claude-3.5-sonnet" => "gpt-4",
-                        _ => "llama3.2",
-                    }
-                    .to_string();
+                        m if m == env_model => "claude-3.5-sonnet".to_string(),
+                        "claude-3.5-sonnet" => "gpt-4".to_string(),
+                        _ => env_model,
+                    };
                 }
                 CodexEvent::AutocompleteNext => {
                     state.autocomplete_next();

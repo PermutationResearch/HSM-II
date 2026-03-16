@@ -37,9 +37,11 @@ impl Model {
         }
     }
 
-    /// Create with DeepSeek-R1 abliterated default
+    /// Create with DeepSeek-R1 abliterated default (respects OLLAMA_MODEL env var)
     pub fn deepseek_abliterated() -> Self {
-        Self::ollama("hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL")
+        Self::ollama(crate::ollama_client::resolve_model_from_env(
+            "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+        ))
     }
 }
 

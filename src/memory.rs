@@ -23,10 +23,20 @@ const EMBEDDING_DIM: usize = 768;
 
 // ── Memory Entry ──────────────────────────────────────────────────────
 
+/// OpenViking-inspired L0/L1/L2 tiered context:
+///   L0 (abstract_l0): ~50 token summary for quick relevance filtering
+///   L1 (overview_l1): ~500 token overview for navigation/reranking
+///   L2 (content):      full entry text for detailed processing
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: usize,
     pub content: String,
+    /// L0 abstract: single-sentence summary (~50 tokens) for rapid filtering
+    #[serde(default)]
+    pub abstract_l0: Option<String>,
+    /// L1 overview: structured summary (~500 tokens) for navigation
+    #[serde(default)]
+    pub overview_l1: Option<String>,
     pub network: MemoryNetwork,
     pub entities: Vec<String>,
     pub tags: Vec<String>,
@@ -62,6 +72,125 @@ pub struct StrategyScores {
     pub graph: f64,
     pub temporal: f64,
     pub fused: f64,
+}
+
+// ── OpenViking-inspired Progressive Recall ───────────────────────────
+
+/// Which context tier to render when returning recall results.
+/// Inspired by OpenViking's L0/L1/L2 hierarchical retrieval.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextLevel {
+    /// ~50 token abstract — for rapid relevance scanning
+    L0,
+    /// ~500 token overview — for navigation and reranking
+    L1,
+    /// Full content — for detailed processing
+    L2,
+}
+
+/// Configuration for progressive token-budget-aware recall.
+#[derive(Clone, Debug)]
+pub struct RecallConfig {
+    /// How many candidates to retrieve initially (broad sweep)
+    pub k_initial: usize,
+    /// How many results to return after reranking
+    pub k_final: usize,
+    /// Maximum total token budget for returned content
+    pub token_budget: usize,
+    /// Preferred context level; falls back to lower tiers to fit budget
+    pub level: ContextLevel,
+}
+
+impl Default for RecallConfig {
+    fn default() -> Self {
+        Self {
+            k_initial: 20,
+            k_final: 5,
+            token_budget: 2000,
+            level: ContextLevel::L1,
+        }
+    }
+}
+
+/// A single result from progressive recall, with its rendered content
+/// at the appropriate context level to fit the token budget.
+#[derive(Clone, Debug)]
+pub struct ProgressiveRecallResult {
+    pub entry: MemoryEntry,
+    pub score: f64,
+    pub strategy_scores: StrategyScores,
+    /// The text actually sent to the LLM (L0, L1, or L2 depending on budget)
+    pub rendered_content: String,
+    /// Which level was used for this result
+    pub level: ContextLevel,
+}
+
+// ── Hierarchy Derivation (OpenViking L0/L1) ─────────────────────────
+
+/// Derive L0 (abstract) and L1 (overview) from full content.
+///
+/// This is a lightweight, instant, local operation — no LLM calls.
+/// L0: First sentence (or first 80 chars), capped at ~50 tokens.
+/// L1: First 3 sentences (or first 500 chars) with key entity extraction.
+pub fn derive_hierarchy(content: &str) -> (String, String) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    // L0: First sentence or first 80 chars, whichever is shorter
+    let l0 = {
+        let first_sentence_end = trimmed
+            .find(|c: char| c == '.' || c == '!' || c == '?')
+            .map(|i| i + 1)
+            .unwrap_or(trimmed.len());
+        let end = first_sentence_end.min(80).min(trimmed.len());
+        let mut s = trimmed[..end].to_string();
+        if end < trimmed.len() && !s.ends_with('.') && !s.ends_with('!') && !s.ends_with('?') {
+            s.push('…');
+        }
+        s
+    };
+
+    // L1: First 3 sentences or first 500 chars with key terms
+    let l1 = {
+        let mut sentences = Vec::new();
+        let mut start = 0;
+        let chars: Vec<char> = trimmed.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            if (c == '.' || c == '!' || c == '?') && i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+                let sentence: String = chars[start..=i].iter().collect();
+                sentences.push(sentence);
+                start = i + 1;
+                if sentences.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        // If no sentence breaks found, take up to 500 chars
+        if sentences.is_empty() {
+            let end = trimmed.len().min(500);
+            let mut s = trimmed[..end].to_string();
+            if end < trimmed.len() {
+                s.push('…');
+            }
+            s
+        } else {
+            let mut overview = sentences.join(" ").trim().to_string();
+            if overview.len() > 500 {
+                overview.truncate(500);
+                overview.push('…');
+            }
+            overview
+        }
+    };
+
+    (l0, l1)
+}
+
+/// Estimate token count (rough: ~4 chars per token for English)
+fn estimate_tokens(text: &str) -> usize {
+    (text.len() + 3) / 4
 }
 
 // ── Hybrid Memory Store ───────────────────────────────────────────────
@@ -121,9 +250,12 @@ impl HybridMemory {
 
         let importance = Self::calculate_importance(content, &network);
 
+        let (l0, l1) = derive_hierarchy(content);
         let entry = MemoryEntry {
             id,
             content: content.to_string(),
+            abstract_l0: Some(l0),
+            overview_l1: Some(l1),
             network: network.clone(),
             entities: entities.clone(),
             tags: tags.clone(),
@@ -225,6 +357,107 @@ impl HybridMemory {
         }
 
         fused
+    }
+
+    /// Progressive recall: token-budget-aware retrieval using L0/L1/L2 tiers.
+    ///
+    /// Inspired by OpenViking's hierarchical retriever:
+    ///   1. Broad sweep at k_initial using all 4 strategies + RRF
+    ///   2. Rerank top k_final
+    ///   3. Render each result at the requested ContextLevel
+    ///   4. If budget exceeded, fall back to lower tiers (L2→L1→L0)
+    pub fn recall_progressive(
+        &mut self,
+        query: &str,
+        query_embedding: &[f32],
+        config: &RecallConfig,
+        current_tick: u64,
+    ) -> Vec<ProgressiveRecallResult> {
+        // Step 1: Broad recall
+        let candidates = self.recall(query, query_embedding, config.k_initial, current_tick);
+
+        // Step 2: Take top k_final
+        let top_k: Vec<RecallResult> = candidates.into_iter().take(config.k_final).collect();
+
+        // Step 3: Progressive rendering with budget
+        let mut results = Vec::new();
+        let mut budget_remaining = config.token_budget;
+
+        for result in top_k {
+            // Try rendering at requested level, fall back if over budget
+            let (rendered, level) = Self::render_at_level(&result.entry, &config.level, budget_remaining);
+            let tokens = estimate_tokens(&rendered);
+
+            if tokens > budget_remaining && !results.is_empty() {
+                // Budget exhausted — stop adding results
+                break;
+            }
+
+            budget_remaining = budget_remaining.saturating_sub(tokens);
+
+            results.push(ProgressiveRecallResult {
+                entry: result.entry,
+                score: result.score,
+                strategy_scores: result.strategy_scores,
+                rendered_content: rendered,
+                level,
+            });
+        }
+
+        results
+    }
+
+    /// Render a memory entry at the given context level, falling back to
+    /// lower tiers if the content exceeds the remaining budget.
+    fn render_at_level(
+        entry: &MemoryEntry,
+        preferred: &ContextLevel,
+        budget_tokens: usize,
+    ) -> (String, ContextLevel) {
+        match preferred {
+            ContextLevel::L2 => {
+                let tokens = estimate_tokens(&entry.content);
+                if tokens <= budget_tokens {
+                    return (entry.content.clone(), ContextLevel::L2);
+                }
+                // Fall back to L1
+                if let Some(ref l1) = entry.overview_l1 {
+                    if estimate_tokens(l1) <= budget_tokens {
+                        return (l1.clone(), ContextLevel::L1);
+                    }
+                }
+                // Fall back to L0
+                if let Some(ref l0) = entry.abstract_l0 {
+                    return (l0.clone(), ContextLevel::L0);
+                }
+                // Last resort: truncate
+                let end = (budget_tokens * 4).min(entry.content.len());
+                (entry.content[..end].to_string(), ContextLevel::L2)
+            }
+            ContextLevel::L1 => {
+                if let Some(ref l1) = entry.overview_l1 {
+                    let tokens = estimate_tokens(l1);
+                    if tokens <= budget_tokens {
+                        return (l1.clone(), ContextLevel::L1);
+                    }
+                }
+                // Fall back to L0
+                if let Some(ref l0) = entry.abstract_l0 {
+                    return (l0.clone(), ContextLevel::L0);
+                }
+                // Fallback: truncate content
+                let end = (budget_tokens * 4).min(entry.content.len());
+                (entry.content[..end].to_string(), ContextLevel::L1)
+            }
+            ContextLevel::L0 => {
+                if let Some(ref l0) = entry.abstract_l0 {
+                    return (l0.clone(), ContextLevel::L0);
+                }
+                // Generate on-the-fly
+                let (l0, _) = derive_hierarchy(&entry.content);
+                (l0, ContextLevel::L0)
+            }
+        }
     }
 
     /// Semantic recall using vector similarity

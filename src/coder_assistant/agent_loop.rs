@@ -30,7 +30,9 @@ impl Default for AgentConfig {
             tool_timeout_ms: 60000,
             enable_streaming: true,
             max_tool_calls_per_message: 5,
-            model: "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M".to_string(),
+            model: crate::ollama_client::resolve_model_from_env(
+                "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M",
+            ),
             api_url: "http://localhost:11434".to_string(),
             supports_thinking: true,
         }
