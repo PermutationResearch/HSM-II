@@ -437,6 +437,21 @@ impl EnhancedPersonalAgent {
             self.chat_history.drain(..drain_count);
         }
 
+        // Post-chat belief extraction: learn business facts from conversation
+        // Runs every 3rd message to avoid excessive LLM calls
+        if self.messages_since_reflection % 3 == 0 {
+            let extracted_count = crate::onboard::post_chat_extract_and_store(
+                &self.llm,
+                &mut self.world,
+                &mut self.living_prompt,
+                &msg.content,
+                &response.content,
+            ).await;
+            if extracted_count > 0 {
+                info!("Post-chat extraction: learned {} new belief(s)", extracted_count);
+            }
+        }
+
         // Social memory: record promise if agent committed to something
         {
             let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();

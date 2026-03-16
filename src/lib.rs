@@ -388,6 +388,14 @@ pub use investigation_engine::{
 };
 pub use investigation_tools::{InvestigationToolRegistry, ToolCallRecord};
 
+// Onboarding, Belief Extraction, and Document Ingestion
+pub mod onboard;
+pub use onboard::{
+    extract_beliefs_from_chat, ingest_file, post_chat_extract_and_store, run_onboard_batch,
+    run_onboard_interactive, store_extracted_beliefs, ExtractedBelief, IngestConfig, IngestResult,
+    OnboardResult,
+};
+
 pub use metrics::{
     AggregatedStats, BatchAggregator, ExperimentRun, FederationEvent, MetricsCollector,
     MetricsCouncilDecision, MetricsExperimentConfig, TickSnapshot,

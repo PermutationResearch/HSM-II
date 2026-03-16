@@ -85,6 +85,15 @@ enum Commands {
     /// Bootstrap new agent (first-time setup)
     Bootstrap,
 
+    /// Onboard: teach HSM-II about your business
+    Onboard,
+
+    /// Ingest a document to extract business knowledge
+    Ingest {
+        /// Path to file (.txt, .md, .csv, .json, .html)
+        file: String,
+    },
+
     /// Check agent status
     Status,
 }
@@ -157,6 +166,12 @@ async fn main() -> Result<()> {
         }
         Commands::Bootstrap => {
             cmd_bootstrap(&home).await?;
+        }
+        Commands::Onboard => {
+            cmd_onboard(&home).await?;
+        }
+        Commands::Ingest { file } => {
+            cmd_ingest(&home, &file).await?;
         }
         Commands::Status => {
             cmd_status(&home).await?;
@@ -546,6 +561,66 @@ async fn cmd_bootstrap(home: &PathBuf) -> Result<()> {
     println!("  - Run `hsmii start` to chat with your multi-agent system");
     println!("  - Run `hsmii start --telegram` to enable Telegram bot");
     println!("  - Use `hsmii memory` to view/query beliefs");
+
+    Ok(())
+}
+
+/// Onboard: guided questionnaire to teach HSM-II about the business
+async fn cmd_onboard(home: &PathBuf) -> Result<()> {
+    if !hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+        println!("Agent not initialized. Run `hsmii bootstrap` first.");
+        return Ok(());
+    }
+
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
+    let beliefs_before = agent.world.beliefs.len();
+
+    let _result = hyper_stigmergy::onboard::run_onboard_interactive(
+        &mut agent.world,
+        &mut agent.living_prompt,
+    )
+    .await?;
+
+    agent.save().await?;
+
+    println!(
+        "\n✓ Saved to LadybugDB ({} → {} beliefs)",
+        beliefs_before,
+        agent.world.beliefs.len()
+    );
+    println!("  Run `hsmii memory show` to review your beliefs");
+    println!("  Run `hsmii start` to chat with business-aware HSM-II");
+
+    Ok(())
+}
+
+/// Ingest a document to extract business knowledge
+async fn cmd_ingest(home: &PathBuf, file_path: &str) -> Result<()> {
+    if !hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+        println!("Agent not initialized. Run `hsmii bootstrap` first.");
+        return Ok(());
+    }
+
+    let mut agent = EnhancedPersonalAgent::initialize(home).await?;
+    let beliefs_before = agent.world.beliefs.len();
+
+    let config = hyper_stigmergy::onboard::IngestConfig::default();
+    let _result = hyper_stigmergy::onboard::ingest_file(
+        &agent.llm,
+        &mut agent.world,
+        &mut agent.living_prompt,
+        file_path,
+        &config,
+    )
+    .await?;
+
+    agent.save().await?;
+
+    println!(
+        "\n✓ Saved to LadybugDB ({} → {} beliefs)",
+        beliefs_before,
+        agent.world.beliefs.len()
+    );
 
     Ok(())
 }
