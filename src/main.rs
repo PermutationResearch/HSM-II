@@ -14368,6 +14368,7 @@ fn draw_improvement(f: &mut Frame, app: &App, area: Rect) {
                     hyper_stigmergy::BeliefSource::Reflection => 'R',
                     hyper_stigmergy::BeliefSource::Inference => 'I',
                     hyper_stigmergy::BeliefSource::UserProvided => 'U',
+                    hyper_stigmergy::BeliefSource::Prediction => 'P',
                 };
                 let content = if b.content.len() > 40 {
                     format!("{}...", &b.content[..37])

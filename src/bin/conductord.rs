@@ -79,17 +79,26 @@ struct DecideRequest {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Respect OLLAMA_MODEL env var: override CLI defaults when env is set
+    let resolve = |cli_val: &str| -> String {
+        match std::env::var("OLLAMA_MODEL") {
+            Ok(m) if !m.is_empty() && m != "auto" => m,
+            _ => cli_val.to_string(),
+        }
+    };
+
     let state = AppState {
         bids: Arc::new(RwLock::new(Vec::new())),
         hypergraph_url: args.hypergraph_url.clone(),
         client: reqwest::Client::new(),
         softmax_temperature: args.softmax_temperature,
         llm_scorer: args.llm_scorer,
-        llm_scorer_model: args.llm_scorer_model.clone(),
+        llm_scorer_model: resolve(&args.llm_scorer_model),
         optimize_interval_ms: args.optimize_interval_ms,
         optimize_max_iterations: args.optimize_max_iterations,
         optimize_population: args.optimize_population,
-        optimize_model: args.optimize_model.clone(),
+        optimize_model: resolve(&args.optimize_model),
     };
 
     if let Some(interval_ms) = args.auto_interval_ms {

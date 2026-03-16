@@ -2,7 +2,9 @@ use std::io::{BufRead, Seek};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::autocontext::{AutoContextLoop, LoopResult};
 use crate::consensus::{ConsensusEngine, CorrelationMonitor, GuardianCritic, JuryContext};
+use crate::dream::{DreamCycleResult, StigmergicDreamEngine};
 use crate::federation::client::FederationClient;
 use crate::federation::types::*;
 use crate::hyper_stigmergy::HyperStigmergicMorphogenesis;
@@ -24,6 +26,10 @@ pub struct Conductor {
     pub pending_eval_report: Option<TaskEvalContext>,
     pub reward_report_path: Option<std::path::PathBuf>,
     pub reward_report_offset: u64,
+    /// AutoContext closed-loop learning (optional; runs every N ticks)
+    pub autocontext: Option<AutoContextLoop>,
+    /// Stigmergic Dream Consolidation engine (optional; runs every N ticks)
+    pub dream_engine: Option<StigmergicDreamEngine>,
 }
 
 impl Conductor {
@@ -39,6 +45,8 @@ impl Conductor {
             pending_eval_report: None,
             reward_report_path: None,
             reward_report_offset: 0,
+            autocontext: None,
+            dream_engine: None,
         }
     }
 
@@ -65,6 +73,16 @@ impl Conductor {
     pub fn with_reward_report_path(mut self, path: std::path::PathBuf) -> Self {
         self.reward_report_path = Some(path);
         self.reward_report_offset = 0;
+        self
+    }
+
+    pub fn with_autocontext(mut self, ac: AutoContextLoop) -> Self {
+        self.autocontext = Some(ac);
+        self
+    }
+
+    pub fn with_dream_engine(mut self, engine: StigmergicDreamEngine) -> Self {
+        self.dream_engine = Some(engine);
         self
     }
 
@@ -310,6 +328,8 @@ impl Conductor {
                 exec_ok: exec_result.is_ok(),
                 reward,
                 federation: None, // populated below after world lock is released
+                autocontext: None, // populated below
+                dream: None, // populated below in Phase 7
             }
         };
 
@@ -336,6 +356,22 @@ impl Conductor {
         let fed_result = self.federation_tick().await;
         if self.meta_graph.is_some() {
             tick_result.federation = Some(fed_result);
+        }
+
+        // Phase 7: Stigmergic Dream Consolidation
+        // Runs every dream_interval ticks — replays traces, detects temporal
+        // motifs, crystallizes patterns, deposits DreamTrail hyperedges,
+        // applies DKS survival pressure, and generates proto-skills.
+        if let Some(ref mut dream) = self.dream_engine {
+            let current_tick = tick_result.tick;
+            if dream.should_dream(current_tick) {
+                let mut world = self.world.write().await;
+                let dream_result = dream.dream(
+                    &mut world,
+                    &mut rlm.living_prompt,
+                );
+                tick_result.dream = Some(dream_result);
+            }
         }
 
         tick_result
@@ -541,6 +577,8 @@ pub struct TickResult {
     pub exec_ok: bool,
     pub reward: RewardSignal,
     pub federation: Option<FederationTickResult>,
+    pub autocontext: Option<LoopResult>,
+    pub dream: Option<DreamCycleResult>,
 }
 
 #[derive(Debug, Clone, Default)]

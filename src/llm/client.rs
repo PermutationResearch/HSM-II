@@ -311,7 +311,7 @@ impl LlmClient {
     /// Calculate exponential backoff delay
     fn calculate_backoff(&self, attempt: usize) -> u64 {
         let delay = (self.retry_config.base_delay_ms as f64
-            * self.retry_config.exponential_base.powi(attempt as i32)) as u64;
+            * self.retry_config.exponential_base.powi(attempt.saturating_sub(1) as i32)) as u64;
         delay.min(self.retry_config.max_delay_ms)
     }
 

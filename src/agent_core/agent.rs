@@ -224,10 +224,13 @@ mod tests {
 
     #[test]
     fn test_agent_builder() {
+        let model = crate::ollama_client::resolve_model_from_env(
+            "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+        );
         let _agent = Agent::builder()
             .system("You are a helpful assistant")
             .queue_mode(QueueMode::AllAtOnce)
-            .model("hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL")
+            .model(&model)
             .build();
 
         // Just verify it builds

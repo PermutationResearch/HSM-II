@@ -331,8 +331,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     config.enable_llm_deliberation = true;
     config.enable_stigmergic_entities = true;
     config.llm_latency_budget_ms = 10000; // 10 second timeout per LLM call
-    config.ollama_model =
-        "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL".to_string();
+    config.ollama_model = hyper_stigmergy::ollama_client::resolve_model_from_env(
+        "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+    );
     config.use_real_llm = use_real_llm; // Enable via --real-llm flag
     config.enable_credit_assignment = enable_credit;
     config.seed_base = seed_base;

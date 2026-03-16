@@ -102,6 +102,18 @@ fn normalize_ollama_host_port(host: &str, default_port: u16) -> (String, u16) {
     (host_no_port, default_port)
 }
 
+/// Resolve the model name from `OLLAMA_MODEL` env var (sync, no network).
+///
+/// Returns the env var value when set and non-empty (and not `"auto"`),
+/// otherwise returns `fallback`. Use this everywhere a default model
+/// string is needed so that `export OLLAMA_MODEL=…` works globally.
+pub fn resolve_model_from_env(fallback: &str) -> String {
+    match std::env::var("OLLAMA_MODEL") {
+        Ok(m) if !m.is_empty() && m != "auto" => m,
+        _ => fallback.to_string(),
+    }
+}
+
 impl OllamaConfig {
     /// Detect the best available model from Ollama.
     /// Preference order:

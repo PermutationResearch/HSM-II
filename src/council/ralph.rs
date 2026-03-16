@@ -78,9 +78,18 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    /// Resolve model from `OLLAMA_MODEL` env var, falling back to `qwen2.5:14b`.
+    /// When set to `"auto"`, defer to auto-detection (caller should run `OllamaConfig::detect_model`).
+    fn resolve_model() -> String {
+        match std::env::var("OLLAMA_MODEL") {
+            Ok(m) if !m.is_empty() && m != "auto" => m,
+            _ => "qwen2.5:14b".to_string(),
+        }
+    }
+
     pub fn default_worker() -> Self {
         Self {
-            model: "qwen2.5:14b".to_string(),
+            model: Self::resolve_model(),
             provider: "ollama".to_string(),
             temperature: 0.7,
             system_prompt: WORKER_SYSTEM_PROMPT.to_string(),
@@ -89,7 +98,7 @@ impl AgentConfig {
 
     pub fn default_reviewer() -> Self {
         Self {
-            model: "qwen2.5:14b".to_string(),
+            model: Self::resolve_model(),
             provider: "ollama".to_string(),
             temperature: 0.3, // Lower temperature for consistent review
             system_prompt: REVIEWER_SYSTEM_PROMPT.to_string(),

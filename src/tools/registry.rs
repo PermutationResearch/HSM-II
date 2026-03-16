@@ -199,18 +199,138 @@ mod tests {
     async fn test_registry() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(TestTool));
-        
+
         assert!(registry.has("test_tool"));
         assert!(!registry.has("nonexistent"));
-        
+
         let call = ToolCall {
             name: "test_tool".to_string(),
             parameters: json!({"input": "hello"}),
             call_id: "1".to_string(),
         };
-        
+
         let result = registry.execute(call).await;
         assert!(result.output.success);
         assert!(result.output.result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_register_all_tools() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        // Should have 60+ tools registered
+        let tools = registry.list_tools();
+        assert!(tools.len() >= 40, "Expected 40+ tools, got {}", tools.len());
+
+        // Core tools must exist (note: file tools are "read"/"write"/"edit", enhanced versions are "read_file")
+        assert!(registry.has("read"), "read missing");
+        assert!(registry.has("write"), "write missing");
+        assert!(registry.has("read_file"), "read_file (enhanced) missing");
+        assert!(registry.has("bash"), "bash missing");
+        assert!(registry.has("grep"), "grep missing");
+        assert!(registry.has("web_search"), "web_search missing");
+        assert!(registry.has("git_status"), "git_status missing");
+        assert!(registry.has("calculator"), "calculator missing");
+        assert!(registry.has("system_info"), "system_info missing");
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_read_file() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        // Execute read_file on Cargo.toml (should exist)
+        let call = ToolCall {
+            name: "read_file".to_string(),
+            parameters: json!({"path": "Cargo.toml"}),
+            call_id: "test_read".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        assert!(result.output.success, "read_file failed: {:?}", result.output.error);
+        assert!(!result.output.result.is_empty(), "read_file returned empty result");
+        assert!(result.output.result.contains("[package]"), "Cargo.toml should contain [package]");
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_calculator() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        let call = ToolCall {
+            name: "calculator".to_string(),
+            parameters: json!({"expression": "2 + 2"}),
+            call_id: "test_calc".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        assert!(result.output.success, "calculator failed: {:?}", result.output.error);
+        assert!(result.output.result.contains("4"), "2+2 should equal 4, got: {}", result.output.result);
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_system_info() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        let call = ToolCall {
+            name: "system_info".to_string(),
+            parameters: json!({}),
+            call_id: "test_sysinfo".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        assert!(result.output.success, "system_info failed: {:?}", result.output.error);
+        assert!(!result.output.result.is_empty(), "system_info returned empty result");
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_grep() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        let call = ToolCall {
+            name: "grep".to_string(),
+            parameters: json!({"pattern": "fn main", "path": "src/"}),
+            call_id: "test_grep".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        assert!(result.output.success, "grep failed: {:?}", result.output.error);
+        // Should find at least one fn main in src/
+        assert!(!result.output.result.is_empty(), "grep for 'fn main' in src/ returned empty");
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_list_directory() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        let call = ToolCall {
+            name: "list_directory".to_string(),
+            parameters: json!({"path": "src/"}),
+            call_id: "test_ls".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        assert!(result.output.success, "list_directory failed: {:?}", result.output.error);
+        assert!(!result.output.result.is_empty(), "list_directory returned empty");
+    }
+
+    #[tokio::test]
+    async fn test_real_tool_execution_git_status() {
+        let mut registry = ToolRegistry::new();
+        super::super::register_all_tools(&mut registry);
+
+        let call = ToolCall {
+            name: "git_status".to_string(),
+            parameters: json!({}),
+            call_id: "test_git".to_string(),
+        };
+
+        let result = registry.execute(call).await;
+        // git_status should succeed if we're in a git repo
+        assert!(result.output.success, "git_status failed: {:?}", result.output.error);
     }
 }

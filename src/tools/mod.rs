@@ -112,6 +112,10 @@ pub use flags_tools::{
 pub mod rlm_tool;
 pub use rlm_tool::{RlmProcessTool, RlmTrajectoryTool};
 
+// MiroFish-inspired prediction tool
+pub mod prediction_tool;
+pub use prediction_tool::PredictionTool;
+
 /// Tool trait - all tools implement this
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
@@ -299,4 +303,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     // RLM tools
     registry.register(Arc::new(RlmProcessTool::new()));
     registry.register(Arc::new(RlmTrajectoryTool::new()));
+
+    // MiroFish-inspired prediction tool
+    registry.register(Arc::new(PredictionTool::new()));
 }
