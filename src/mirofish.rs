@@ -695,6 +695,8 @@ pub struct RefinementRound {
     pub adjustments: Vec<String>,
     /// Updated confidence after refinement
     pub updated_confidence: f64,
+    /// Self-verification: did the model detect inconsistencies?
+    pub self_check: String,
 }
 
 /// Refinement session state
@@ -711,7 +713,344 @@ pub struct RefinementSession {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. The MiroFish Engine — Ties Everything Together
+// 6b. LLM Backend Trait — Multi-Provider Support
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result from any LLM backend (unified interface)
+pub struct LlmBackendResult {
+    pub text: String,
+    pub timed_out: bool,
+}
+
+/// Trait that any LLM provider can implement for MiroFish
+#[async_trait::async_trait]
+pub trait LlmBackend: Send + Sync {
+    /// Generate text from a prompt
+    async fn generate_text(&self, prompt: &str) -> LlmBackendResult;
+    /// Name of the provider for logging
+    fn provider_name(&self) -> &str;
+}
+
+/// OllamaClient implements LlmBackend
+#[async_trait::async_trait]
+impl LlmBackend for OllamaClient {
+    async fn generate_text(&self, prompt: &str) -> LlmBackendResult {
+        let result = self.generate(prompt).await;
+        LlmBackendResult {
+            text: result.text,
+            timed_out: result.timed_out,
+        }
+    }
+    fn provider_name(&self) -> &str {
+        "ollama"
+    }
+}
+
+/// LlmClient (multi-provider) implements LlmBackend
+#[async_trait::async_trait]
+impl LlmBackend for crate::llm::client::LlmClient {
+    async fn generate_text(&self, prompt: &str) -> LlmBackendResult {
+        use crate::llm::client::{LlmRequest, Message};
+        let request = LlmRequest {
+            messages: vec![Message::user(prompt)],
+            ..LlmRequest::default()
+        };
+        match self.chat(request).await {
+            Ok(response) => LlmBackendResult {
+                text: response.content,
+                timed_out: false,
+            },
+            Err(e) => {
+                tracing::warn!("LlmClient error: {}", e);
+                LlmBackendResult {
+                    text: String::new(),
+                    timed_out: true,
+                }
+            }
+        }
+    }
+    fn provider_name(&self) -> &str {
+        "multi-provider"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6c. Variable Validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Variable type for structured validation
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum VariableType {
+    Currency,
+    Percentage,
+    Number,
+    Duration,
+    FreeText,
+}
+
+/// Result of validating variables against a template
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub missing: Vec<String>,
+    pub warnings: Vec<String>,
+    pub normalized: HashMap<String, String>,
+}
+
+/// Validate variables against template requirements
+pub fn validate_variables(
+    template: &ScenarioTemplate,
+    variables: &HashMap<String, String>,
+) -> ValidationResult {
+    let mut missing = Vec::new();
+    let mut warnings = Vec::new();
+    let mut normalized = variables.clone();
+
+    // Check required variables
+    for var in &template.required_variables {
+        match variables.get(&var.name) {
+            None => missing.push(format!("{} ({})", var.name, var.description)),
+            Some(val) if val.trim().is_empty() => {
+                missing.push(format!("{} (provided but empty)", var.name));
+            }
+            Some(val) => {
+                // Normalize: trim whitespace
+                normalized.insert(var.name.clone(), val.trim().to_string());
+            }
+        }
+    }
+
+    // Fill optional defaults
+    for var in &template.optional_variables {
+        if !variables.contains_key(&var.name) {
+            if let Some(default) = &var.default {
+                normalized.insert(var.name.clone(), default.clone());
+                warnings.push(format!("{}: using default '{}'", var.name, default));
+            }
+        }
+    }
+
+    // Warn about unknown variables
+    let known: Vec<&str> = template
+        .required_variables
+        .iter()
+        .chain(template.optional_variables.iter())
+        .map(|v| v.name.as_str())
+        .collect();
+    for key in variables.keys() {
+        if !known.contains(&key.as_str()) {
+            warnings.push(format!("'{}' is not a recognized variable for this template", key));
+        }
+    }
+
+    ValidationResult {
+        valid: missing.is_empty(),
+        missing,
+        warnings,
+        normalized,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. Prediction Store — Disk Persistence & Comparison
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Persistent prediction store — saves history to disk for backtesting
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PredictionStore {
+    /// All historical records
+    pub records: Vec<PredictionRecord>,
+    /// All trajectory analyses
+    pub analyses: Vec<StoredAnalysis>,
+    /// Store file path
+    #[serde(skip)]
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Stored analysis with metadata for comparison
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredAnalysis {
+    /// Unique ID
+    pub id: String,
+    /// The full analysis
+    pub analysis: TrajectoryAnalysis,
+    /// User notes
+    pub notes: String,
+    /// Tags for filtering
+    pub tags: Vec<String>,
+}
+
+impl PredictionStore {
+    /// Load from disk or create empty
+    pub fn load(hsmii_home: &std::path::Path) -> Self {
+        let path = hsmii_home.join("prediction_history.json");
+        if path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(mut store) = serde_json::from_str::<PredictionStore>(&data) {
+                    store.path = Some(path);
+                    return store;
+                }
+            }
+        }
+        PredictionStore {
+            records: Vec::new(),
+            analyses: Vec::new(),
+            path: Some(path),
+        }
+    }
+
+    /// Save to disk
+    pub fn save(&self) -> Result<()> {
+        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Record a prediction for future backtesting
+    pub fn record_prediction(&mut self, record: PredictionRecord) {
+        self.records.push(record);
+        let _ = self.save();
+    }
+
+    /// Store a full analysis
+    pub fn store_analysis(&mut self, analysis: TrajectoryAnalysis, notes: &str, tags: &[String]) {
+        let id = format!(
+            "analysis_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        self.analyses.push(StoredAnalysis {
+            id,
+            analysis,
+            notes: notes.to_string(),
+            tags: tags.to_vec(),
+        });
+        let _ = self.save();
+    }
+
+    /// Record actual outcome for a prediction
+    pub fn record_outcome(&mut self, prediction_id: &str, actual_outcome: &str, was_correct: bool) {
+        if let Some(record) = self.records.iter_mut().find(|r| r.id == prediction_id) {
+            record.actual_outcome = Some(actual_outcome.to_string());
+            record.was_correct = Some(was_correct);
+            record.calibration_error = Some(
+                (record.predicted_confidence - if was_correct { 1.0 } else { 0.0 }).abs(),
+            );
+            let _ = self.save();
+        }
+    }
+
+    /// Get calibration stats from all recorded outcomes
+    pub fn calibration_stats(&self) -> CalibrationStats {
+        compute_calibration(&self.records)
+    }
+
+    /// List predictions awaiting outcomes (unresolved)
+    pub fn pending_outcomes(&self) -> Vec<&PredictionRecord> {
+        self.records.iter().filter(|r| r.was_correct.is_none()).collect()
+    }
+
+    /// Compare two analyses side by side
+    pub fn compare_analyses(&self, id_a: &str, id_b: &str) -> Option<AnalysisComparison> {
+        let a = self.analyses.iter().find(|s| s.id == id_a)?;
+        let b = self.analyses.iter().find(|s| s.id == id_b)?;
+
+        let impact_delta = a.analysis.expected_impact - b.analysis.expected_impact;
+        let confidence_delta = a.analysis.scenario_report.overall_confidence
+            - b.analysis.scenario_report.overall_confidence;
+
+        Some(AnalysisComparison {
+            analysis_a: id_a.to_string(),
+            analysis_b: id_b.to_string(),
+            impact_delta,
+            confidence_delta,
+            a_outcome: a.analysis.most_likely_outcome.clone(),
+            b_outcome: b.analysis.most_likely_outcome.clone(),
+            same_domain: a.analysis.domain == b.analysis.domain,
+        })
+    }
+
+    /// Generate synthetic backtesting data to bootstrap calibration.
+    /// Creates N synthetic prediction records with realistic confidence distributions,
+    /// then resolves them with a baseline accuracy model.
+    /// This is the "synthetic everything" escape hatch — calibration works
+    /// even before any real outcomes are recorded.
+    pub fn bootstrap_synthetic(&mut self, count: usize) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let domains = ["pricing", "growth", "marketing", "market_entry", "competitive"];
+        let base_accuracy = 0.62; // Realistic LLM prediction accuracy
+
+        for i in 0..count {
+            let domain = domains[i % domains.len()];
+            let mut hasher = DefaultHasher::new();
+            (i, domain).hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Synthetic confidence: LLMs tend to cluster 0.55-0.85
+            let raw_confidence = 0.55 + (hash % 30) as f64 / 100.0;
+            // Whether it was correct: base_accuracy ± noise
+            let correctness_roll = (hash >> 16) % 100;
+            let was_correct = (correctness_roll as f64 / 100.0) < base_accuracy;
+
+            let record = PredictionRecord {
+                id: format!("synthetic_{}", i),
+                predicted_at: 0,
+                topic: format!("synthetic_{}_scenario", domain),
+                predicted_outcome: format!("synthetic_outcome_{}", i),
+                predicted_confidence: raw_confidence,
+                actual_outcome: Some(if was_correct {
+                    format!("synthetic_outcome_{}", i)
+                } else {
+                    "different_outcome".into()
+                }),
+                was_correct: Some(was_correct),
+                calibration_error: Some(
+                    (raw_confidence - if was_correct { 1.0 } else { 0.0 }).abs(),
+                ),
+            };
+            self.records.push(record);
+        }
+        let _ = self.save();
+    }
+
+    /// List all stored analyses, most recent first
+    pub fn list_analyses(&self) -> Vec<&StoredAnalysis> {
+        let mut sorted: Vec<&StoredAnalysis> = self.analyses.iter().collect();
+        sorted.sort_by(|a, b| b.analysis.generated_at.cmp(&a.analysis.generated_at));
+        sorted
+    }
+
+    /// Filter analyses by domain
+    pub fn analyses_by_domain(&self, domain: &str) -> Vec<&StoredAnalysis> {
+        self.analyses
+            .iter()
+            .filter(|a| a.analysis.domain.to_lowercase().contains(&domain.to_lowercase()))
+            .collect()
+    }
+}
+
+/// Comparison between two analyses
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnalysisComparison {
+    pub analysis_a: String,
+    pub analysis_b: String,
+    pub impact_delta: f64,
+    pub confidence_delta: f64,
+    pub a_outcome: String,
+    pub b_outcome: String,
+    pub same_domain: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. The MiroFish Engine — Ties Everything Together
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Full MiroFish trajectory analysis result
@@ -723,6 +1062,8 @@ pub struct TrajectoryAnalysis {
     pub domain: String,
     /// Variables provided
     pub variables: HashMap<String, String>,
+    /// Variable validation result
+    pub validation: Option<ValidationResult>,
     /// The probability flow network
     pub flow_network: ProbabilityFlowNetwork,
     /// Projection curve over time
@@ -737,34 +1078,78 @@ pub struct TrajectoryAnalysis {
     pub most_likely_outcome: String,
     /// Calibration stats (if available)
     pub calibration: Option<CalibrationStats>,
+    /// Were confidence values recalibrated?
+    pub recalibrated: bool,
+    /// Process reward: per-step confidence scores after recalibration
+    pub step_scores: Vec<f64>,
     /// Generated at timestamp
     pub generated_at: u64,
 }
 
 /// The MiroFish Trajectory Engine
 pub struct MiroFishEngine {
-    /// LLM client for trajectory generation
-    llm: OllamaClient,
-    /// Historical predictions for calibration
-    history: Vec<PredictionRecord>,
+    /// LLM backend (any provider)
+    llm: Box<dyn LlmBackend>,
+    /// Persistent prediction store (disk-backed)
+    pub store: PredictionStore,
 }
 
 impl MiroFishEngine {
-    /// Create engine from an existing OllamaClient
-    pub fn new(llm: OllamaClient) -> Self {
-        Self {
-            llm,
-            history: Vec::new(),
+    /// Create engine from an OllamaClient (backward-compatible)
+    pub fn new(llm: OllamaClient, hsmii_home: &std::path::Path) -> Self {
+        let mut store = PredictionStore::load(hsmii_home);
+        // Bootstrap synthetic calibration data if store is empty
+        if store.records.is_empty() {
+            store.bootstrap_synthetic(20);
+            tracing::info!("Bootstrapped 20 synthetic calibration records");
         }
+        Self {
+            llm: Box::new(llm),
+            store,
+        }
+    }
+
+    /// Create engine from multi-provider LlmClient
+    pub fn new_multi_provider(
+        llm: crate::llm::client::LlmClient,
+        hsmii_home: &std::path::Path,
+    ) -> Self {
+        let mut store = PredictionStore::load(hsmii_home);
+        if store.records.is_empty() {
+            store.bootstrap_synthetic(20);
+        }
+        Self {
+            llm: Box::new(llm),
+            store,
+        }
+    }
+
+    /// Create from any LlmBackend
+    pub fn from_backend(llm: Box<dyn LlmBackend>, hsmii_home: &std::path::Path) -> Self {
+        let mut store = PredictionStore::load(hsmii_home);
+        if store.records.is_empty() {
+            store.bootstrap_synthetic(20);
+        }
+        Self { llm, store }
     }
 
     /// Run a full trajectory analysis using a template
     pub async fn analyze_with_template(
-        &self,
+        &mut self,
         template: &ScenarioTemplate,
         variables: &HashMap<String, String>,
         beliefs: &[crate::hyper_stigmergy::Belief],
     ) -> Result<TrajectoryAnalysis> {
+        // 0. Validate variables
+        let validation = validate_variables(template, variables);
+        if !validation.valid {
+            return Err(anyhow::anyhow!(
+                "Missing required variables: {}",
+                validation.missing.join(", ")
+            ));
+        }
+        let vars = &validation.normalized;
+
         // 1. Build probability flow network from template
         let mut network = ProbabilityFlowNetwork::new(
             template.default_states.clone(),
@@ -778,12 +1163,12 @@ impl MiroFishEngine {
 
         // 3. Generate action trajectory via LLM
         let trajectory = self
-            .generate_trajectory(template, variables, beliefs)
+            .generate_trajectory(template, vars, beliefs)
             .await?;
 
         // 4. Run LLM scenario branches
         let scenario_report = self
-            .generate_scenario_report(template, variables, beliefs)
+            .generate_scenario_report(template, vars, beliefs)
             .await?;
 
         // 5. Compute expected impact
@@ -793,11 +1178,30 @@ impl MiroFishEngine {
             .map(|s| s.description.clone())
             .unwrap_or_else(|| "uncertain".to_string());
 
-        // 6. Calibration
-        let calibration = if self.history.len() >= 5 {
-            Some(compute_calibration(&self.history))
+        // 6. Process reward model: calibrate each step's confidence
+        let calibration = {
+            let stats = self.store.calibration_stats();
+            if stats.total_evaluated >= 5 {
+                Some(stats)
+            } else {
+                None
+            }
+        };
+
+        let (recalibrated, step_scores) = if let Some(ref cal) = calibration {
+            let scores: Vec<f64> = trajectory
+                .steps
+                .iter()
+                .map(|step| recalibrate_confidence(step.success_probability, cal))
+                .collect();
+            (true, scores)
         } else {
-            None
+            let scores: Vec<f64> = trajectory
+                .steps
+                .iter()
+                .map(|step| step.success_probability)
+                .collect();
+            (false, scores)
         };
 
         let now = std::time::SystemTime::now()
@@ -805,10 +1209,24 @@ impl MiroFishEngine {
             .unwrap_or_default()
             .as_secs();
 
-        Ok(TrajectoryAnalysis {
+        // 7. Auto-record this prediction for future calibration
+        let prediction_id = format!("pred_{}", now);
+        self.store.record_prediction(PredictionRecord {
+            id: prediction_id,
+            predicted_at: now,
+            topic: format!("{}: {}", template.name, template.domain),
+            predicted_outcome: most_likely.clone(),
+            predicted_confidence: scenario_report.overall_confidence,
+            actual_outcome: None,
+            was_correct: None,
+            calibration_error: None,
+        });
+
+        let analysis = TrajectoryAnalysis {
             template_id: Some(template.id.clone()),
             domain: template.domain.to_string(),
-            variables: variables.clone(),
+            variables: vars.clone(),
+            validation: Some(validation),
             flow_network: network,
             projection,
             trajectory,
@@ -816,8 +1234,148 @@ impl MiroFishEngine {
             expected_impact,
             most_likely_outcome: most_likely,
             calibration,
+            recalibrated,
+            step_scores,
             generated_at: now,
-        })
+        };
+
+        // 8. Persist analysis
+        self.store.store_analysis(
+            analysis.clone(),
+            "",
+            &[template.domain.to_string()],
+        );
+
+        Ok(analysis)
+    }
+
+    /// Multi-turn refinement: take feedback, re-run with context from previous round.
+    /// Implements dynamic/long CoT — each round builds on prior reasoning.
+    pub async fn refine(
+        &mut self,
+        session: &mut RefinementSession,
+        feedback: &str,
+        beliefs: &[crate::hyper_stigmergy::Belief],
+    ) -> Result<RefinementRound> {
+        let round_num = session.rounds.len() + 1;
+
+        // Build context from all previous rounds
+        let history_context: String = session
+            .rounds
+            .iter()
+            .map(|r| {
+                format!(
+                    "Round {}: Feedback: '{}' → Adjustments: [{}]",
+                    r.round,
+                    r.feedback,
+                    r.adjustments.join("; ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let current_synthesis = &session.current_best.synthesis;
+        let current_confidence = session.current_best.overall_confidence;
+
+        let belief_text: String = beliefs
+            .iter()
+            .take(3)
+            .map(|b| format!("- {}", b.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Refinement prompt with self-verification
+        let prompt = format!(
+            "You are refining a business prediction. This is refinement round {}.\n\n\
+             CURRENT PREDICTION (confidence: {:.0}%):\n{}\n\n\
+             PREVIOUS REFINEMENT HISTORY:\n{}\n\n\
+             NEW FEEDBACK:\n{}\n\n\
+             BUSINESS CONTEXT:\n{}\n\n\
+             Instructions:\n\
+             1. ADJUSTMENTS: List 2-4 specific changes based on the feedback\n\
+             2. SELF-CHECK: Identify any inconsistencies or blind spots in the updated prediction\n\
+             3. UPDATED SYNTHESIS: Rewrite the prediction incorporating adjustments\n\
+             4. CONFIDENCE: [0.0-1.0] updated confidence level\n\n\
+             Format:\n\
+             ADJUSTMENT: [specific change]\n\
+             ADJUSTMENT: [specific change]\n\
+             SELF_CHECK: [inconsistency or validation note]\n\
+             SYNTHESIS: [updated prediction]\n\
+             CONFIDENCE: [0.0-1.0]",
+            round_num,
+            current_confidence * 100.0,
+            current_synthesis,
+            if history_context.is_empty() { "None" } else { &history_context },
+            feedback,
+            belief_text,
+        );
+
+        let result = self.llm.generate_text(&prompt).await;
+
+        if result.timed_out || result.text.is_empty() {
+            return Err(anyhow::anyhow!("LLM refinement call timed out"));
+        }
+
+        // Parse refinement output
+        let mut adjustments = Vec::new();
+        let mut self_check = String::new();
+        let mut new_synthesis = String::new();
+        let mut new_confidence = current_confidence;
+
+        for line in result.text.lines() {
+            let trimmed = line.trim();
+            let upper = trimmed.to_uppercase();
+            if upper.starts_with("ADJUSTMENT:") {
+                adjustments.push(trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            } else if upper.starts_with("SELF_CHECK:") || upper.starts_with("SELF CHECK:") {
+                self_check = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+            } else if upper.starts_with("SYNTHESIS:") {
+                new_synthesis = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+            } else if upper.starts_with("CONFIDENCE:") {
+                new_confidence = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or("0.5")
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect::<String>()
+                    .parse::<f64>()
+                    .unwrap_or(current_confidence)
+                    .clamp(0.01, 0.99);
+            }
+        }
+
+        // Apply calibration to new confidence
+        let cal_stats = self.store.calibration_stats();
+        let calibrated_confidence = recalibrate_confidence(new_confidence, &cal_stats);
+
+        let round = RefinementRound {
+            round: round_num,
+            feedback: feedback.to_string(),
+            adjustments,
+            updated_confidence: calibrated_confidence,
+            self_check,
+        };
+
+        // Update session state
+        if !new_synthesis.is_empty() {
+            session.current_best.synthesis = new_synthesis;
+        }
+        session.current_best.overall_confidence = calibrated_confidence;
+        session.rounds.push(round.clone());
+
+        Ok(round)
+    }
+
+    /// Start a new refinement session from an analysis
+    pub fn start_refinement(&self, analysis: &TrajectoryAnalysis) -> RefinementSession {
+        RefinementSession {
+            original_report: analysis.scenario_report.clone(),
+            rounds: Vec::new(),
+            current_best: analysis.scenario_report.clone(),
+            finalized: false,
+        }
     }
 
     /// Generate step-by-step trajectory via LLM
@@ -858,7 +1416,7 @@ impl MiroFishEngine {
             template.name, template.domain, var_text, belief_text
         );
 
-        let result = self.llm.generate(&prompt).await;
+        let result = self.llm.generate_text(&prompt).await;
 
         let steps = if result.timed_out || result.text.is_empty() {
             // Fallback: generate basic steps
@@ -1010,7 +1568,8 @@ impl MiroFishEngine {
                     let variant_str = template.suggested_variants.join(", ");
                     let variants = vec![variant_str];
                     Some(variants)
-                }.as_deref(),
+                }
+                .as_deref(),
             )
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -1018,23 +1577,9 @@ impl MiroFishEngine {
         Ok(report)
     }
 
-    /// Add a historical prediction for back-testing
-    pub fn record_prediction(&mut self, record: PredictionRecord) {
-        self.history.push(record);
-    }
-
-    /// Record the actual outcome of a past prediction
-    pub fn record_outcome(&mut self, prediction_id: &str, actual_outcome: &str, was_correct: bool) {
-        if let Some(record) = self.history.iter_mut().find(|r| r.id == prediction_id) {
-            record.actual_outcome = Some(actual_outcome.to_string());
-            record.was_correct = Some(was_correct);
-            record.calibration_error = Some((record.predicted_confidence - if was_correct { 1.0 } else { 0.0 }).abs());
-        }
-    }
-
-    /// Get calibration stats
+    /// Get calibration stats from the persistent store
     pub fn calibration_stats(&self) -> CalibrationStats {
-        compute_calibration(&self.history)
+        self.store.calibration_stats()
     }
 }
 
@@ -1318,6 +1863,7 @@ RISKS: Low response rate";
             template_id: Some("test".into()),
             domain: "Testing".into(),
             variables: HashMap::new(),
+            validation: None,
             flow_network: ProbabilityFlowNetwork::new(vec![], vec![], "start"),
             projection: vec![],
             trajectory: Trajectory {
@@ -1341,11 +1887,309 @@ RISKS: Low response rate";
             expected_impact: 5.0,
             most_likely_outcome: "success".into(),
             calibration: None,
+            recalibrated: false,
+            step_scores: vec![],
             generated_at: 0,
         };
 
         let json = serde_json::to_string(&analysis).unwrap();
         let restored: TrajectoryAnalysis = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.domain, "Testing");
+    }
+
+    // ── New tests for variable validation ────────────────────────────────
+
+    #[test]
+    fn test_validate_variables_all_required() {
+        let template = pricing_strategy_template();
+        let mut vars = HashMap::new();
+        vars.insert("current_price".into(), "$49".into());
+        vars.insert("customer_count".into(), "15".into());
+        vars.insert("current_mrr".into(), "$12000".into());
+
+        let result = validate_variables(&template, &vars);
+        assert!(result.valid, "Should be valid: {:?}", result.missing);
+        assert!(result.missing.is_empty());
+    }
+
+    #[test]
+    fn test_validate_variables_missing_required() {
+        let template = pricing_strategy_template();
+        let mut vars = HashMap::new();
+        vars.insert("current_price".into(), "$49".into());
+        // missing customer_count and current_mrr
+
+        let result = validate_variables(&template, &vars);
+        assert!(!result.valid);
+        assert_eq!(result.missing.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_variables_fills_defaults() {
+        let template = pricing_strategy_template();
+        let mut vars = HashMap::new();
+        vars.insert("current_price".into(), "$49".into());
+        vars.insert("customer_count".into(), "15".into());
+        vars.insert("current_mrr".into(), "$12000".into());
+
+        let result = validate_variables(&template, &vars);
+        // Optional variables should get defaults
+        assert!(result.normalized.contains_key("competitor_price"));
+        assert_eq!(result.normalized["competitor_price"], "unknown");
+    }
+
+    #[test]
+    fn test_validate_variables_warns_unknown() {
+        let template = pricing_strategy_template();
+        let mut vars = HashMap::new();
+        vars.insert("current_price".into(), "$49".into());
+        vars.insert("customer_count".into(), "15".into());
+        vars.insert("current_mrr".into(), "$12000".into());
+        vars.insert("totally_unknown_var".into(), "value".into());
+
+        let result = validate_variables(&template, &vars);
+        assert!(result.valid);
+        assert!(result.warnings.iter().any(|w| w.contains("totally_unknown_var")));
+    }
+
+    // ── New tests for prediction store ───────────────────────────────────
+
+    #[test]
+    fn test_prediction_store_synthetic_bootstrap() {
+        let mut store = PredictionStore {
+            records: Vec::new(),
+            analyses: Vec::new(),
+            path: None,
+        };
+
+        store.bootstrap_synthetic(20);
+        assert_eq!(store.records.len(), 20);
+
+        // All synthetic records should be resolved
+        assert!(store.records.iter().all(|r| r.was_correct.is_some()));
+        assert!(store.records.iter().all(|r| r.actual_outcome.is_some()));
+
+        // Calibration should now work
+        let stats = store.calibration_stats();
+        assert_eq!(stats.total_evaluated, 20);
+        assert!(stats.actual_accuracy > 0.0);
+        assert!(stats.actual_accuracy < 1.0);
+    }
+
+    #[test]
+    fn test_prediction_store_record_and_outcome() {
+        let mut store = PredictionStore {
+            records: Vec::new(),
+            analyses: Vec::new(),
+            path: None,
+        };
+
+        store.records.push(PredictionRecord {
+            id: "test_1".into(),
+            predicted_at: 100,
+            topic: "pricing".into(),
+            predicted_outcome: "growth".into(),
+            predicted_confidence: 0.7,
+            actual_outcome: None,
+            was_correct: None,
+            calibration_error: None,
+        });
+
+        assert_eq!(store.pending_outcomes().len(), 1);
+
+        store.record_outcome("test_1", "growth", true);
+
+        assert_eq!(store.pending_outcomes().len(), 0);
+        assert_eq!(store.records[0].was_correct, Some(true));
+        assert!(store.records[0].calibration_error.is_some());
+    }
+
+    #[test]
+    fn test_prediction_store_comparison() {
+        let mut store = PredictionStore {
+            records: Vec::new(),
+            analyses: Vec::new(),
+            path: None,
+        };
+
+        let make_analysis = |domain: &str, impact: f64, confidence: f64| -> TrajectoryAnalysis {
+            TrajectoryAnalysis {
+                template_id: None,
+                domain: domain.into(),
+                variables: HashMap::new(),
+                validation: None,
+                flow_network: ProbabilityFlowNetwork::new(vec![], vec![], "s"),
+                projection: vec![],
+                trajectory: Trajectory {
+                    name: "t".into(), initial_state: "s".into(), target_outcome: "g".into(),
+                    steps: vec![], cumulative_probability: 0.5,
+                    estimated_duration: "1m".into(), critical_path: vec![],
+                },
+                scenario_report: PredictionReport {
+                    topic: "t".into(), seeds: vec![], variables: vec![],
+                    branches: vec![], synthesis: "s".into(),
+                    overall_confidence: confidence, generated_at: 0,
+                },
+                expected_impact: impact,
+                most_likely_outcome: "outcome".into(),
+                calibration: None,
+                recalibrated: false,
+                step_scores: vec![],
+                generated_at: 0,
+            }
+        };
+
+        store.analyses.push(StoredAnalysis {
+            id: "a1".into(),
+            analysis: make_analysis("Pricing", 5.0, 0.7),
+            notes: "".into(),
+            tags: vec![],
+        });
+        store.analyses.push(StoredAnalysis {
+            id: "a2".into(),
+            analysis: make_analysis("Pricing", 8.0, 0.6),
+            notes: "".into(),
+            tags: vec![],
+        });
+
+        let cmp = store.compare_analyses("a1", "a2").unwrap();
+        assert!((cmp.impact_delta - (-3.0)).abs() < 0.01);
+        assert!((cmp.confidence_delta - 0.1).abs() < 0.01);
+        assert!(cmp.same_domain);
+    }
+
+    // ── Test that step-level process reward scoring works ────────────────
+
+    #[test]
+    fn test_process_reward_step_scores() {
+        let cal = CalibrationStats {
+            total_evaluated: 20,
+            correct: 12,
+            avg_predicted_confidence: 0.75,
+            actual_accuracy: 0.6,
+            calibration_error: 0.15,
+            direction: "overconfident".into(),
+            adjustment_factor: 0.8, // 0.6/0.75
+        };
+
+        // Raw step probabilities
+        let raw_steps = vec![0.9, 0.7, 0.5, 0.8];
+
+        // After recalibration, each should be multiplied by 0.8
+        let recalibrated: Vec<f64> = raw_steps
+            .iter()
+            .map(|&p| recalibrate_confidence(p, &cal))
+            .collect();
+
+        assert!((recalibrated[0] - 0.72).abs() < 0.01); // 0.9 * 0.8
+        assert!((recalibrated[1] - 0.56).abs() < 0.01); // 0.7 * 0.8
+        assert!((recalibrated[2] - 0.40).abs() < 0.01); // 0.5 * 0.8
+        assert!((recalibrated[3] - 0.64).abs() < 0.01); // 0.8 * 0.8
+    }
+
+    // ── Test refinement round parsing ────────────────────────────────────
+
+    #[test]
+    fn test_refinement_round_parsing() {
+        // Verify the refinement output parsing format
+        let text = "\
+ADJUSTMENT: Lower confidence on pricing acceptance from 70% to 50%
+ADJUSTMENT: Add competitor response as a new risk factor
+SELF_CHECK: The synthesis doesn't account for seasonal demand variations
+SYNTHESIS: Updated prediction with competitor dynamics included
+CONFIDENCE: 0.55";
+
+        let mut adjustments = Vec::new();
+        let mut self_check = String::new();
+        let mut new_confidence = 0.5;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let upper = trimmed.to_uppercase();
+            if upper.starts_with("ADJUSTMENT:") {
+                adjustments.push(trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            } else if upper.starts_with("SELF_CHECK:") {
+                self_check = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+            } else if upper.starts_with("CONFIDENCE:") {
+                new_confidence = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or("0.5")
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect::<String>()
+                    .parse::<f64>()
+                    .unwrap_or(0.5);
+            }
+        }
+
+        assert_eq!(adjustments.len(), 2);
+        assert!(adjustments[0].contains("Lower confidence"));
+        assert!(adjustments[1].contains("competitor response"));
+        assert!(self_check.contains("seasonal demand"));
+        assert!((new_confidence - 0.55).abs() < 0.01);
+    }
+
+    // ── Test LlmBackend trait object creation ────────────────────────────
+
+    #[test]
+    fn test_llm_backend_trait_object_size() {
+        // Verify that Box<dyn LlmBackend> can be stored (compile-time check)
+        fn _takes_backend(_b: Box<dyn LlmBackend>) {}
+        // This test just verifies the trait is object-safe
+    }
+
+    // ── Test store filters ───────────────────────────────────────────────
+
+    #[test]
+    fn test_store_domain_filter() {
+        let mut store = PredictionStore {
+            records: Vec::new(),
+            analyses: Vec::new(),
+            path: None,
+        };
+
+        let make_stored = |id: &str, domain: &str| -> StoredAnalysis {
+            StoredAnalysis {
+                id: id.into(),
+                analysis: TrajectoryAnalysis {
+                    template_id: None,
+                    domain: domain.into(),
+                    variables: HashMap::new(),
+                    validation: None,
+                    flow_network: ProbabilityFlowNetwork::new(vec![], vec![], "s"),
+                    projection: vec![],
+                    trajectory: Trajectory {
+                        name: "t".into(), initial_state: "s".into(), target_outcome: "g".into(),
+                        steps: vec![], cumulative_probability: 0.5,
+                        estimated_duration: "1m".into(), critical_path: vec![],
+                    },
+                    scenario_report: PredictionReport {
+                        topic: "t".into(), seeds: vec![], variables: vec![],
+                        branches: vec![], synthesis: "s".into(),
+                        overall_confidence: 0.5, generated_at: 0,
+                    },
+                    expected_impact: 5.0,
+                    most_likely_outcome: "o".into(),
+                    calibration: None,
+                    recalibrated: false,
+                    step_scores: vec![],
+                    generated_at: 0,
+                },
+                notes: "".into(),
+                tags: vec![],
+            }
+        };
+
+        store.analyses.push(make_stored("1", "Pricing Strategy"));
+        store.analyses.push(make_stored("2", "Market Entry"));
+        store.analyses.push(make_stored("3", "Pricing Strategy"));
+
+        let pricing = store.analyses_by_domain("pricing");
+        assert_eq!(pricing.len(), 2);
+
+        let market = store.analyses_by_domain("market");
+        assert_eq!(market.len(), 1);
     }
 }

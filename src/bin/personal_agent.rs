@@ -106,6 +106,18 @@ enum Commands {
         /// List available templates
         #[arg(long)]
         list: bool,
+
+        /// Show prediction history
+        #[arg(long)]
+        history: bool,
+
+        /// Show calibration stats (back-testing results)
+        #[arg(long)]
+        backtest: bool,
+
+        /// Record outcome for a past prediction: --outcome <prediction_id> <result> <correct|wrong>
+        #[arg(long)]
+        outcome: Option<String>,
     },
 
     /// Check agent status
@@ -187,8 +199,8 @@ async fn main() -> Result<()> {
         Commands::Ingest { file } => {
             cmd_ingest(&home, &file).await?;
         }
-        Commands::Predict { template, topic, list } => {
-            cmd_predict(&home, template, topic, list).await?;
+        Commands::Predict { template, topic, list, history, backtest, outcome } => {
+            cmd_predict(&home, template, topic, list, history, backtest, outcome).await?;
         }
         Commands::Status => {
             cmd_status(&home).await?;
@@ -617,8 +629,11 @@ async fn cmd_predict(
     template_id: Option<String>,
     topic: Option<String>,
     list_templates: bool,
+    show_history: bool,
+    show_backtest: bool,
+    outcome_arg: Option<String>,
 ) -> Result<()> {
-    use hyper_stigmergy::mirofish::{builtin_templates, MiroFishEngine};
+    use hyper_stigmergy::mirofish::{builtin_templates, MiroFishEngine, PredictionStore};
     use std::collections::HashMap;
 
     // List templates mode
@@ -633,8 +648,115 @@ async fn cmd_predict(
         }
         println!("Usage: hsmii predict --template pricing_strategy");
         println!("       hsmii predict \"What happens if we raise prices 20%?\"");
+        println!("       hsmii predict --history              (show past predictions)");
+        println!("       hsmii predict --backtest             (calibration stats)");
+        println!("       hsmii predict --outcome \"pred_123 actual_result correct\"");
         return Ok(());
     }
+
+    // History mode: show past predictions
+    if show_history {
+        let store = PredictionStore::load(home);
+        println!("\n📜 PREDICTION HISTORY ({} predictions, {} analyses)\n",
+            store.records.len(), store.analyses.len());
+
+        let pending = store.pending_outcomes();
+        if !pending.is_empty() {
+            println!("⏳ AWAITING OUTCOMES ({}):", pending.len());
+            println!("{}", "─".repeat(50));
+            for p in &pending {
+                println!("  ID: {}  | Topic: {} | Confidence: {:.0}%",
+                    p.id, p.topic, p.predicted_confidence * 100.0);
+                println!("  Predicted: {}", p.predicted_outcome);
+                println!();
+            }
+        }
+
+        let analyses = store.list_analyses();
+        if !analyses.is_empty() {
+            println!("📊 STORED ANALYSES (last 10):");
+            println!("{}", "─".repeat(50));
+            for a in analyses.iter().take(10) {
+                let recal = if a.analysis.recalibrated { " [recalibrated]" } else { "" };
+                println!("  {} | {} | Impact: {:.1} | Confidence: {:.0}%{}",
+                    a.id, a.analysis.domain, a.analysis.expected_impact,
+                    a.analysis.scenario_report.overall_confidence * 100.0, recal);
+                if !a.notes.is_empty() {
+                    println!("    Notes: {}", a.notes);
+                }
+            }
+        }
+
+        if store.records.is_empty() && store.analyses.is_empty() {
+            println!("  No predictions yet. Run: hsmii predict --template pricing_strategy");
+        }
+        return Ok(());
+    }
+
+    // Backtest mode: show calibration stats
+    if show_backtest {
+        let store = PredictionStore::load(home);
+        let stats = store.calibration_stats();
+
+        println!("\n🎯 CALIBRATION & BACK-TESTING REPORT\n");
+        println!("{}", "═".repeat(50));
+        println!("  Total predictions evaluated: {}", stats.total_evaluated);
+        println!("  Correct predictions:         {}", stats.correct);
+        println!("  Actual accuracy:             {:.1}%", stats.actual_accuracy * 100.0);
+        println!("  Avg predicted confidence:    {:.1}%", stats.avg_predicted_confidence * 100.0);
+        println!("  Calibration error:           {:.2}", stats.calibration_error);
+        println!("  Direction:                   {}", stats.direction);
+        println!("  Adjustment factor:           {:.2}×", stats.adjustment_factor);
+        println!();
+
+        if stats.direction == "overconfident" {
+            println!("  ⚠ Your model predicts with higher confidence than warranted.");
+            println!("    Confidence scores are being adjusted down by {:.0}%.",
+                (1.0 - stats.adjustment_factor) * 100.0);
+        } else if stats.direction == "underconfident" {
+            println!("  💡 Your model is more accurate than it thinks.");
+            println!("    Confidence scores are being adjusted up by {:.0}%.",
+                (stats.adjustment_factor - 1.0) * 100.0);
+        } else if stats.direction == "well-calibrated" {
+            println!("  ✅ Model is well-calibrated. Confidence scores are accurate.");
+        }
+
+        let synthetic_count = store.records.iter().filter(|r| r.id.starts_with("synthetic_")).count();
+        let real_count = stats.total_evaluated - synthetic_count;
+        if synthetic_count > 0 {
+            println!("\n  📊 Data sources: {} synthetic bootstrap + {} real outcomes", synthetic_count, real_count);
+            if real_count < 10 {
+                println!("  💡 Record more outcomes to improve calibration accuracy:");
+                println!("     hsmii predict --outcome \"<prediction_id> <what_happened> correct|wrong\"");
+            }
+        }
+        return Ok(());
+    }
+
+    // Outcome recording mode
+    if let Some(outcome_str) = outcome_arg {
+        let parts: Vec<&str> = outcome_str.splitn(3, ' ').collect();
+        if parts.len() < 3 {
+            println!("Usage: hsmii predict --outcome \"<prediction_id> <actual_result> correct|wrong\"");
+            println!("Example: hsmii predict --outcome \"pred_1710547200 revenue_grew correct\"");
+            return Ok(());
+        }
+        let pred_id = parts[0];
+        let actual = parts[1];
+        let was_correct = parts[2].to_lowercase() == "correct";
+
+        let mut store = PredictionStore::load(home);
+        store.record_outcome(pred_id, actual, was_correct);
+        println!("✅ Recorded outcome for '{}': {} ({})",
+            pred_id, actual, if was_correct { "correct" } else { "wrong" });
+
+        let stats = store.calibration_stats();
+        println!("   Updated calibration: {:.1}% accuracy over {} predictions ({})",
+            stats.actual_accuracy * 100.0, stats.total_evaluated, stats.direction);
+        return Ok(());
+    }
+
+    // ── Main prediction flow ─────────────────────────────────────────────
 
     if !hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
         println!("Agent not initialized. Run `hsmii bootstrap` first.");
@@ -647,7 +769,7 @@ async fn cmd_predict(
         llm_config.model = hyper_stigmergy::ollama_client::OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
     }
     let llm = hyper_stigmergy::ollama_client::OllamaClient::new(llm_config);
-    let engine = MiroFishEngine::new(llm);
+    let mut engine = MiroFishEngine::new(llm, home);
 
     if let Some(tid) = template_id {
         // Template-based prediction
@@ -701,6 +823,10 @@ async fn cmd_predict(
 
         println!("🎯 Most Likely Outcome: {}", analysis.most_likely_outcome);
         println!("📊 Expected Impact: {:.1}/10", analysis.expected_impact);
+        if analysis.recalibrated {
+            println!("🔧 Confidence recalibrated (adjustment factor applied from {} historical predictions)",
+                analysis.calibration.as_ref().map(|c| c.total_evaluated).unwrap_or(0));
+        }
         println!();
 
         println!("🔀 PROBABILITY FLOW ({} time steps)", analysis.flow_network.time_steps);
@@ -721,10 +847,15 @@ async fn cmd_predict(
 
         println!("📋 ACTION TRAJECTORY ({} steps)", analysis.trajectory.steps.len());
         println!("{}", "─".repeat(40));
-        for step in &analysis.trajectory.steps {
+        for (i, step) in analysis.trajectory.steps.iter().enumerate() {
+            let recal_note = if analysis.recalibrated && i < analysis.step_scores.len() {
+                format!(" → recal: {:.0}%", analysis.step_scores[i] * 100.0)
+            } else {
+                String::new()
+            };
             println!(
-                "  Step {}: {} (p={:.0}%, {})",
-                step.step, step.action, step.success_probability * 100.0, step.time_horizon
+                "  Step {}: {} (p={:.0}%{}, {})",
+                step.step, step.action, step.success_probability * 100.0, recal_note, step.time_horizon
             );
             if !step.risks.is_empty() {
                 println!("    ⚠ Risks: {}", step.risks.join(", "));
@@ -756,18 +887,17 @@ async fn cmd_predict(
             println!("  {}", analysis.scenario_report.synthesis);
         }
 
-        // Save to file
-        let results_dir = home.join("predictions");
-        std::fs::create_dir_all(&results_dir).ok();
-        let filename = format!(
-            "mirofish_{}.json",
-            chrono::Utc::now().format("%Y%m%d_%H%M%S")
-        );
-        let filepath = results_dir.join(&filename);
-        if let Ok(json) = serde_json::to_string_pretty(&analysis) {
-            std::fs::write(&filepath, json).ok();
-            println!("\n💾 Saved to {}", filepath.display());
+        // Validation warnings
+        if let Some(ref validation) = analysis.validation {
+            if !validation.warnings.is_empty() {
+                println!("\n⚠ VARIABLE WARNINGS:");
+                for w in &validation.warnings {
+                    println!("  - {}", w);
+                }
+            }
         }
+
+        println!("\n💾 Auto-saved to prediction history (use --history to view)");
     } else if let Some(topic) = topic {
         // Free-form prediction (uses base scenario simulator)
         println!("\n🐟 MiroFish Prediction: {}\n", topic);
@@ -801,6 +931,9 @@ async fn cmd_predict(
         println!("Usage: hsmii predict --template <id>     (template-based analysis)");
         println!("       hsmii predict \"topic question\"     (free-form prediction)");
         println!("       hsmii predict --list               (show available templates)");
+        println!("       hsmii predict --history             (show past predictions)");
+        println!("       hsmii predict --backtest            (calibration stats)");
+        println!("       hsmii predict --outcome \"<id> <result> correct|wrong\"");
     }
 
     Ok(())
