@@ -28,6 +28,7 @@
 //! ```
 
 use crate::agent::{AgentId, Role};
+use crate::dream_advisor::DreamAdvisor;
 use crate::personal::persona::{Capability, Persona, Voice};
 use crate::social_memory::SocialMemory;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,55 @@ pub enum BusinessRole {
     // Pipeline (coming soon — lower autonomy until validated)
     Sales,
     Legal,
+}
+
+/// Classifies a BusinessRole's primary intent in the organization.
+///
+/// Strategy roles (C-suite) should direct and delegate, not execute.
+/// Execution roles should claim implementation tasks.
+/// Support roles are neutral and assist either.
+///
+/// Used by the intent modifier in `bid_with_context()` to encode
+/// delegation semantics: CMO should not win a bid for "write a blog post"
+/// even though it shares marketing keywords.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoleIntent {
+    /// C-suite: directs, delegates, sets vision. Should not execute.
+    Strategy,
+    /// Makers: writes code, creates content, designs. Should not strategize.
+    Execution,
+    /// Analysts, support, HR, legal. Neutral — assists either direction.
+    Support,
+}
+
+impl RoleIntent {
+    /// Score modifier for a task's detected intent.
+    ///
+    /// Returns a value in [0.0, 1.0] indicating how well this role intent
+    /// matches the task intent. High means good fit, low means mismatch.
+    pub fn task_fit(&self, task_is_execution: bool, task_is_strategy: bool) -> f64 {
+        match self {
+            Self::Strategy => {
+                if task_is_strategy {
+                    0.9 // Great fit
+                } else if task_is_execution {
+                    0.2 // Poor fit — should delegate, not do
+                } else {
+                    0.5 // Neutral
+                }
+            }
+            Self::Execution => {
+                if task_is_execution {
+                    0.9 // Great fit
+                } else if task_is_strategy {
+                    0.2 // Poor fit — should execute, not strategize
+                } else {
+                    0.5 // Neutral
+                }
+            }
+            Self::Support => 0.5, // Always neutral
+        }
+    }
 }
 
 impl BusinessRole {
@@ -148,6 +198,19 @@ impl BusinessRole {
             Self::Hr => &["hiring", "culture", "onboarding", "team", "retention", "review"],
             Self::Sales => &["lead", "pipeline", "outreach", "crm", "deal", "demo", "close"],
             Self::Legal => &["contract", "compliance", "terms", "ip", "privacy", "gdpr"],
+        }
+    }
+
+    /// Classify this role's intent: Strategy, Execution, or Support.
+    ///
+    /// Used by `bid_with_context()` to penalize strategy roles bidding on
+    /// execution tasks and vice versa, encoding the judgment a domain expert
+    /// would make when delegating work.
+    pub fn intent(&self) -> RoleIntent {
+        match self {
+            Self::Ceo | Self::Cmo | Self::Cfo | Self::Coo | Self::Cto => RoleIntent::Strategy,
+            Self::Developer | Self::Designer | Self::Writer | Self::Marketer => RoleIntent::Execution,
+            Self::Analyst | Self::Support | Self::Hr | Self::Sales | Self::Legal => RoleIntent::Support,
         }
     }
 
@@ -267,20 +330,51 @@ impl TeamMember {
         }
     }
 
-    /// Calculate bid score for a task description.
+    /// Calculate bid score for a task description (backward-compatible).
+    ///
+    /// Delegates to `bid_with_context(desc, None)` which produces identical
+    /// weights when no DreamAdvisor is present: the dream_signal and
+    /// intent_modifier slots are redistributed to keyword_score.
     pub fn bid(&self, task_description: &str) -> f64 {
+        self.bid_with_context(task_description, None)
+    }
+
+    /// Enhanced bid calculation with optional dream advisor context.
+    ///
+    /// # Weight distribution
+    ///
+    /// | Signal           | With advisor | Without advisor |
+    /// |------------------|-------------|-----------------|
+    /// | keyword_score    | 0.35        | 0.50 (*)        |
+    /// | proactivity      | 0.15        | 0.20            |
+    /// | domain_bonus     | 0.15        | 0.20            |
+    /// | dream_signal     | 0.15        | 0.00            |
+    /// | intent_modifier  | 0.10        | 0.00            |
+    /// | noise            | 0.10        | 0.10            |
+    ///
+    /// (*) Without advisor, dream + intent weight is redistributed to
+    /// keyword (0.15→keyword) and proactivity/domain (0.05 each), matching
+    /// the original `bid()` weights exactly.
+    pub fn bid_with_context(&self, task_description: &str, advisor: Option<&DreamAdvisor>) -> f64 {
         let lower = task_description.to_lowercase();
-        let keyword_hits = self
+
+        // ── Static keyword hits ──────────────────────────────────────
+        let mut keyword_hits = self
             .role
             .activation_keywords()
             .iter()
             .filter(|kw| lower.contains(**kw))
             .count();
 
-        let keyword_score = (keyword_hits as f64 * 0.3).min(1.0);
+        // ── Dream-expanded keyword hits ──────────────────────────────
+        if let Some(adv) = advisor {
+            keyword_hits += adv.expanded_keyword_hits(self.role, task_description);
+        }
+
+        let keyword_score = (keyword_hits as f64 * 0.25).min(1.0);
         let proactivity = self.role.default_proactivity();
 
-        // Factor in historical performance for this domain
+        // ── Domain history bonus ─────────────────────────────────────
         let domain_bonus = self
             .domain_history
             .values()
@@ -288,8 +382,68 @@ impl TeamMember {
             .sum::<f64>()
             / (self.domain_history.len().max(1) as f64);
 
+        // ── Dream advisor signal ─────────────────────────────────────
+        let dream_signal = if let Some(adv) = advisor {
+            // Extract domain keys from task description for advisor lookup
+            let task_keys: Vec<&str> = lower.split_whitespace().collect();
+            let raw = adv.advise(self.role, &task_keys);
+            // Map from [-1, 1] to [0, 1] for the bid formula
+            (raw + 1.0) / 2.0
+        } else {
+            0.0
+        };
+
+        // ── Intent modifier ──────────────────────────────────────────
+        let intent_score = if advisor.is_some() {
+            let task_is_execution = Self::is_execution_task(&lower);
+            let task_is_strategy = Self::is_strategy_task(&lower);
+            self.role.intent().task_fit(task_is_execution, task_is_strategy)
+        } else {
+            0.0
+        };
+
         let noise = rand::random::<f64>() * 0.1;
-        (keyword_score * 0.5 + proactivity * 0.2 + domain_bonus * 0.2 + noise * 0.1).clamp(0.0, 1.0)
+
+        // ── Weighted sum ─────────────────────────────────────────────
+        if advisor.is_some() {
+            // Full enhanced formula
+            (keyword_score * 0.35
+                + proactivity * 0.15
+                + domain_bonus * 0.15
+                + dream_signal * 0.15
+                + intent_score * 0.10
+                + noise * 0.10)
+                .clamp(0.0, 1.0)
+        } else {
+            // Original weights — backward compatible
+            (keyword_score * 0.5
+                + proactivity * 0.2
+                + domain_bonus * 0.2
+                + noise * 0.1)
+                .clamp(0.0, 1.0)
+        }
+    }
+
+    /// Detect whether a task description indicates execution work
+    /// (writing, building, creating, implementing).
+    fn is_execution_task(lower: &str) -> bool {
+        const EXEC_KEYWORDS: &[&str] = &[
+            "write", "build", "create", "implement", "code", "design",
+            "draft", "publish", "ship", "fix", "deploy", "develop",
+            "produce", "make", "configure", "test", "debug",
+        ];
+        EXEC_KEYWORDS.iter().any(|kw| lower.contains(kw))
+    }
+
+    /// Detect whether a task description indicates strategy work
+    /// (planning, deciding, evaluating, directing).
+    fn is_strategy_task(lower: &str) -> bool {
+        const STRAT_KEYWORDS: &[&str] = &[
+            "strategy", "plan", "decide", "evaluate", "assess",
+            "review", "prioritize", "vision", "roadmap", "direction",
+            "allocate", "approve", "budget",
+        ];
+        STRAT_KEYWORDS.iter().any(|kw| lower.contains(kw))
     }
 
     /// Record a task outcome for this member.
@@ -1294,6 +1448,9 @@ pub struct TeamOrchestrator {
     pub brand: BrandContext,
     pub campaign_store: CampaignStore,
     pub social_memory: SocialMemory,
+    /// Dream-derived routing adjustments. Fed by campaign outcomes and
+    /// crystallized patterns from the dream engine.
+    pub dream_advisor: DreamAdvisor,
     home: PathBuf,
 }
 
@@ -1309,12 +1466,14 @@ impl TeamOrchestrator {
         let brand = BrandContext::load(home);
         let campaign_store = CampaignStore::load(home);
         let social_memory = SocialMemory::default();
+        let dream_advisor = DreamAdvisor::load(home);
 
         Self {
             members,
             brand,
             campaign_store,
             social_memory,
+            dream_advisor,
             home: home.to_path_buf(),
         }
     }
@@ -1330,13 +1489,22 @@ impl TeamOrchestrator {
     }
 
     /// Route a task to the best-fit team member.
+    ///
+    /// Uses the enhanced `bid_with_context()` when the DreamAdvisor has
+    /// learned data; falls back to original `bid()` weights otherwise.
     pub fn route_task(&self, task_description: &str) -> Option<&TeamMember> {
+        let advisor = if self.dream_advisor.is_empty() {
+            None
+        } else {
+            Some(&self.dream_advisor)
+        };
+
         self.members
             .iter()
             .filter(|m| m.status == MemberStatus::Active || m.status == MemberStatus::Idle)
             .max_by(|a, b| {
-                a.bid(task_description)
-                    .partial_cmp(&b.bid(task_description))
+                a.bid_with_context(task_description, advisor)
+                    .partial_cmp(&b.bid_with_context(task_description, advisor))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     }
@@ -1377,6 +1545,7 @@ impl TeamOrchestrator {
     pub fn save(&self) -> anyhow::Result<()> {
         self.brand.save(&self.home)?;
         self.campaign_store.save()?;
+        self.dream_advisor.save(&self.home)?;
 
         // Save team members state
         let members_path = self.home.join("team_members.json");
@@ -1402,6 +1571,29 @@ impl TeamOrchestrator {
             }
         }
         Ok(())
+    }
+
+    /// Refresh the dream advisor from campaign store patterns.
+    ///
+    /// Pulls `(domain, narrative, valence)` tuples from
+    /// `CampaignStore::extract_dream_patterns()` and ingests them into
+    /// the advisor's pre-computed routing table. Call this after
+    /// recording outcomes or campaign metrics.
+    pub fn refresh_dream_advisor(&mut self) {
+        let patterns = self.campaign_store.extract_dream_patterns();
+        if !patterns.is_empty() {
+            self.dream_advisor.ingest_campaign_patterns(&patterns);
+        }
+    }
+
+    /// Ingest crystallized patterns from the dream engine.
+    ///
+    /// Called externally when the dream engine completes a consolidation
+    /// cycle and produces `CrystallizedPattern`s with `role_affinity`.
+    pub fn ingest_dream_patterns(&mut self, patterns: &[crate::dream::CrystallizedPattern]) {
+        if !patterns.is_empty() {
+            self.dream_advisor.ingest_crystallized_patterns(patterns);
+        }
     }
 
     /// Create a channel connector for development/testing.

@@ -115,3 +115,7 @@ path = "src/bin/personal_agent.rs"
 [[bin]]
 name = "tui_codex_demo"
 path = "src/bin/tui_codex_demo.rs"
+
+[[bin]]
+name = "teamd"
+path = "src/bin/teamd.rs"
