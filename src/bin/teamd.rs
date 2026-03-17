@@ -24,6 +24,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use hyper_stigmergy::auth::{PersistentAuthManager, TenantAuthState};
+use hyper_stigmergy::outcome_inference::OutcomeInferenceEngine;
 use hyper_stigmergy::team_api::{self, TeamAppState};
 use hyper_stigmergy::tenant::TenantRegistry;
 use hyper_stigmergy::usage_tracker::UsageTracker;
@@ -112,11 +113,42 @@ async fn main() -> anyhow::Result<()> {
         "Usage flush loop started"
     );
 
+    // ── Initialise outcome inference engine ────────────────────────
+    let inference = Arc::new(OutcomeInferenceEngine::with_defaults(&base_dir));
+    info!("Outcome inference engine initialised");
+
+    // Start background sweep loop: infer outcomes from behavioral signals
+    // every 5 minutes, feed results into each tenant's DreamAdvisor.
+    let sweep_registry = registry.clone();
+    inference.start_sweep_loop(300, move |outcomes| {
+        let reg = sweep_registry.clone();
+        tokio::spawn(async move {
+            for outcome in outcomes {
+                // Weight the outcome by inference confidence.
+                let quality = outcome.outcome.quality * outcome.outcome.confidence;
+                if let Ok(orch) = reg.get_orchestrator(&outcome.tenant_id).await {
+                    let mut orch = orch.write().await;
+                    if let Some(member) = orch.member_mut(outcome.assigned_role) {
+                        member.record_outcome(
+                            &outcome.domain,
+                            outcome.outcome.success,
+                            quality,
+                        );
+                    }
+                    orch.refresh_dream_advisor();
+                    let _ = orch.save();
+                }
+            }
+        });
+    });
+    info!("Outcome inference sweep loop started (300s interval)");
+
     // ── Build application state ─────────────────────────────────────
     let app_state = TeamAppState {
         registry: registry.clone(),
         auth: auth.clone(),
         usage: usage.clone(),
+        inference: Some(inference),
     };
 
     let tenant_auth_state = TenantAuthState {

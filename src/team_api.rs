@@ -8,6 +8,7 @@ use crate::auth::{Permission, PersistentAuthManager, TenantContext};
 use crate::autonomous_team::{
     AudienceSegment, BrandVoice, BusinessRole, ChannelType, MemberStatus,
 };
+use crate::outcome_inference::OutcomeInferenceEngine;
 use crate::tenant::{TenantPlan, TenantRegistry};
 use crate::usage_tracker::UsageTracker;
 
@@ -32,6 +33,9 @@ pub struct TeamAppState {
     pub registry: Arc<TenantRegistry>,
     pub auth: Arc<PersistentAuthManager>,
     pub usage: Arc<UsageTracker>,
+    /// Automatic outcome inference engine — infers task outcomes from
+    /// behavioral signals when humans don't explicitly report them.
+    pub inference: Option<Arc<OutcomeInferenceEngine>>,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -262,6 +266,15 @@ pub async fn get_member(
 
     let role = parse_role(&role_name).ok_or(StatusCode::NOT_FOUND)?;
 
+    // ── Auto-telemetry: user querying a specific role ──
+    if let Some(ref inference) = state.inference {
+        let inf = Arc::clone(inference);
+        let tenant = ctx.tenant_id.clone();
+        tokio::spawn(async move {
+            inf.record_role_query(&tenant, role).await;
+        });
+    }
+
     let orch = state
         .registry
         .get_orchestrator(&ctx.tenant_id)
@@ -418,6 +431,15 @@ pub async fn update_brand(
 
     info!(tenant_id = %ctx.tenant_id, "Brand context updated");
 
+    // ── Auto-telemetry: brand change after task → mild negative signal ──
+    if let Some(ref inference) = state.inference {
+        let inf = Arc::clone(inference);
+        let tenant = ctx.tenant_id.clone();
+        tokio::spawn(async move {
+            inf.record_brand_update(&tenant).await;
+        });
+    }
+
     Ok(Json(json!({
         "message": "Brand context updated",
     })))
@@ -464,6 +486,30 @@ pub async fn submit_task(
         bid = %bid_score,
         "Task routed"
     );
+
+    // ── Auto-telemetry: record task submission for outcome inference ──
+    if let Some(ref inference) = state.inference {
+        let description = req.description.clone();
+        let domain = req.domain.clone();
+        let role = member.role;
+        let tid = task_id.clone();
+        let inf = Arc::clone(inference);
+        let tenant = ctx.tenant_id.clone();
+        tokio::spawn(async move {
+            inf.record_task_submitted(&tenant, tid, description, role, domain)
+                .await;
+        });
+
+        // Also check for re-submissions (similar task descriptions).
+        let inf2 = Arc::clone(inference);
+        let tenant2 = ctx.tenant_id.clone();
+        let tid2 = task_id.clone();
+        let desc2 = req.description.clone();
+        tokio::spawn(async move {
+            inf2.record_task_resubmission(&tenant2, &tid2, &desc2)
+                .await;
+        });
+    }
 
     Ok(Json(TaskResponse {
         task_id,
@@ -518,6 +564,16 @@ pub async fn create_campaign(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     info!(tenant_id = %ctx.tenant_id, campaign_id = %campaign_id, "Campaign created");
+
+    // ── Auto-telemetry: campaign created → positive signal for related tasks ──
+    if let Some(ref inference) = state.inference {
+        let inf = Arc::clone(inference);
+        let tenant = ctx.tenant_id.clone();
+        let goal = req.goal.clone();
+        tokio::spawn(async move {
+            inf.record_campaign_created(&tenant, &goal).await;
+        });
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -673,9 +729,21 @@ pub struct TaskOutcomeRequest {
 pub async fn record_task_outcome(
     State(state): State<TeamAppState>,
     Extension(ctx): Extension<TenantContext>,
-    Path(_task_id): Path<String>,
+    Path(task_id): Path<String>,
     Json(body): Json<TaskOutcomeRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // ── Auto-telemetry: mark task as explicitly resolved ──
+    if let Some(ref inference) = state.inference {
+        let inf = Arc::clone(inference);
+        let tenant = ctx.tenant_id.clone();
+        let tid = task_id.clone();
+        let success = body.success;
+        let quality = body.quality;
+        tokio::spawn(async move {
+            inf.record_explicit_outcome(&tenant, &tid, success, quality)
+                .await;
+        });
+    }
     let role = parse_role(&body.role).ok_or(StatusCode::BAD_REQUEST)?;
 
     let quality = body.quality.clamp(0.0, 1.0);

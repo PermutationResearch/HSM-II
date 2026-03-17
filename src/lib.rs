@@ -419,6 +419,14 @@ pub mod usage_tracker;
 pub mod dream_advisor;
 pub use dream_advisor::DreamAdvisor;
 
+// Automatic Outcome Inference — solves the cold-start problem by inferring outcomes
+// from API behavioral signals when humans don't explicitly report them
+pub mod outcome_inference;
+pub use outcome_inference::{
+    InferenceConfig as OutcomeInferenceConfig, InferredOutcome, InferredTaskOutcome,
+    OutcomeInferenceEngine, OutcomeSource,
+};
+
 // Onboarding, Belief Extraction, and Document Ingestion
 pub mod onboard;
 pub use onboard::{
