@@ -67,6 +67,7 @@ pub fn deposit(
             tags,
             created_at: current_timestamp(),
             embedding: Some(pattern.embedding.clone()),
+            creator: None,
             scope: None,
             provenance: None,
             trust_tags: Some(vec!["dream_consolidation".to_string()]),

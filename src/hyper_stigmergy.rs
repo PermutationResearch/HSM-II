@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,6 +65,11 @@ pub struct HyperEdge {
     pub tags: HashMap<String, String>,
     pub created_at: u64,
     pub embedding: Option<Vec<f32>>,
+    /// Which agent created this edge (None for emergent/system-created edges).
+    /// Used for collective contribution tracking: when another agent's edge
+    /// shares participants with this one, the creator gets trace-reuse credit.
+    #[serde(default)]
+    pub creator: Option<AgentId>,
     /// Federation: visibility scope of this edge.
     #[serde(default)]
     pub scope: Option<EdgeScope>,
@@ -476,6 +481,34 @@ pub struct AgentActionStats {
     pub last_citations: u64,
     #[serde(default)]
     pub last_degree: usize,
+
+    // ── Collective contribution tracking ──
+    // Traces reused: edges this agent created that other agents later connected to.
+    // Measured by shared-participant overlap when new edges are created.
+    #[serde(default)]
+    pub traces_reused_by_others: u64,
+    // Surviving edges: how many edges this agent originated that survived decay
+    // (weight > 0.1 after aging). Durable contribution to collective knowledge.
+    #[serde(default)]
+    pub surviving_edges: u64,
+    // Cascade citations: citation credit that propagated through positive outcomes.
+    // When a council output citing this agent leads to a Positive experience,
+    // the citing agent gets cascade credit.
+    #[serde(default)]
+    pub cascade_citations: u64,
+    // Downstream successes: successful actions by agents connected to this agent's
+    // edges. Measures enabling contribution — "I created infrastructure others built on."
+    #[serde(default)]
+    pub downstream_successes: u64,
+    // Delta trackers for collective signals (same pattern as individual stats)
+    #[serde(default)]
+    pub last_traces_reused: u64,
+    #[serde(default)]
+    pub last_surviving_edges: u64,
+    #[serde(default)]
+    pub last_cascade_citations: u64,
+    #[serde(default)]
+    pub last_downstream_successes: u64,
 }
 
 // === CONSTRUCTION ===
@@ -948,6 +981,7 @@ impl HyperStigmergicMorphogenesis {
                         tags: parse_tags(get_string_list(&rel.properties, "tags")),
                         created_at: 0,
                         embedding: None,
+                        creator: None,
                         scope: None,
                         provenance: None,
                         trust_tags: None,
@@ -1531,20 +1565,21 @@ impl HyperStigmergicMorphogenesis {
     }
 
     pub fn apply_action(&mut self, action: &Action) {
-        if let Some(agent_id) = self.infer_agent_id(action) {
-            self.record_action(agent_id, action);
+        let agent_id = self.infer_agent_id(action);
+        if let Some(id) = agent_id {
+            self.record_action(id, action);
         }
-        self.apply_action_inner(action);
+        self.apply_action_inner(action, agent_id);
     }
 
     pub fn apply_action_with_agent(&mut self, action: &Action, agent_id: Option<AgentId>) {
-        if let Some(agent_id) = agent_id {
-            self.record_action(agent_id, action);
+        if let Some(id) = agent_id {
+            self.record_action(id, action);
         }
-        self.apply_action_inner(action);
+        self.apply_action_inner(action, agent_id);
     }
 
-    fn apply_action_inner(&mut self, action: &Action) {
+    fn apply_action_inner(&mut self, action: &Action, creator: Option<AgentId>) {
         match action {
             Action::LinkAgents { vertices, weight } => {
                 let mut participants: Vec<u64> =
@@ -1572,6 +1607,7 @@ impl HyperStigmergicMorphogenesis {
                         tags,
                         created_at: self.tick_count,
                         embedding: None,
+                        creator,
                         scope: None,
                         provenance: None,
                         trust_tags: None,
@@ -1586,6 +1622,37 @@ impl HyperStigmergicMorphogenesis {
     }
 
     fn record_action(&mut self, agent_id: AgentId, action: &Action) {
+        // ── Collective contribution: trace reuse detection ──
+        // Before recording, check if this new edge overlaps with existing edges
+        // created by *other* agents. If so, those creators get trace-reuse credit.
+        if let Action::LinkAgents { vertices, .. } = action {
+            let new_participants: HashSet<u64> =
+                vertices.iter().copied().map(|v| v as u64).collect();
+            // Collect creators who deserve reuse credit (avoid borrowing self mutably twice)
+            let reused_creators: Vec<AgentId> = self
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    let creator = edge.creator?;
+                    if creator == agent_id {
+                        return None; // Don't credit self-reuse
+                    }
+                    let edge_set: HashSet<u64> = edge.participants.iter().copied().collect();
+                    if !new_participants.is_disjoint(&edge_set) {
+                        Some(creator)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for creator in reused_creators {
+                self.agent_action_stats
+                    .entry(creator)
+                    .or_default()
+                    .traces_reused_by_others += 1;
+            }
+        }
+
         let stats = self.agent_action_stats.entry(agent_id).or_default();
         stats.successful_actions += 1;
         match action {
@@ -1600,6 +1667,74 @@ impl HyperStigmergicMorphogenesis {
     pub fn record_citation(&mut self, agent_id: AgentId, count: u64) {
         let stats = self.agent_action_stats.entry(agent_id).or_default();
         stats.citations = stats.citations.saturating_add(count);
+    }
+
+    /// Record a cascade citation: the council output that cited these agents
+    /// led to a positive outcome. This is stronger signal than raw citation —
+    /// it means the cited agent's contribution *actually helped*.
+    pub fn record_cascade_citations(&mut self, cited_agents: &[(AgentId, u32)], positive: bool) {
+        if !positive {
+            return;
+        }
+        for &(agent_id, count) in cited_agents {
+            self.agent_action_stats
+                .entry(agent_id)
+                .or_default()
+                .cascade_citations = self
+                .agent_action_stats
+                .entry(agent_id)
+                .or_default()
+                .cascade_citations
+                .saturating_add(count as u64);
+        }
+    }
+
+    /// Record downstream success: when an agent succeeds at an action,
+    /// all agents connected to it via edges get downstream-success credit.
+    /// This captures "I built infrastructure that enabled others."
+    pub fn record_downstream_success(&mut self, successful_agent_id: AgentId) {
+        // Find all agents connected to the successful agent via edges
+        let connected: Vec<AgentId> = self
+            .edges
+            .iter()
+            .filter(|edge| edge.participants.contains(&successful_agent_id))
+            .flat_map(|edge| {
+                edge.participants
+                    .iter()
+                    .copied()
+                    .filter(|&p| p != successful_agent_id)
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for connected_id in connected {
+            self.agent_action_stats
+                .entry(connected_id)
+                .or_default()
+                .downstream_successes += 1;
+        }
+    }
+
+    /// Compute surviving edges per agent. Called during compute_jw.
+    /// An edge "survives" if weight > 0.1 after aging. This measures
+    /// durable contribution to collective knowledge.
+    fn compute_surviving_edges(&mut self) {
+        // Reset all counts
+        for stats in self.agent_action_stats.values_mut() {
+            stats.surviving_edges = 0;
+        }
+        // Count surviving edges per creator
+        for edge in &self.edges {
+            if edge.weight > 0.1 {
+                if let Some(creator) = edge.creator {
+                    self.agent_action_stats
+                        .entry(creator)
+                        .or_default()
+                        .surviving_edges += 1;
+                }
+            }
+        }
     }
 
     fn infer_agent_id(&self, action: &Action) -> Option<AgentId> {
@@ -1641,38 +1776,49 @@ impl HyperStigmergicMorphogenesis {
 
     /// Thermodynamic Wage Metric (JW) — computed per agent each tick.
     ///
-    /// JW = E × η × W
+    /// JW = I × 0.30 + C × 0.40 + H × 0.20 + S × 0.10
     ///
-    /// Based on Council recommendations (DeepSeek-R1 Challenger):
+    /// **Rewards collective contribution over individual performance.**
     ///
-    /// E (Energy Expenditure) = learning_rate × (1 + curiosity)
-    ///   — Higher curiosity = more cognitive energy invested
-    ///   — Council insight: Energy should vary by agent behavior, not be uniform
+    /// I (Individual Action) = 0.30 weight
+    ///   — edges created, tasks created, memories, risk mitigations, citations
+    ///   — Same signals as before, but now only 30% of total (was 60%)
     ///
-    /// η (Efficiency Factor) = (growth × transcendence) / (avg_growth × avg_transcendence)
-    ///   — Normalized by system averages for relative performance
-    ///   — Council insight: Use data-driven normalization, not arbitrary weights
-    ///   — High growth + high transcendence = most efficient agents
+    /// C (Collective Contribution) = 0.40 weight — **the primary signal**
+    ///   — traces_reused_by_others: other agents built on this agent's edges
+    ///   — surviving_edges: edges this agent created that survived decay (durable knowledge)
+    ///   — cascade_citations: citations that led to positive outcomes downstream
+    ///   — downstream_successes: connected agents succeeded after this agent's work
+    ///   These measure: "Did this agent's work get used by and help other agents?"
     ///
-    /// W (Work Output) = coherence_contribution × network_amplifier
-    ///   — coherence_contribution: agent's impact on system coherence
-    ///   — network_amplifier: 1 + sum(connected edge weights)
-    ///   — Council insight: Work should reflect actual system contribution
+    /// H (Coherence) = 0.20 weight
+    ///   — system coherence improvement this tick
+    ///
+    /// S (Stability) = 0.10 weight
+    ///   — low coherence volatility
     ///
     /// Result stored on each Agent as `agent.jw` for RooDB persistence.
     /// Global JW = mean of all agents' JW values.
     pub fn compute_jw(&mut self) {
+        // First, update surviving-edge counts
+        self.compute_surviving_edges();
+
         let coherence_now = self.global_coherence();
         let coherence_delta = (coherence_now - self.prev_coherence).abs();
         let coherence_improvement = (coherence_now - self.prev_coherence).max(0.0);
         self.prev_coherence = coherence_now;
 
-        for agent in &mut self.agents {
+        // Pre-compute per-agent scores to avoid borrow conflicts.
+        // Each entry: (agent_index, individual_score, collective_score)
+        let mut scores: Vec<(usize, f64, f64)> = Vec::with_capacity(self.agents.len());
+
+        for (idx, agent) in self.agents.iter().enumerate() {
             let stats = self.agent_action_stats.entry(agent.id).or_default();
             let degree = self.adjacency.get(&agent.id).map(|v| v.len()).unwrap_or(0);
             let degree_delta = degree.saturating_sub(stats.last_degree);
             stats.last_degree = degree;
 
+            // ── Individual action delta ──
             let edges_delta = stats.edges_created.saturating_sub(stats.last_edges);
             let tasks_delta = stats.tasks_created.saturating_sub(stats.last_tasks);
             let memories_delta = stats.memories_added.saturating_sub(stats.last_memories);
@@ -1691,12 +1837,48 @@ impl HyperStigmergicMorphogenesis {
                 + risks_delta as f64 * 0.8
                 + citations_delta as f64 * 0.5
                 + degree_delta as f64 * 0.4;
-            let action_score = (action_raw / 5.0).min(1.0);
+            let individual_score = (action_raw / 5.0).min(1.0);
 
-            let coherence_score = (coherence_improvement * 2.0).min(1.0);
-            let stability_score = (1.0 - coherence_delta).clamp(0.0, 1.0);
+            // ── Collective contribution delta ──
+            let reuse_delta = stats
+                .traces_reused_by_others
+                .saturating_sub(stats.last_traces_reused);
+            let survival_count = stats.surviving_edges; // absolute, not delta
+            let cascade_delta = stats
+                .cascade_citations
+                .saturating_sub(stats.last_cascade_citations);
+            let downstream_delta = stats
+                .downstream_successes
+                .saturating_sub(stats.last_downstream_successes);
 
-            agent.jw = (0.6 * action_score + 0.3 * coherence_score + 0.1 * stability_score)
+            stats.last_traces_reused = stats.traces_reused_by_others;
+            stats.last_cascade_citations = stats.cascade_citations;
+            stats.last_downstream_successes = stats.downstream_successes;
+            // surviving_edges is recomputed each tick, no delta needed
+
+            // Weighted collective signals:
+            //   trace reuse (0.35) — strongest: someone literally built on your work
+            //   surviving edges (0.25) — durable knowledge contribution
+            //   cascade citations (0.25) — your citation led to real positive outcome
+            //   downstream success (0.15) — connected agents succeeded
+            let collective_raw = reuse_delta as f64 * 0.35
+                + (survival_count as f64 / 3.0).min(1.0) * 0.25
+                + cascade_delta as f64 * 0.25
+                + downstream_delta as f64 * 0.15;
+            let collective_score = collective_raw.min(1.0);
+
+            scores.push((idx, individual_score, collective_score));
+        }
+
+        // Apply JW with collective-first weighting
+        let coherence_score = (coherence_improvement * 2.0).min(1.0);
+        let stability_score = (1.0 - coherence_delta).clamp(0.0, 1.0);
+
+        for (idx, individual, collective) in scores {
+            self.agents[idx].jw = (0.30 * individual
+                + 0.40 * collective
+                + 0.20 * coherence_score
+                + 0.10 * stability_score)
                 .clamp(0.0, 1.0);
         }
     }
@@ -2696,6 +2878,7 @@ impl HyperStigmergicMorphogenesis {
                         tags: HashMap::from([("type".into(), "mutation_bridge".into())]),
                         created_at: self.tick_count,
                         embedding: None,
+                        creator: None,
                         scope: None,
                         provenance: None,
                         trust_tags: None,
@@ -3900,4 +4083,337 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+#[cfg(test)]
+mod collective_jw_tests {
+    use super::*;
+
+    fn make_world(n: usize) -> HyperStigmergicMorphogenesis {
+        HyperStigmergicMorphogenesis::new(n)
+    }
+
+    #[test]
+    fn test_jw_zero_without_activity() {
+        let mut world = make_world(4);
+        world.compute_jw();
+        // No activity → JW should be dominated by stability (0.10 * 1.0 = 0.10)
+        for agent in &world.agents {
+            assert!(
+                agent.jw <= 0.15,
+                "Agent {} JW={} should be near zero with no activity",
+                agent.id,
+                agent.jw
+            );
+        }
+    }
+
+    #[test]
+    fn test_individual_action_only_caps_at_30_percent() {
+        let mut world = make_world(4);
+        let agent_id = world.agents[0].id;
+
+        // Give agent 0 a ton of individual actions
+        let stats = world.agent_action_stats.entry(agent_id).or_default();
+        stats.edges_created = 100;
+        stats.tasks_created = 100;
+        stats.risk_mitigations = 100;
+        stats.citations = 100;
+
+        world.compute_jw();
+
+        // Individual score maxes at 1.0, weighted at 0.30
+        // Plus stability ~0.10. No collective → collective=0.
+        // Max possible ≈ 0.30 + 0.10 = 0.40
+        let jw = world.agents[0].jw;
+        assert!(
+            jw <= 0.45,
+            "Pure individual work should cap around 0.40, got {}",
+            jw
+        );
+    }
+
+    #[test]
+    fn test_collective_contribution_boosts_jw() {
+        let mut world = make_world(4);
+        let agent_id = world.agents[0].id;
+
+        // Give agent 0 collective signals
+        let stats = world.agent_action_stats.entry(agent_id).or_default();
+        stats.traces_reused_by_others = 5;
+        stats.cascade_citations = 3;
+        stats.downstream_successes = 4;
+
+        // Also create some surviving edges attributed to agent 0
+        world.edges.push(HyperEdge {
+            participants: vec![agent_id, world.agents[1].id],
+            weight: 0.5, // Above 0.1 survival threshold
+            emergent: false,
+            age: 10,
+            tags: HashMap::new(),
+            created_at: 0,
+            embedding: None,
+            creator: Some(agent_id),
+            scope: None,
+            provenance: None,
+            trust_tags: None,
+            origin_system: None,
+            knowledge_layer: None,
+        });
+
+        world.compute_jw();
+
+        let jw = world.agents[0].jw;
+        // Collective score should be substantial:
+        // reuse: 5*0.35=1.75 (capped at component level), survival: (1/3)*0.25=0.083,
+        // cascade: 3*0.25=0.75, downstream: 4*0.15=0.60 → raw=2.583 → capped to 1.0
+        // Total: 0.40*1.0 + 0.10*stability ≈ 0.50
+        assert!(
+            jw >= 0.35,
+            "Collective contribution should yield JW >= 0.35, got {}",
+            jw
+        );
+    }
+
+    #[test]
+    fn test_collective_beats_individual() {
+        let mut world = make_world(4);
+        let individual_agent = world.agents[0].id;
+        let collective_agent = world.agents[1].id;
+
+        // Agent 0: lots of individual work, no collective signal
+        let stats = world
+            .agent_action_stats
+            .entry(individual_agent)
+            .or_default();
+        stats.edges_created = 50;
+        stats.tasks_created = 50;
+        stats.risk_mitigations = 20;
+
+        // Agent 1: moderate individual work, strong collective signal
+        let stats = world
+            .agent_action_stats
+            .entry(collective_agent)
+            .or_default();
+        stats.edges_created = 10;
+        stats.traces_reused_by_others = 8;
+        stats.cascade_citations = 5;
+        stats.downstream_successes = 6;
+
+        // Add surviving edges for agent 1
+        for i in 0..4 {
+            world.edges.push(HyperEdge {
+                participants: vec![collective_agent, world.agents[2].id],
+                weight: 0.3 + i as f64 * 0.1,
+                emergent: false,
+                age: 20,
+                tags: HashMap::new(),
+                created_at: 0,
+                embedding: None,
+                creator: Some(collective_agent),
+                scope: None,
+                provenance: None,
+                trust_tags: None,
+                origin_system: None,
+                knowledge_layer: None,
+            });
+        }
+
+        world.compute_jw();
+
+        let individual_jw = world.agents[0].jw;
+        let collective_jw = world.agents[1].jw;
+
+        assert!(
+            collective_jw > individual_jw,
+            "Collective agent (JW={}) should beat individual agent (JW={})",
+            collective_jw,
+            individual_jw
+        );
+    }
+
+    #[test]
+    fn test_trace_reuse_detection() {
+        let mut world = make_world(4);
+        let creator = world.agents[0].id;
+        let reuser = world.agents[1].id;
+
+        // Agent 0 creates an edge connecting agents 0 and 2
+        world.apply_action_with_agent(
+            &Action::LinkAgents {
+                vertices: vec![creator as usize, world.agents[2].id as usize],
+                weight: 1.0,
+            },
+            Some(creator),
+        );
+
+        // Agent 1 creates an edge that overlaps with agent 0's edge (shares agent 2)
+        world.apply_action_with_agent(
+            &Action::LinkAgents {
+                vertices: vec![reuser as usize, world.agents[2].id as usize],
+                weight: 1.0,
+            },
+            Some(reuser),
+        );
+
+        let creator_stats = world.agent_action_stats.get(&creator).unwrap();
+        assert_eq!(
+            creator_stats.traces_reused_by_others, 1,
+            "Creator should get trace-reuse credit when another agent builds on their edge"
+        );
+    }
+
+    #[test]
+    fn test_no_self_reuse_credit() {
+        let mut world = make_world(4);
+        let agent = world.agents[0].id;
+
+        // Agent creates two edges sharing a participant — should NOT get self-reuse credit
+        world.apply_action_with_agent(
+            &Action::LinkAgents {
+                vertices: vec![agent as usize, world.agents[1].id as usize],
+                weight: 1.0,
+            },
+            Some(agent),
+        );
+        world.apply_action_with_agent(
+            &Action::LinkAgents {
+                vertices: vec![agent as usize, world.agents[2].id as usize],
+                weight: 1.0,
+            },
+            Some(agent),
+        );
+
+        let stats = world.agent_action_stats.get(&agent).unwrap();
+        assert_eq!(
+            stats.traces_reused_by_others, 0,
+            "Agent should NOT get trace-reuse credit from their own edges"
+        );
+    }
+
+    #[test]
+    fn test_surviving_edges_counted() {
+        let mut world = make_world(4);
+        let agent_id = world.agents[0].id;
+
+        // Add 3 edges: 2 surviving (weight > 0.1), 1 dead (weight < 0.1)
+        for w in &[0.5, 0.3, 0.05] {
+            world.edges.push(HyperEdge {
+                participants: vec![agent_id, world.agents[1].id],
+                weight: *w,
+                emergent: false,
+                age: 0,
+                tags: HashMap::new(),
+                created_at: 0,
+                embedding: None,
+                creator: Some(agent_id),
+                scope: None,
+                provenance: None,
+                trust_tags: None,
+                origin_system: None,
+                knowledge_layer: None,
+            });
+        }
+
+        world.compute_surviving_edges();
+        let stats = world.agent_action_stats.get(&agent_id).unwrap();
+        assert_eq!(
+            stats.surviving_edges, 2,
+            "Only edges with weight > 0.1 should count as surviving"
+        );
+    }
+
+    #[test]
+    fn test_downstream_success_attribution() {
+        let mut world = make_world(4);
+        let enabler = world.agents[0].id;
+        let succeeder = world.agents[1].id;
+        let bystander = world.agents[2].id;
+
+        // Create edge between enabler and succeeder
+        world.edges.push(HyperEdge {
+            participants: vec![enabler, succeeder],
+            weight: 0.5,
+            emergent: false,
+            age: 0,
+            tags: HashMap::new(),
+            created_at: 0,
+            embedding: None,
+            creator: Some(enabler),
+            scope: None,
+            provenance: None,
+            trust_tags: None,
+            origin_system: None,
+            knowledge_layer: None,
+        });
+
+        // Succeeder achieves something → enabler should get downstream credit
+        world.record_downstream_success(succeeder);
+
+        let enabler_stats = world.agent_action_stats.get(&enabler).unwrap();
+        assert_eq!(
+            enabler_stats.downstream_successes, 1,
+            "Enabler should get downstream success credit"
+        );
+
+        // Bystander should NOT get credit (not connected via edge)
+        let bystander_stats = world.agent_action_stats.get(&bystander);
+        let bystander_downstream = bystander_stats
+            .map(|s| s.downstream_successes)
+            .unwrap_or(0);
+        assert_eq!(
+            bystander_downstream, 0,
+            "Unconnected agent should not get downstream credit"
+        );
+    }
+
+    #[test]
+    fn test_cascade_citations_positive_only() {
+        let mut world = make_world(4);
+        let agent_id = world.agents[0].id;
+
+        // Positive outcome → should record
+        world.record_cascade_citations(&[(agent_id, 3)], true);
+        assert_eq!(
+            world
+                .agent_action_stats
+                .get(&agent_id)
+                .unwrap()
+                .cascade_citations,
+            3
+        );
+
+        // Negative outcome → should NOT record
+        world.record_cascade_citations(&[(agent_id, 10)], false);
+        assert_eq!(
+            world
+                .agent_action_stats
+                .get(&agent_id)
+                .unwrap()
+                .cascade_citations,
+            3,
+            "Negative outcomes should not add cascade citations"
+        );
+    }
+
+    #[test]
+    fn test_edge_creator_stored() {
+        let mut world = make_world(4);
+        let agent_id = world.agents[0].id;
+
+        world.apply_action_with_agent(
+            &Action::LinkAgents {
+                vertices: vec![agent_id as usize, world.agents[1].id as usize],
+                weight: 1.0,
+            },
+            Some(agent_id),
+        );
+
+        let last_edge = world.edges.last().unwrap();
+        assert_eq!(
+            last_edge.creator,
+            Some(agent_id),
+            "Edge should record its creator"
+        );
+    }
 }

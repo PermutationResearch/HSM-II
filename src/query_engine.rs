@@ -218,6 +218,7 @@ mod tests {
             tags: std::collections::HashMap::new(),
             created_at: 0,
             embedding: None,
+            creator: None,
             scope: None,
             provenance: None,
             trust_tags: None,

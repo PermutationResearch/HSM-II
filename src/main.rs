@@ -7383,6 +7383,19 @@ impl App {
                         outcome.clone(),
                     );
 
+                    // ── Collective JW: cascade citations + downstream success ──
+                    // When a council output is positive AND cited agents, those
+                    // citations propagated into a real positive outcome.
+                    if confidence >= 0.5 && !citations.is_empty() {
+                        self.world
+                            .record_cascade_citations(&citations, true);
+                        // Also record downstream success for cited agents —
+                        // their contribution enabled a successful council output.
+                        for &(agent_id, _) in &citations {
+                            self.world.record_downstream_success(agent_id);
+                        }
+                    }
+
                     // If negative outcome, trigger role prompt optimization
                     if confidence < 0.5 {
                         self.log(&format!("⚠️ Low confidence council (conf={:.2}) — triggering role prompt optimization", confidence));

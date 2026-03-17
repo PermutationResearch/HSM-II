@@ -326,6 +326,7 @@ impl EnhancedPersonalAgent {
                 tags: HashMap::from([("type".to_string(), "initial".to_string())]),
                 created_at: current_timestamp(),
                 embedding: None,
+                creator: None,
                 scope: None,
                 provenance: None,
                 trust_tags: None,
@@ -333,7 +334,7 @@ impl EnhancedPersonalAgent {
                 knowledge_layer: None,
             });
         }
-        
+
         Ok(world)
     }
     
