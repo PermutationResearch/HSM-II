@@ -406,8 +406,18 @@ pub use autonomous_team::{
     build_persona as build_team_persona, BrandContext, BrandVoice, BusinessRole, Campaign,
     CampaignSnapshot, CampaignStatus, CampaignStore, ChannelConnector, ChannelPerformanceSummary,
     ChannelType, CommunitySignal, ContentMetric, ContentPiece, DomainPerformance,
-    LocalFileConnector, MemberStatus, PublishResult, SignalType, TeamMember, TeamOrchestrator,
+    LocalFileConnector, MemberStatus, PublishResult, RoleIntent, SignalType, TeamMember,
+    TeamOrchestrator,
 };
+
+// Multi-Tenant SaaS Layer — tenant isolation, team API, usage tracking
+pub mod tenant;
+pub mod team_api;
+pub mod usage_tracker;
+
+// Dream → Routing Feedback Loop — converts dream patterns into task routing adjustments
+pub mod dream_advisor;
+pub use dream_advisor::DreamAdvisor;
 
 // Onboarding, Belief Extraction, and Document Ingestion
 pub mod onboard;

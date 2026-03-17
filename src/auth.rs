@@ -38,6 +38,9 @@ pub struct ApiKey {
     pub last_used_at: Option<DateTime<Utc>>,
     pub usage_count: u64,
     pub is_active: bool,
+    /// Tenant ID for multi-tenant keys (None for legacy/single-tenant keys).
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +78,9 @@ pub struct Claims {
     pub permissions: Vec<Permission>,
     pub iat: i64, // Issued at
     pub exp: i64, // Expiration
+    /// Tenant ID for multi-tenant claims. None for legacy tokens.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 /// Rate limit tracking for a key
@@ -176,6 +182,7 @@ impl AuthManager {
             last_used_at: None,
             usage_count: 0,
             is_active: true,
+            tenant_id: None,
         };
         
         let key_id_log = key_id.clone();
@@ -214,8 +221,13 @@ impl AuthManager {
                 // Clone what we need before releasing lock
                 let key_id_clone = key_id.clone();
                 let permissions_clone = api_key.permissions.clone();
+                let tenant_id_clone = api_key.tenant_id.clone();
                 drop(keys); // Release read lock
-                return self.generate_jwt(&key_id_clone, &permissions_clone);
+                return self.generate_jwt(
+                    &key_id_clone,
+                    &permissions_clone,
+                    tenant_id_clone.as_deref(),
+                );
             }
         }
         
@@ -223,18 +235,24 @@ impl AuthManager {
     }
     
     /// Generate JWT token
-    fn generate_jwt(&self, key_id: &str, permissions: &[Permission]) -> Result<String> {
+    fn generate_jwt(
+        &self,
+        key_id: &str,
+        permissions: &[Permission],
+        tenant_id: Option<&str>,
+    ) -> Result<String> {
         let now = Utc::now();
         let exp = now + Duration::hours(24); // 24 hour expiry
-        
+
         let claims = Claims {
             sub: key_id.to_string(),
             key_id: key_id.to_string(),
             permissions: permissions.to_vec(),
             iat: now.timestamp(),
             exp: exp.timestamp(),
+            tenant_id: tenant_id.map(|s| s.to_string()),
         };
-        
+
         encode(
             &Header::default(),
             &claims,
@@ -313,6 +331,16 @@ pub struct AuthState {
 pub struct AuthenticatedUser {
     pub key_id: String,
     pub permissions: Vec<Permission>,
+    /// Tenant ID if this is a multi-tenant key.
+    pub tenant_id: Option<String>,
+}
+
+/// Tenant context extracted from JWT for multi-tenant API routes.
+/// Only present when the token was issued with a tenant_id.
+#[derive(Clone, Debug)]
+pub struct TenantContext {
+    pub tenant_id: String,
+    pub permissions: Vec<Permission>,
 }
 
 /// Axum middleware: Require authentication
@@ -355,9 +383,10 @@ pub async fn require_auth(
     let user = AuthenticatedUser {
         key_id: claims.key_id,
         permissions: claims.permissions,
+        tenant_id: claims.tenant_id,
     };
     request.extensions_mut().insert(user);
-    
+
     Ok(next.run(request).await)
 }
 
@@ -444,6 +473,209 @@ pub async fn authenticate(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Multi-Tenant Auth Extensions
+// ═══════════════════════════════════════════════════════════════════
+
+/// Authentication state for multi-tenant Axum routes.
+#[derive(Clone)]
+pub struct TenantAuthState {
+    pub auth: Arc<PersistentAuthManager>,
+}
+
+/// Persistent auth manager that wraps AuthManager with file-based storage.
+///
+/// On every key create/revoke, writes through to `{storage_path}/api_keys.json`.
+/// On startup, loads existing keys from disk.
+pub struct PersistentAuthManager {
+    inner: AuthManager,
+    storage_path: std::path::PathBuf,
+}
+
+impl PersistentAuthManager {
+    /// Load or create a persistent auth manager.
+    ///
+    /// If `{storage_path}/api_keys.json` exists, loads all keys into memory.
+    pub fn load(storage_path: &std::path::Path) -> Result<Self> {
+        std::fs::create_dir_all(storage_path)?;
+        let inner = AuthManager::new();
+
+        let keys_file = storage_path.join("api_keys.json");
+        if keys_file.exists() {
+            let data = std::fs::read_to_string(&keys_file)?;
+            let keys: Vec<ApiKey> = serde_json::from_str(&data)?;
+            // Inject keys directly into the inner AuthManager's map
+            let keys_map: HashMap<String, ApiKey> = keys.into_iter().map(|k| (k.id.clone(), k)).collect();
+            // We need to get past the RwLock — use try_write since we're in startup
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                handle.block_on(async {
+                    let mut guard = inner.keys.write().await;
+                    *guard = keys_map;
+                });
+            }
+        }
+
+        Ok(Self {
+            inner,
+            storage_path: storage_path.to_path_buf(),
+        })
+    }
+
+    /// Create a new persistent auth manager without loading from disk.
+    pub fn new(storage_path: &std::path::Path) -> Self {
+        std::fs::create_dir_all(storage_path).ok();
+        Self {
+            inner: AuthManager::new(),
+            storage_path: storage_path.to_path_buf(),
+        }
+    }
+
+    /// Create an API key for a specific tenant.
+    pub async fn create_tenant_key(
+        &self,
+        tenant_id: &str,
+        name: String,
+        permissions: Vec<Permission>,
+        rate_limit: Option<RateLimitConfig>,
+    ) -> Result<(String, String)> {
+        // Return (key_plain, key_id)
+        let key_id = Uuid::new_v4().to_string();
+        let key_plain = format!("hsk_{}", Uuid::new_v4().to_string().replace("-", ""));
+
+        // Hash the key
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let key_hash = argon2
+            .hash_password(key_plain.as_bytes(), &salt)
+            .map_err(|e| anyhow!("Failed to hash key: {}", e))?
+            .to_string();
+
+        let api_key = ApiKey {
+            id: key_id.clone(),
+            key_hash,
+            name,
+            owner_id: tenant_id.to_string(),
+            permissions,
+            rate_limit: rate_limit.unwrap_or_default(),
+            created_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+            usage_count: 0,
+            is_active: true,
+            tenant_id: Some(tenant_id.to_string()),
+        };
+
+        self.inner.keys.write().await.insert(key_id.clone(), api_key);
+        self.persist().await?;
+
+        info!(key_id = %key_id, tenant_id = %tenant_id, "Created tenant API key");
+
+        Ok((key_plain, key_id))
+    }
+
+    /// Validate an API key and return a JWT token.
+    pub async fn validate_key(&self, key_plain: &str) -> Result<String> {
+        self.inner.validate_key(key_plain).await
+    }
+
+    /// Validate a JWT token.
+    pub fn validate_jwt(&self, token: &str) -> Result<Claims> {
+        self.inner.validate_jwt(token)
+    }
+
+    /// Check rate limit for a key.
+    pub async fn check_rate_limit(&self, key_id: &str) -> Result<()> {
+        self.inner.check_rate_limit(key_id).await
+    }
+
+    /// Revoke a key and persist.
+    pub async fn revoke_key(&self, key_id: &str) -> Result<()> {
+        self.inner.revoke_key(key_id).await?;
+        self.persist().await?;
+        Ok(())
+    }
+
+    /// List all keys for a tenant.
+    pub async fn list_tenant_keys(&self, tenant_id: &str) -> Vec<ApiKey> {
+        let keys = self.inner.keys.read().await;
+        keys.values()
+            .filter(|k| k.tenant_id.as_deref() == Some(tenant_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Persist all keys to disk.
+    async fn persist(&self) -> Result<()> {
+        let keys = self.inner.keys.read().await;
+        let keys_vec: Vec<&ApiKey> = keys.values().collect();
+        let json = serde_json::to_string_pretty(&keys_vec)?;
+        std::fs::write(self.storage_path.join("api_keys.json"), json)?;
+        Ok(())
+    }
+}
+
+/// Axum middleware: Require authentication WITH a tenant context.
+///
+/// Rejects requests that:
+/// - Have no Bearer token
+/// - Have an invalid JWT
+/// - Have a token without a tenant_id
+/// - Exceed rate limits
+pub async fn require_tenant_auth(
+    State(state): State<TenantAuthState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // Extract token from header
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+
+    let token = match token {
+        Some(t) => t,
+        None => {
+            warn!("Missing authorization header");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    // Validate JWT
+    let claims = match state.auth.validate_jwt(token) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "Invalid JWT");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    // Require tenant_id
+    let tenant_id = match &claims.tenant_id {
+        Some(t) => t.clone(),
+        None => {
+            warn!(key_id = %claims.key_id, "Token missing tenant_id");
+            return Err(StatusCode::FORBIDDEN);
+        }
+    };
+
+    // Check rate limit
+    if let Err(e) = state.auth.check_rate_limit(&claims.key_id).await {
+        warn!(error = %e, key_id = %claims.key_id, "Rate limit exceeded");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // Insert TenantContext for handlers
+    let ctx = TenantContext {
+        tenant_id,
+        permissions: claims.permissions,
+    };
+    request.extensions_mut().insert(ctx);
+
+    Ok(next.run(request).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +735,88 @@ mod tests {
         
         // Third should fail
         assert!(auth.check_rate_limit(&claims.key_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_auth_tenant_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth = PersistentAuthManager::new(tmp.path());
+
+        // Create a tenant key
+        let (key_plain, key_id) = auth
+            .create_tenant_key(
+                "tenant-123",
+                "Test Tenant Key".to_string(),
+                vec![Permission::Read, Permission::Write],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(key_plain.starts_with("hsk_"));
+        assert!(!key_id.is_empty());
+
+        // Validate key → JWT should contain tenant_id
+        let jwt = auth.validate_key(&key_plain).await.unwrap();
+        let claims = auth.validate_jwt(&jwt).unwrap();
+        assert_eq!(claims.tenant_id, Some("tenant-123".to_string()));
+        assert!(claims.permissions.contains(&Permission::Read));
+        assert!(claims.permissions.contains(&Permission::Write));
+    }
+
+    #[tokio::test]
+    async fn test_persistent_auth_list_tenant_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth = PersistentAuthManager::new(tmp.path());
+
+        // Create keys for two tenants
+        auth.create_tenant_key(
+            "tenant-a",
+            "Key A1".to_string(),
+            vec![Permission::Read],
+            None,
+        )
+        .await
+        .unwrap();
+
+        auth.create_tenant_key(
+            "tenant-a",
+            "Key A2".to_string(),
+            vec![Permission::Write],
+            None,
+        )
+        .await
+        .unwrap();
+
+        auth.create_tenant_key(
+            "tenant-b",
+            "Key B1".to_string(),
+            vec![Permission::Admin],
+            None,
+        )
+        .await
+        .unwrap();
+
+        // List tenant A keys
+        let a_keys = auth.list_tenant_keys("tenant-a").await;
+        assert_eq!(a_keys.len(), 2);
+
+        // List tenant B keys
+        let b_keys = auth.list_tenant_keys("tenant-b").await;
+        assert_eq!(b_keys.len(), 1);
+    }
+
+    #[test]
+    fn test_claims_backward_compat() {
+        // Existing tokens without tenant_id should deserialize fine
+        let json = r#"{
+            "sub": "key1",
+            "key_id": "key1",
+            "permissions": ["Read"],
+            "iat": 1000000,
+            "exp": 2000000
+        }"#;
+        let claims: Claims = serde_json::from_str(json).unwrap();
+        assert!(claims.tenant_id.is_none());
     }
 }
