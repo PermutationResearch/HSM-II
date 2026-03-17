@@ -190,14 +190,47 @@ impl BusinessRole {
             Self::Cmo => &["brand", "campaign", "acquisition", "funnel", "awareness", "launch"],
             Self::Coo => &["workflow", "process", "kpi", "operations", "efficiency", "logistics"],
             Self::Developer => &["code", "build", "ship", "feature", "bug", "refactor", "test"],
-            Self::Designer => &["design", "ui", "ux", "wireframe", "figma", "layout", "brand"],
+            Self::Designer => &["design", "ui", "ux", "wireframe", "figma", "layout", "prototype"],
             Self::Marketer => &["seo", "social", "content", "ads", "growth", "geo", "reddit"],
             Self::Analyst => &["data", "metrics", "report", "analysis", "insight", "dashboard"],
             Self::Writer => &["blog", "copy", "docs", "article", "newsletter", "press"],
             Self::Support => &["ticket", "customer", "faq", "issue", "onboarding", "feedback"],
-            Self::Hr => &["hiring", "culture", "onboarding", "team", "retention", "review"],
+            Self::Hr => &["hiring", "culture", "onboarding", "team", "retention", "review", "survey"],
             Self::Sales => &["lead", "pipeline", "outreach", "crm", "deal", "demo", "close"],
             Self::Legal => &["contract", "compliance", "terms", "ip", "privacy", "gdpr"],
+        }
+    }
+
+    /// Context words that SUPPRESS a keyword match for this role.
+    ///
+    /// Solves the disambiguation problem: "design a survey" should NOT
+    /// trigger Designer because "survey" is HR context. Without this,
+    /// naive `contains("design")` produces false positives.
+    ///
+    /// Returns (keyword, &[anti_context]) pairs. If `keyword` matches AND
+    /// any `anti_context` word is present, the keyword hit is cancelled.
+    pub fn disambiguation_exclusions(&self) -> &[(&'static str, &[&'static str])] {
+        match self {
+            Self::Designer => &[
+                ("design", &["survey", "hiring", "interview", "salary", "review",
+                             "process", "workflow", "policy", "compliance", "contract",
+                             "retention", "onboarding", "training", "evaluation",
+                             "experiment", "study", "research", "test plan"]),
+            ],
+            Self::Hr => &[
+                ("review", &["code", "pull request", "pr", "merge", "commit",
+                             "architecture", "design system", "ui review"]),
+                ("onboarding", &["sdk", "api", "integration", "developer"]),
+                ("team", &["code", "repository", "branch", "deploy"]),
+            ],
+            Self::Support => &[
+                ("issue", &["code", "bug", "github", "merge", "branch", "repo"]),
+                ("feedback", &["code review", "pull request", "pr"]),
+            ],
+            Self::Cmo => &[
+                ("brand", &["wireframe", "figma", "layout", "mockup", "prototype"]),
+            ],
+            _ => &[],
         }
     }
 
@@ -345,25 +378,39 @@ impl TeamMember {
     ///
     /// | Signal           | With advisor | Without advisor |
     /// |------------------|-------------|-----------------|
-    /// | keyword_score    | 0.35        | 0.50 (*)        |
+    /// | keyword_score    | 0.35        | 0.55 (*)        |
     /// | proactivity      | 0.15        | 0.20            |
     /// | domain_bonus     | 0.15        | 0.20            |
     /// | dream_signal     | 0.15        | 0.00            |
     /// | intent_modifier  | 0.10        | 0.00            |
-    /// | noise            | 0.10        | 0.10            |
+    /// | noise            | 0.10        | 0.05            |
     ///
     /// (*) Without advisor, dream + intent weight is redistributed to
-    /// keyword (0.15→keyword) and proactivity/domain (0.05 each), matching
-    /// the original `bid()` weights exactly.
+    /// keyword (0.20→keyword) and noise halved (0.05), giving keyword
+    /// matches clear signal above noise on cold start.
     pub fn bid_with_context(&self, task_description: &str, advisor: Option<&DreamAdvisor>) -> f64 {
         let lower = task_description.to_lowercase();
 
-        // ── Static keyword hits ──────────────────────────────────────
+        // ── Static keyword hits with disambiguation ──────────────────
+        let exclusions = self.role.disambiguation_exclusions();
         let mut keyword_hits = self
             .role
             .activation_keywords()
             .iter()
-            .filter(|kw| lower.contains(**kw))
+            .filter(|kw| {
+                if !lower.contains(**kw) {
+                    return false;
+                }
+                // Check if any exclusion rule cancels this keyword
+                for (excl_kw, anti_ctx) in exclusions {
+                    if *excl_kw == **kw {
+                        if anti_ctx.iter().any(|ctx| lower.contains(ctx)) {
+                            return false; // Keyword suppressed by context
+                        }
+                    }
+                }
+                true
+            })
             .count();
 
         // ── Dream-expanded keyword hits ──────────────────────────────
@@ -371,7 +418,8 @@ impl TeamMember {
             keyword_hits += adv.expanded_keyword_hits(self.role, task_description);
         }
 
-        let keyword_score = (keyword_hits as f64 * 0.25).min(1.0);
+        // 0.4 per hit instead of 0.25 — widens cold-start bid spread
+        let keyword_score = (keyword_hits as f64 * 0.4).min(1.0);
         let proactivity = self.role.default_proactivity();
 
         // ── Domain history bonus ─────────────────────────────────────
@@ -415,11 +463,11 @@ impl TeamMember {
                 + noise * 0.10)
                 .clamp(0.0, 1.0)
         } else {
-            // Original weights — backward compatible
-            (keyword_score * 0.5
-                + proactivity * 0.2
-                + domain_bonus * 0.2
-                + noise * 0.1)
+            // Cold-start weights — keyword-heavy, low noise
+            (keyword_score * 0.55
+                + proactivity * 0.20
+                + domain_bonus * 0.20
+                + noise * 0.05)
                 .clamp(0.0, 1.0)
         }
     }
@@ -1573,14 +1621,45 @@ impl TeamOrchestrator {
         Ok(())
     }
 
-    /// Refresh the dream advisor from campaign store patterns.
+    /// Refresh the dream advisor from ALL available signal sources.
     ///
-    /// Pulls `(domain, narrative, valence)` tuples from
-    /// `CampaignStore::extract_dream_patterns()` and ingests them into
-    /// the advisor's pre-computed routing table. Call this after
-    /// recording outcomes or campaign metrics.
+    /// Sources (in priority order):
+    /// 1. Campaign metrics via `CampaignStore::extract_dream_patterns()`
+    /// 2. Member outcome history — synthesizes patterns from domain_history
+    ///    even without any campaign data, closing the cold-start loop.
+    ///
+    /// This means the advisor starts learning as soon as task outcomes
+    /// are recorded, not only after campaigns accumulate metric snapshots.
     pub fn refresh_dream_advisor(&mut self) {
-        let patterns = self.campaign_store.extract_dream_patterns();
+        let mut patterns = self.campaign_store.extract_dream_patterns();
+
+        // ── Synthesize patterns from member outcome history ──────────
+        // This closes the feedback loop: outcomes → advisor adjustments
+        // even when no campaigns exist yet.
+        for member in &self.members {
+            for (domain, perf) in &member.domain_history {
+                if perf.attempts < 1 {
+                    continue;
+                }
+                let success_rate = perf.success_rate();
+                // Valence: map success_rate [0,1] → [-1, 1]
+                let valence = (success_rate * 2.0) - 1.0;
+                let narrative = format!(
+                    "{} in domain '{}': {}/{} tasks succeeded (quality {:.2})",
+                    member.role,
+                    domain,
+                    perf.successes,
+                    perf.attempts,
+                    perf.avg_quality,
+                );
+                patterns.push((
+                    format!("outcome:{}:{}", member.role.tag(), domain),
+                    narrative,
+                    valence,
+                ));
+            }
+        }
+
         if !patterns.is_empty() {
             self.dream_advisor.ingest_campaign_patterns(&patterns);
         }
@@ -2077,6 +2156,135 @@ mod tests {
         let result = connector.publish(&content).await.unwrap();
         assert!(result.success);
         assert!(result.url.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Intent disambiguation tests ────────────────────────────────
+
+    #[test]
+    fn test_design_survey_routes_to_hr_not_designer() {
+        let dir = std::env::temp_dir().join("hsmii_test_disambig");
+        std::fs::create_dir_all(&dir).ok();
+
+        let team = TeamOrchestrator::new(&dir);
+
+        // "design a survey" — the word "design" is present but "survey"
+        // is HR context, so Designer's keyword hit should be suppressed.
+        let member = team.route_task("design a survey for employee satisfaction").unwrap();
+        assert!(
+            member.role == BusinessRole::Hr,
+            "Expected HR for 'design a survey', got: {}",
+            member.role
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_design_ui_still_routes_to_designer() {
+        let dir = std::env::temp_dir().join("hsmii_test_designer_ok");
+        std::fs::create_dir_all(&dir).ok();
+
+        let team = TeamOrchestrator::new(&dir);
+
+        // Genuine design tasks should still route to Designer
+        let member = team.route_task("design a new landing page layout with wireframes").unwrap();
+        assert!(
+            member.role == BusinessRole::Designer,
+            "Expected Designer for UI task, got: {}",
+            member.role
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_disambiguation_exclusions_cancel_false_positives() {
+        let designer = TeamMember::from_role(BusinessRole::Designer, 200);
+
+        // "design" should be suppressed by "survey" context
+        let bid_survey = designer.bid("design a survey for hiring feedback");
+        let bid_ui = designer.bid("design the homepage ui layout");
+
+        assert!(
+            bid_ui > bid_survey,
+            "UI design bid ({:.3}) should be higher than survey bid ({:.3})",
+            bid_ui, bid_survey,
+        );
+    }
+
+    // ── Cold-start bid spread tests ────────────────────────────────
+
+    #[test]
+    fn test_cold_start_bid_spread_is_wide() {
+        let dir = std::env::temp_dir().join("hsmii_test_spread");
+        std::fs::create_dir_all(&dir).ok();
+
+        let team = TeamOrchestrator::new(&dir);
+
+        // Collect bids for a task with one clear keyword match
+        let task = "build a REST API endpoint";
+        let mut bids: Vec<(BusinessRole, f64)> = team
+            .members
+            .iter()
+            .filter(|m| m.status == MemberStatus::Active || m.status == MemberStatus::Idle)
+            .map(|m| (m.role, m.bid(task)))
+            .collect();
+        bids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let max_bid = bids[0].1;
+        let min_bid = bids.last().unwrap().1;
+        let spread = max_bid - min_bid;
+
+        // Spread should be >0.10 to make keyword matches meaningful
+        // (old formula gave ~0.12, new formula gives ~0.20+)
+        assert!(
+            spread > 0.10,
+            "Cold-start spread too narrow: {:.3} (max={:.3} {}, min={:.3} {})",
+            spread, max_bid, bids[0].0, min_bid, bids.last().unwrap().0,
+        );
+
+        // The top bidder should be Developer or CTO (has "build"/"api" keywords)
+        assert!(
+            bids[0].0 == BusinessRole::Developer || bids[0].0 == BusinessRole::Cto,
+            "Top bidder should be Dev/CTO for API task, got: {}",
+            bids[0].0,
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── DreamAdvisor from outcomes test ─────────────────────────────
+
+    #[test]
+    fn test_dream_advisor_advances_from_outcomes() {
+        let dir = std::env::temp_dir().join("hsmii_test_dream_outcomes");
+        std::fs::create_dir_all(&dir).ok();
+
+        let mut team = TeamOrchestrator::new(&dir);
+
+        // Initially, dream advisor is empty
+        assert!(team.dream_advisor.is_empty());
+
+        // Record some task outcomes (no campaigns needed)
+        if let Some(dev) = team.member_mut(BusinessRole::Developer) {
+            dev.record_outcome("api_development", true, 0.9);
+            dev.record_outcome("api_development", true, 0.85);
+            dev.record_outcome("debugging", false, 0.3);
+        }
+        if let Some(writer) = team.member_mut(BusinessRole::Writer) {
+            writer.record_outcome("blog_posts", true, 0.95);
+        }
+
+        // Refresh dream advisor — should now produce patterns from outcomes
+        team.refresh_dream_advisor();
+
+        // Advisor should no longer be empty (generation > 0)
+        assert!(
+            !team.dream_advisor.is_empty(),
+            "Dream advisor should have learned from outcome history"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
