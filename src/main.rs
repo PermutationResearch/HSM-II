@@ -5714,7 +5714,7 @@ impl App {
                 let mut agent = hyper_stigmergy::AgentLoop::new(
                     hyper_stigmergy::coder_assistant::agent_loop::AgentConfig {
                         model: model_name.clone(),
-                        api_url: "http://localhost:11434".to_string(),
+                        api_url: hyper_stigmergy::config::network::DEFAULT_OLLAMA_URL.to_string(),
                         supports_thinking: true,
                         ..Default::default()
                     },
@@ -10878,7 +10878,7 @@ async fn council_run_llm_deliberation(
 
     let llm_cfg = LLMDeliberationConfig {
         model: model.to_string(),
-        endpoint: "http://localhost:11434".to_string(),
+        endpoint: hyper_stigmergy::config::network::DEFAULT_OLLAMA_URL.to_string(),
         ..LLMDeliberationConfig::default()
     };
     let mut council = Council::new_with_llm_config(

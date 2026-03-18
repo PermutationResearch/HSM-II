@@ -171,7 +171,7 @@ impl Default for InvestigationConfig {
                 model: crate::ollama_client::resolve_model_from_env(
                     "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
                 ),
-                api_url: "http://localhost:11434".to_string(),
+                api_url: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
                 api_key: None,
                 temperature: 0.7,
                 max_tokens: 2000,

@@ -30,7 +30,7 @@ impl Model {
         Self {
             provider: "ollama".to_string(),
             name: name.into(),
-            api_url: "http://localhost:11434".to_string(),
+            api_url: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
             supports_thinking: true,
             max_tokens: 4096,
             temperature: 0.7,
@@ -234,7 +234,7 @@ pub fn getModel(provider: impl AsRef<str>, name: impl Into<String>) -> Model {
         _ => Model {
             provider: provider.to_string(),
             name,
-            api_url: "http://localhost:11434".to_string(),
+            api_url: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
             supports_thinking: true,
             max_tokens: 4096,
             temperature: 0.7,

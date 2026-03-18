@@ -1,475 +1,216 @@
-# Hyper-Stigmergic Morphogenesis II (HSM-II)
+# HSM-II — Hyper-Stigmergic Morphogenesis II
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Where swarms of AI agents think together, learn from each other, and grow smarter over time.**
+A multi-agent AI orchestration system built in Rust that coordinates autonomous agents through stigmergic signaling, council-based governance, and adaptive learning. Agents collaborate on complex tasks — code generation, investigation, optimization — using local LLMs (Ollama) with optional cloud provider fallback.
 
-HSM-II is a **federated multi-agent hypergraph system** that brings emergent collective intelligence to life. Built in Rust, it enables autonomous AI agents to coordinate without central control, learn from collective experience, and solve complex problems through shared knowledge structures.
+## What it does
 
-Think of it as *ants solving problems through pheromone trails* — except the ants are LLM-powered agents, the trails are hypergraph edges, and the colony learns to code, research, and coordinate autonomously.
+- **Multi-agent orchestration**: Spawns and coordinates autonomous AI agents that communicate through a shared stigmergic field (indirect coordination via environmental signals)
+- **Coder assistant**: An AI-powered coding agent with tool execution (read/write/edit/bash/grep), macOS sandbox enforcement, MCP tool providers, and WASM capability isolation
+- **Council governance (Ouroboros)**: A 5-phase security gate where multiple AI "council members" vote on risky operations before allowing execution
+- **Investigation engine**: Deep research workflows that decompose complex questions into multi-hop investigations
+- **Federated networking**: Agents can form teams across network boundaries using Axum-based federation endpoints
+- **TUI interfaces**: Terminal dashboards for monitoring agent activity, team coordination, and code sessions
 
-**[📄 Read the Paper](./documentation/paper.pdf)** | **[🚀 Quick Start](#-quick-start)** | **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)**
+## Architecture
 
----
-
-## 🚀 Quick Start
-
-### Step 1: Create Your Telegram Bot (2 minutes)
-
-You need a Telegram bot token before anything else:
-
-1. Open Telegram and search for **[@BotFather](https://t.me/BotFather)**
-2. Send `/newbot`
-3. Choose a name (e.g. "My HSM-II Bot") and a username (e.g. `my_hsmii_bot`)
-4. BotFather gives you a token like `7123456789:AAF1k...` — **save this, you'll need it below**
-
----
-
-### Step 2: Install Rust
-
-**macOS / Linux:**
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
+```
+src/
+├── main.rs                    # Primary binary (11K+ lines) — CLI, server, orchestration entry
+├── config.rs                  # Centralized constants (network, timeouts, limits, thresholds)
+├── lib.rs                     # Module declarations and re-exports
+│
+├── agent_core/                # Core agent lifecycle, message loop, LLM config
+├── coder_assistant/           # Coding agent with tool execution
+│   ├── agent_loop.rs          #   Agent message loop and session management
+│   ├── tools.rs               #   Tool registry and execution policy
+│   ├── tool_executor.rs       #   Core dispatch: builtin vs external providers
+│   ├── security_policy.rs     #   Ouroboros gate, secret boundary, audit trail
+│   ├── builtin_tools.rs       #   read/write/edit/bash/grep/find/ls implementations
+│   ├── external_providers.rs  #   MCP (HTTP JSON-RPC) and WASM tool providers
+│   ├── sandbox.rs             #   macOS sandbox-exec enforcement
+│   ├── schemas.rs             #   Tool/provider type definitions
+│   ├── renderer.rs            #   Output formatting
+│   ├── session.rs             #   Session persistence
+│   └── streaming.rs           #   Streaming response handling
+│
+├── council/                   # Multi-agent deliberation and voting
+├── ouroboros_compat/          # 5-phase governance gate (propose → deliberate → vote → execute → audit)
+├── investigation/             # Multi-hop research engine
+├── investigation_engine.rs    # Investigation orchestration
+│
+├── rlm.rs                     # Reinforcement Learning Module v1 (bidding, embeddings)
+├── rlm_v2/                    # RLM v2 with LLM bridge
+├── optimize_anything/         # Generic optimization framework
+├── mirofish.rs                # Trust calibration and Bayesian scoring
+│
+├── federation/                # Cross-network agent communication (Axum)
+├── communication/             # Inter-agent messaging
+├── scheduler/                 # Cron-based task scheduling
+│
+├── llm/                       # Multi-provider LLM client (OpenAI, Anthropic, Ollama)
+├── ollama_client.rs           # Ollama-specific client with model resolution
+├── pi_ai_compat/              # Model compatibility layer
+│
+├── personal/                  # Personal agent with memory and personality
+├── dream/                     # Dream-state processing (offline learning)
+├── social_memory.rs           # Social interaction memory
+│
+├── hypergraph.rs              # Hypergraph data structure
+├── embedded_graph_store.rs    # On-disk graph persistence
+├── property_graph.rs          # Property graph implementation
+├── hnsw_index.rs              # HNSW approximate nearest neighbor index
+├── disk_backed_vector_index.rs # Disk-backed vector storage
+│
+├── auth.rs                    # JWT + Argon2 authentication
+├── vault.rs                   # Secret management
+├── gateways/                  # Discord and Telegram bot integrations
+├── gpu/                       # Optional wgpu acceleration
+│
+└── bin/                       # Additional binary entry points
+    ├── agentd.rs              #   Agent daemon
+    ├── conductord.rs          #   Conductor daemon (team orchestration)
+    ├── hypergraphd.rs         #   Hypergraph server
+    ├── teamd.rs               #   Team daemon
+    ├── ouroboros_gate.rs      #   Standalone governance gate CLI
+    ├── investigate.rs         #   Investigation CLI
+    ├── personal_agent.rs      #   Personal agent CLI
+    ├── batch_experiment.rs    #   Batch experiment runner
+    └── tui_codex_demo.rs      #   TUI demonstration
 ```
 
-**Windows:**
-Download and run [rustup-init.exe](https://rustup.rs/), then restart your terminal.
+## Prerequisites
 
-Verify it worked:
-```bash
-rustc --version
-```
+- **Rust 1.75+** (2021 edition)
+- **Ollama** running locally on port 11434 (or set `OLLAMA_URL`)
+- Optional: OpenAI or Anthropic API keys for cloud LLM fallback
+- Optional: MySQL/MariaDB for RooDB persistence (defaults to embedded storage)
 
----
-
-### Step 3: Choose Your LLM → Clone → Run
-
-Pick **one** option below. All three end with a working Telegram bot.
-
-#### Option A: Local with Ollama (Free, Private — your data stays on your machine)
-
-**Install Ollama:**
-
-| Platform | Command |
-|----------|---------|
-| macOS | `brew install ollama` |
-| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
-| Windows | Download from [ollama.com/download](https://ollama.com/download) |
-
-**Then run these commands:**
-```bash
-# Start Ollama and pull a model (pick any — it auto-detects)
-ollama pull llama3.2
-
-# Clone, bootstrap, and start the bot
-git clone https://github.com/PermutationResearch/HSM-II.git
-cd HSM-II
-cargo run --bin personal_agent -- bootstrap
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
-```
-
-> 💡 **Note:** Ollama usually starts automatically after install. If you get a connection error, run `ollama serve` first.
-
----
-
-#### Option B: Claude (Anthropic API)
-
-Get your API key from [console.anthropic.com](https://console.anthropic.com/)
-
-```bash
-git clone https://github.com/PermutationResearch/HSM-II.git
-cd HSM-II
-cargo run --bin personal_agent -- bootstrap
-
-export ANTHROPIC_API_KEY="sk-ant-PASTE_YOUR_KEY_HERE"
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
-```
-
----
-
-#### Option C: GPT-4 (OpenAI API) or Any OpenAI-Compatible API
-
-Get your API key from [platform.openai.com](https://platform.openai.com/)
+## Quick start
 
 ```bash
-git clone https://github.com/PermutationResearch/HSM-II.git
-cd HSM-II
-cargo run --bin personal_agent -- bootstrap
+# Clone and build
+git clone <repo-url>
+cd hyper-stigmergic-morphogenesisII
+cp .env.example .env
+# Edit .env with your configuration
 
-export OPENAI_API_KEY="sk-PASTE_YOUR_KEY_HERE"
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
+# Build all binaries
+cargo build --release
+
+# Run the primary binary (includes CLI, server modes, coder assistant)
+cargo run --release
+
+# Run specific daemons
+cargo run --release --bin agentd
+cargo run --release --bin conductord
+cargo run --release --bin hypergraphd
 ```
 
-**Using Groq, Together, Mistral, or another OpenAI-compatible provider?** Just add the base URL:
-```bash
-export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
-```
+## Environment variables
 
----
+Copy `.env.example` to `.env` and configure:
 
-### Step 4: Talk to Your Bot
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OLLAMA_URL` | No | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_MODEL` | No | auto-detect | Override default model selection |
+| `OPENAI_API_KEY` | No | — | OpenAI API key for cloud fallback |
+| `ANTHROPIC_API_KEY` | No | — | Anthropic API key for cloud fallback |
+| `DEFAULT_LLM_MODEL` | No | `gpt-4o-mini` | Default model when using cloud providers |
+| `RUST_LOG` | No | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
+| `DATABASE_URL` | No | SQLite | Database connection string |
+| `HSM_MODE` | No | `production` | Runtime mode (`development`, `staging`, `production`) |
+| `HSM_DATA_DIR` | No | `./data` | Data storage directory |
+| `BROWSERBASE_API_KEY` | No | — | Browser automation API key |
+| `CF_ACCOUNT_ID` | No | — | Cloudflare account for web search |
+| `CF_API_TOKEN` | No | — | Cloudflare API token |
+| `GRAFANA_PASSWORD` | No | `admin` | Grafana dashboard password |
 
-Open Telegram, find your bot, and send it a message. That's it.
+## Key subsystems
 
-**Useful commands inside the chat:**
+### Coder Assistant
 
-| Command | What it does |
-|---------|-------------|
-| `/model list` | Show available LLM models |
-| `/model claude` | Switch to Claude |
-| `/model gpt-4` | Switch to GPT-4 |
-| `/ralph <task>` | Code generation with worker-reviewer loop |
-| `/rlm <text>` | Process large documents |
-| `/tool list` | Show available tools (60+) |
-| `/tool <name> <args>` | Run a specific tool |
-
----
-
-### Environment Variables Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TELEGRAM_TOKEN` | *(required)* | Your Telegram bot token from BotFather |
-| `OLLAMA_HOST` | `http://localhost` | Ollama server address |
-| `OLLAMA_PORT` | `11434` | Ollama server port |
-| `OLLAMA_MODEL` | `auto` (detects installed) | Force a specific Ollama model |
-| `ANTHROPIC_API_KEY` | *(optional)* | Anthropic API key for Claude |
-| `OPENAI_API_KEY` | *(optional)* | OpenAI API key for GPT-4 |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom OpenAI-compatible endpoint |
-
-### Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `cargo: command not found` | Run `source ~/.cargo/env` or restart your terminal |
-| `Cannot reach Ollama` | Run `ollama serve` to start it manually |
-| `No models found in Ollama` | Run `ollama pull llama3.2` (or any model) |
-| Bot doesn't respond | Check the terminal for errors; make sure `TELEGRAM_TOKEN` is correct |
-| Want to start fresh | `rm -f world_state.ladybug*.bincode ~/.hsmii/config.json` then `cargo run --bin personal_agent -- bootstrap` |
-
-### Other Ways to Run
-
-#### With Visualization Dashboard
-```bash
-cargo run --bin personal_agent -- start --telegram &
-cargo run --bin hypergraphd
-```
-
-#### Full Research Stack
-```bash
-cargo run --release &
-cargo run --bin personal_agent -- start --telegram &
-cargo run --bin hypergraphd
-```
-
----
-
-## 🧠 What HSM-II Does
-
-### Shared Memory Through Hypergraphs
-
-HSM-II stores knowledge as a **hypergraph** — a web where edges can connect multiple nodes at once. Agents read and write to this shared structure:
-
-- **Beliefs** — What agents think about the world
-- **Hyperedges** — Connections between multiple beliefs (emergent insights)
-- **Ontological Tags** — Categories for organizing knowledge
-- **Visibility Scopes** — Local, Shared, or Restricted access levels
-
-```
-Agent A ──believes──► "Neural networks are effective"
-                           │
-                           │ (hyperedge)
-                           ▼
-Agent B ──believes──► "For image classification" ◄───believes─── Agent C
-                           │
-                           │ (hyperedge)
-                           ▼
-                    "But require lots of data"
-```
-
-### Stigmergic Coordination
-
-Like ants leaving pheromone trails, agents leave "trails" in the hypergraph:
-
-1. **Agent solves a problem** → Creates/updates beliefs
-2. **Other agents detect changes** → Read the updated structure
-3. **Collective learning emerges** → No direct communication needed
-
-### Multi-Agent Council Deliberation
-
-When decisions matter, agents form **Councils**:
-
-| Mode | Use Case | How It Works |
-|------|----------|--------------|
-| **Simple** | Low complexity, high urgency | Single agent decides with coherence check |
-| **Orchestrate** | Medium complexity | Leader agent coordinates specialists |
-| **Debate** | High complexity, high stakes | Full deliberation with evidence and voting |
-
-Councils use **evidence contracts** — agents must provide proof for their positions.
-
----
-
-## 🎓 Continuous Learning & Skill Improvement
-
-### CASS: Continuous Automated Skill Synthesis
-
-HSM-II doesn't just execute tasks — it **learns from them**:
-
-1. **Harvest** — Successful agent trajectories are captured
-2. **Distill** — Common patterns become reusable skills
-3. **Promote** — Skills pass through consensus jury validation
-4. **Version** — Skills evolve with semantic versioning
-
-### DKS: Distributed Knowledge System
-
-Knowledge spreads through the agent population like genetic evolution:
-
-- **Selection Pressure** — Better-performing knowledge survives
-- **Replication** — Successful patterns spread to other agents
-- **Mutation** — Variations are tested and rewarded
-- **Flux** — Knowledge flows between local and shared scopes
-
----
-
-## 🌐 Federation & Multi-Node Coordination
-
-Multiple HSM-II instances can connect and form a **federation**:
-
-- **Trust Dynamics** — Bayesian trust scoring between nodes
-- **Conflict Resolution** — When beliefs diverge, councils negotiate
-- **Knowledge Sync** — Selective merging of hypergraph structures
-- **Anti-fragile** — The system improves under stress
-
-```
-┌─────────────┐      Trust Edges      ┌─────────────┐
-│  HSM-II     │◄─────────────────────►│  HSM-II     │
-│  Node A     │    (confidence: 0.85) │  Node B     │
-│  (Toronto)  │                       │  (London)   │
-└─────────────┘                       └─────────────┘
-       │                                     │
-       │         ┌─────────────┐             │
-       └────────►│  HSM-II     │◄────────────┘
-                 │  Node C     │
-                 │  (Tokyo)    │
-                 └─────────────┘
-```
-
----
-
-## 🛠️ Built-In Tool Suite (62+ Tools)
-
-Agents come with real-world capabilities out of the box:
-
-| Category | What Agents Can Do |
-|----------|-------------------|
-| **Web & Browser** | Search, scrape, automate browsers, read PDFs |
-| **File Operations** | Read, write, search, analyze any file type |
-| **Shell & System** | Execute commands, gather system info |
-| **Git Operations** | Clone, commit, diff, blame, search repositories |
-| **APIs & Data** | HTTP requests, JSON parsing, encoding/decoding |
-| **Calculations** | Math, statistics, unit conversions |
-| **Text Processing** | Regex, parsing, formatting, diffing |
-
-Tools are **real implementations**, not mocks. Agents can actually modify files, browse websites, and run commands.
-
----
-
-## 🤖 LLM Integration & Provider Failover
-
-HSM-II works with multiple LLM providers with automatic failover:
-
-- **OpenAI** — GPT-4o, GPT-4o-mini
-- **Anthropic** — Claude 3.5 Sonnet, Claude 3 Opus
-- **Ollama** — Local models (Llama, Mistral, etc.)
-
-If one provider fails, the system automatically switches to another. No single point of failure.
-
----
-
-## 🔐 Security & Access Control
-
-- **API Key Management** — Argon2-hashed, revocable keys
-- **JWT Authentication** — 24-hour expiring tokens
-- **Rate Limiting** — Per-key quota enforcement
-- **Permission Levels** — Read, Write, Admin access control
-
----
-
-## 🏗️ System Architecture
-
-```
-╔═══════════════════════════════════════════════════════════════════════╗
-║                         HSM-II SYSTEM                                 ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
-║       │    AGENTS    │  │   COUNCIL    │  │     CASS     │            ║
-║       │              │  │              │  │   (Skills)   │            ║
-║       │ • Roles      │  │ • Debate     │  │              │            ║
-║       │ • Drives     │  │ • Vote       │  │ • Harvest    │            ║
-║       │ • Coherence  │  │ • Evidence   │  │ • Distill    │            ║
-║       │ • Beliefs    │  │ • Decide     │  │ • Promote    │            ║
-║       └──────────────┘  └──────────────┘  └──────────────┘            ║
-║              │                 │                 │                    ║
-║              └─────────────────┼─────────────────┘                    ║
-║                                ▼                                      ║
-║                   ┌──────────────────────────┐                        ║
-║                   │   HYPERGRAPH MEMORY      │                        ║
-║                   │   (Stigmergic Field)     │                        ║
-║                   │                          │                        ║
-║                   │ • Nodes (beliefs)        │                        ║
-║                   │ • Hyperedges (emergent)  │                        ║
-║                   │ • Ontological tags       │                        ║
-║                   │ • Visibility scopes      │                        ║
-║                   └──────────────────────────┘                        ║
-║                                │                                      ║
-║              ┌─────────────────┼─────────────────┐                    ║
-║              ▼                 ▼                 ▼                    ║
-║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
-║       │     DKS      │  │    SOCIAL    │  │  FEDERATION  │            ║
-║       │              │  │    MEMORY    │  │              │            ║
-║       │ • Selection  │  │              │  │ • Trust      │            ║
-║       │ • Replication│  │ • Promises   │  │ • Conflict   │            ║
-║       │ • Mutation   │  │ • Reputation │  │ • Sync       │            ║
-║       │ • Flux       │  │ • Evidence   │  │ • Consensus  │            ║
-║       └──────────────┘  └──────────────┘  └──────────────┘            ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## 📚 Documentation
-
-| Document | What You'll Learn |
-|----------|-------------------|
-| [EASY_START.md](documentation/guides/EASY_START.md) | Get running in 5 minutes |
-| [DEPLOYMENT.md](documentation/guides/DEPLOYMENT.md) | Production deployment guide |
-| [COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md) | CLI reference |
-| [ANTIFRAGILE_ARCHITECTURE.md](documentation/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
-| [PERSONAL_AGENT_README.md](documentation/guides/PERSONAL_AGENT_README.md) | Your AI companion |
-| [HERMES_INTEGRATION.md](documentation/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |
-
----
-
-## 🐳 Docker Deployment
+An AI coding agent that can read, write, edit files, execute shell commands, and use external tools:
 
 ```bash
-# Full stack with monitoring
-docker-compose up -d
-
-# Check health
-curl http://localhost:8080/health
-
-# View metrics
-curl http://localhost:9000/metrics
+cargo run --release -- coder  # Enter coder assistant mode
 ```
 
-Services:
-- **HSM-II**: Main application (port 8080)
-- **Ollama**: Local LLM inference (port 11434)
-- **Prometheus**: Metrics (port 9090)
-- **Grafana**: Dashboards (port 3000)
+- **Built-in tools**: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `find_files`, `ls`
+- **Security**: macOS `sandbox-exec` enforcement, secret boundary detection, network allowlists
+- **External tools**: MCP providers (HTTP JSON-RPC), WASM capability-isolated tools
+- **Governance**: Ouroboros 5-phase gate for dangerous operations (self-modification, network access)
 
----
+### Ouroboros Governance Gate
 
-## 📊 Observability & Metrics
-
-HSM-II exposes Prometheus metrics for monitoring:
-
-| Metric | What It Tracks |
-|--------|---------------|
-| `hsm_coherence_growth` | Agent synchronization over time |
-| `hsm_llm_requests_total` | LLM API call volume |
-| `hsm_council_decisions_total` | Council voting patterns |
-| `hsm_skills_harvested` | Skills learned from experience |
-| `hsm_promises_kept_total` / `hsm_promises_broken_total` | Social memory integrity |
-
----
-
-## 🧪 Testing
+A council of AI agents that vote on risky operations:
 
 ```bash
-# Run all tests
+cargo run --release --bin ouroboros_gate -- \
+  --action "modify core config" \
+  --confidence-threshold 0.70
+```
+
+Phases: Propose → Deliberate → Vote → Execute → Audit
+
+### Investigation Engine
+
+Multi-hop research that decomposes complex questions:
+
+```bash
+cargo run --release --bin investigate -- "How does X affect Y?"
+```
+
+### Federation
+
+Agents on different machines can form teams:
+
+```bash
+cargo run --release --bin conductord -- --port 8080  # Start conductor
+cargo run --release --bin agentd -- --conductor http://localhost:8080  # Join
+```
+
+## Building
+
+```bash
+# Debug build
+cargo build
+
+# Release build (optimized)
+cargo build --release
+
+# Without GPU support
+cargo build --release --no-default-features
+
+# Run tests
 cargo test
 
-# Run library tests only
-cargo test --lib
+# Run specific test
+cargo test test_name
 
-# Run with logging
-RUST_LOG=debug cargo test
+# Check without building
+cargo check
+
+# Lint
+cargo clippy
 ```
 
----
+## Configuration constants
 
-## 📁 Project Structure
+All magic numbers and thresholds are centralized in `src/config.rs`:
 
-```
-HSM-II/
-├── src/                    Core Rust implementation
-│   ├── agent_core/         Agent runtime & lifecycle
-│   ├── council/            Deliberation & voting
-│   ├── tools/              62+ tool implementations
-│   ├── llm/                LLM clients & failover
-│   ├── dks/                Distributed knowledge
-│   ├── cass/               Skill learning
-│   ├── federation/         Multi-node coordination
-│   └── gateways/           Discord, web, etc.
-├── documentation/          Guides, architecture, reports
-├── external_integrations/  Third-party connections (Hermes)
-├── infrastructure/         Prometheus, Grafana, CI/CD
-├── agent_tools/            Scripts & visual-explainer
-├── web_interface/          Web UI & visualization
-└── test_suite/             Integration tests
-```
+- `config::network` — URLs, ports, endpoints
+- `config::timeouts` — execution and HTTP timeouts
+- `config::limits` — file sizes, output lengths, line counts
+- `config::thresholds` — confidence, coherence, trust scores
+- `config::algorithm` — RLM parameters, agent counts, embedding dimensions
+- `config::security` — secret patterns, suspicious markers, dangerous commands
+- `config::paths` — default file paths
+- `config::models` — default LLM model names
 
----
+## License
 
-## 🤝 Hermes Agent Integration
-
-HSM-II bridges to [Hermes Agent](https://github.com/NousResearch/hermes-agent) (by [NousResearch](https://github.com/NousResearch)) for extended capabilities:
-
-```rust
-use hermes_bridge::HermesClientBuilder;
-
-let client = HermesClientBuilder::new()
-    .endpoint("http://localhost:8000")
-    .build()?;
-
-let result = client.web_search("AI agents").await?;
-```
-
----
-
-## 🛣️ Roadmap
-
-- [x] Core hypergraph memory engine
-- [x] Multi-agent council system
-- [x] 62+ real tools
-- [x] Multi-provider LLM with failover
-- [x] Docker deployment
-- [x] Hermes Agent integration
-- [x] Telegram bot
-- [x] Job queue/scheduler
-- [ ] Vector database integration
-- [ ] Advanced web dashboard
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE)
-
----
-
-## 🙏 Acknowledgments
-
-- Inspired by biological morphogenesis and stigmergic coordination in social insects
-- Built with [Rust](https://rust-lang.org) and [Tokio](https://tokio.rs)
-- Uses [Ollama](https://ollama.ai) for local inference
-
----
-
-**Built by Permutation Research** 🔄
+MIT — see [LICENSE](LICENSE) for details.

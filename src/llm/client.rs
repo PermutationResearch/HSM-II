@@ -43,7 +43,7 @@ impl LlmProvider {
             providers.push((LlmProvider::Ollama, "".to_string(), url));
         } else {
             // Default Ollama
-            providers.push((LlmProvider::Ollama, "".to_string(), "http://localhost:11434".to_string()));
+            providers.push((LlmProvider::Ollama, "".to_string(), crate::config::network::DEFAULT_OLLAMA_URL.to_string()));
         }
 
         providers

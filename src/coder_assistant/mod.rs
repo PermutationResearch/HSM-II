@@ -13,6 +13,13 @@ pub mod renderer;
 pub mod schemas;
 pub mod session;
 pub mod streaming;
+
+// Tool system — split from the original monolithic tools.rs
+pub mod builtin_tools;
+pub mod external_providers;
+pub mod sandbox;
+pub mod security_policy;
+pub mod tool_executor;
 pub mod tools;
 
 pub use agent_loop::AgentLoop;
@@ -23,10 +30,12 @@ pub use schemas::{
 };
 pub use session::{Session, SessionEvent, SessionManager};
 pub use streaming::{StreamEvent, StreamingHandler, ThinkingBlock};
-pub use tools::{
-    CoderTool, ExfiltrationPolicy, NetworkBoundary, SandboxMode, SecretBoundary, ToolContext,
-    ToolExecutionAudit, ToolExecutionPolicy, ToolExecutor, ToolResult,
+pub use tool_executor::{CoderTool, ToolContext, ToolError as CoderToolError, ToolExecutor, ToolResult};
+pub use security_policy::{
+    AuditEntry, ExfiltrationPolicy, NetworkBoundary, SandboxMode, SecretBoundary,
+    ToolExecutionAudit,
 };
+pub use tools::ToolExecutionPolicy;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,15 +56,15 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             name: "ollama".to_string(),
-            api_url: "http://localhost:11434".to_string(),
+            api_url: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
             model: crate::ollama_client::resolve_model_from_env(
-                "hf.co/DavidAU/OpenAi-GPT-oss-20b-HERETIC-uncensored-NEO-Imatrix-gguf:IQ4_NL",
+                crate::config::models::DEFAULT_SCORER_MODEL,
             ),
             api_key: None,
             supports_thinking: true,
             supports_tools: true,
-            max_tokens: 4096,
-            temperature: 0.7,
+            max_tokens: crate::config::algorithm::DEFAULT_MAX_TOKENS as u32,
+            temperature: crate::config::thresholds::DEFAULT_TEMPERATURE as f32,
         }
     }
 }

@@ -318,7 +318,7 @@ pub async fn rlm_from_world(world: HyperStigmergicMorphogenesis, model: &str) ->
     RLM {
         ollama: OllamaHandle {
             model: model.to_string(),
-            endpoint: "http://localhost:11434".to_string(),
+            endpoint: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
         },
         world,
         bid_config: BidConfig::default(),
@@ -1080,7 +1080,7 @@ mod tests {
         RLM {
             ollama: OllamaHandle {
                 model: "test".to_string(),
-                endpoint: "http://localhost:11434".to_string(),
+                endpoint: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
             },
             world,
             bid_config: BidConfig::default(),

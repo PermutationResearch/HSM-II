@@ -30,7 +30,7 @@ pub struct LlmBridgeConfig {
 impl Default for LlmBridgeConfig {
     fn default() -> Self {
         let endpoint = std::env::var("OLLAMA_HOST")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            .unwrap_or_else(|_| crate::config::network::DEFAULT_OLLAMA_URL.to_string());
         let model = match std::env::var("OLLAMA_MODEL") {
             Ok(m) if !m.is_empty() && m != "auto" => m,
             _ => "qwen2.5:14b".to_string(),

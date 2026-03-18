@@ -33,7 +33,7 @@ impl Default for AgentConfig {
             model: crate::ollama_client::resolve_model_from_env(
                 "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M",
             ),
-            api_url: "http://localhost:11434".to_string(),
+            api_url: crate::config::network::DEFAULT_OLLAMA_URL.to_string(),
             supports_thinking: true,
         }
     }
