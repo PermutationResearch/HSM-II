@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 
 pub mod classifier;
 pub mod client;
+pub mod ladybug_storage;
 pub mod memory;
 pub mod responder;
 
 pub use classifier::{Category, EmailClassifier, Priority};
+pub use ladybug_storage::{
+    EmailClassification, LadybugEmailStorage, StoredEmail, StorageStats, SuggestedAction,
+    VacuumResult,
+};
 pub use client::{EmailClient, EmailProvider, ImapConfig, SmtpConfig};
 pub use memory::{ConversationThread, EmailMemory};
 pub use responder::{ResponseGenerator, ResponseTemplate, Tone};

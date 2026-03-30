@@ -2,9 +2,15 @@
 //!
 //! Supports OpenAI, Anthropic, and Ollama with automatic failover,
 //! retry logic, and comprehensive observability.
+//!
+//! **Provider order (fallback chain):** set `HSM_LLM_PROVIDER_ORDER` to a comma-separated
+//! list: `openai`, `anthropic`, `ollama` (case-insensitive). Example:
+//! `HSM_LLM_PROVIDER_ORDER=ollama,openai` tries local Ollama first, then OpenAI. When unset,
+//! available cloud providers are tried first, then Ollama (always included by default).
 
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -21,31 +27,71 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
+    fn try_openai() -> Option<(Self, String, String)> {
+        let api_key = std::env::var("OPENAI_API_KEY").ok()?;
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        Some((LlmProvider::OpenAi, api_key, base_url))
+    }
+
+    fn try_anthropic() -> Option<(Self, String, String)> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
+        let base_url = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
+        Some((LlmProvider::Anthropic, api_key, base_url))
+    }
+
+    fn ollama_endpoint() -> (Self, String, String) {
+        let url =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        (LlmProvider::Ollama, String::new(), url)
+    }
+
     fn from_env() -> Vec<(Self, String, String)> {
+        if let Ok(order_str) = std::env::var("HSM_LLM_PROVIDER_ORDER") {
+            let tokens: Vec<String> = order_str
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !tokens.is_empty() {
+                let mut providers = Vec::new();
+                for t in tokens {
+                    match t.as_str() {
+                        "openai" => {
+                            if let Some(p) = Self::try_openai() {
+                                providers.push(p);
+                            } else {
+                                warn!("HSM_LLM_PROVIDER_ORDER lists openai but OPENAI_API_KEY is unset");
+                            }
+                        }
+                        "anthropic" => {
+                            if let Some(p) = Self::try_anthropic() {
+                                providers.push(p);
+                            } else {
+                                warn!("HSM_LLM_PROVIDER_ORDER lists anthropic but ANTHROPIC_API_KEY is unset");
+                            }
+                        }
+                        "ollama" => providers.push(Self::ollama_endpoint()),
+                        _ => warn!("HSM_LLM_PROVIDER_ORDER: unknown provider {:?}, expected openai|anthropic|ollama", t),
+                    }
+                }
+                if !providers.is_empty() {
+                    return providers;
+                }
+                warn!("HSM_LLM_PROVIDER_ORDER produced no usable providers; using default order");
+            }
+        }
+
         let mut providers = Vec::new();
-
-        // Check OpenAI
-        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-            let base_url = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-            providers.push((LlmProvider::OpenAi, api_key, base_url));
+        if let Some(p) = Self::try_openai() {
+            providers.push(p);
         }
-
-        // Check Anthropic
-        if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-            let base_url = std::env::var("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
-            providers.push((LlmProvider::Anthropic, api_key, base_url));
+        if let Some(p) = Self::try_anthropic() {
+            providers.push(p);
         }
-
-        // Check Ollama (no API key needed)
-        if let Ok(url) = std::env::var("OLLAMA_URL") {
-            providers.push((LlmProvider::Ollama, "".to_string(), url));
-        } else {
-            // Default Ollama
-            providers.push((LlmProvider::Ollama, "".to_string(), "http://localhost:11434".to_string()));
-        }
-
+        providers.push(Self::ollama_endpoint());
         providers
     }
 }
@@ -149,6 +195,10 @@ pub struct LlmClient {
     retry_config: RetryConfig,
     default_model: String,
     metrics: Arc<LlmMetrics>,
+    /// Consecutive full-chain failures; opens breaker when ≥ threshold.
+    breaker_failures: AtomicU32,
+    /// Unix millis until which `chat` returns early (bounded degradation).
+    breaker_open_until_ms: AtomicU64,
 }
 
 /// Metrics for observability
@@ -217,6 +267,8 @@ impl LlmClient {
             default_model: std::env::var("DEFAULT_LLM_MODEL")
                 .unwrap_or_else(|_| crate::ollama_client::resolve_model_from_env("gpt-4o-mini")),
             metrics: Arc::new(LlmMetrics::default()),
+            breaker_failures: AtomicU32::new(0),
+            breaker_open_until_ms: AtomicU64::new(0),
         })
     }
 
@@ -228,7 +280,25 @@ impl LlmClient {
 
     /// Send chat completion request with automatic failover
     #[instrument(skip(self, request))]
-    pub async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    pub async fn chat(&self, mut request: LlmRequest) -> Result<LlmResponse> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms < self.breaker_open_until_ms.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "LLM circuit breaker cooling down (set HSM_LLM_BREAKER_* or wait)"
+            ));
+        }
+
+        if let Ok(cap) = std::env::var("HSM_LLM_MAX_OUTPUT_TOKENS") {
+            if let Ok(cap_n) = cap.parse::<usize>() {
+                if let Some(ref mut mt) = request.max_tokens {
+                    *mt = (*mt).min(cap_n);
+                }
+            }
+        }
+
         let start = std::time::Instant::now();
         let mut last_error = None;
 
@@ -236,6 +306,7 @@ impl LlmClient {
         for (provider, api_key, base_url) in &self.providers {
             match self.try_provider(request.clone(), provider, api_key, base_url).await {
                 Ok(response) => {
+                    self.breaker_failures.store(0, Ordering::SeqCst);
                     let latency_ms = start.elapsed().as_millis() as u64;
                     let tokens = response.usage.total_tokens;
                     self.metrics.record_request(true, tokens, latency_ms);
@@ -263,7 +334,26 @@ impl LlmClient {
         // All providers failed
         let latency_ms = start.elapsed().as_millis() as u64;
         self.metrics.record_request(false, 0, latency_ms);
-        
+
+        let fails = self.breaker_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        let thresh: u32 = std::env::var("HSM_LLM_BREAKER_FAILURES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        if fails >= thresh {
+            let cool_ms: u64 = std::env::var("HSM_LLM_BREAKER_COOL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000);
+            let now2 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.breaker_open_until_ms
+                .store(now2.saturating_add(cool_ms), Ordering::SeqCst);
+            warn!(cool_ms, "LLM circuit breaker opened after repeated failures");
+        }
+
         error!("All LLM providers failed");
         Err(anyhow!(
             "All providers failed. Last error: {}",
@@ -391,12 +481,13 @@ impl LlmClient {
             }))
             .collect();
 
+        // Anthropic does not allow both temperature and top_p simultaneously.
+        // Send only temperature (the more commonly used parameter).
         let mut body = json!({
             "model": request.model,
             "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens.unwrap_or(4096),
-            "top_p": request.top_p,
             "stream": request.stream,
         });
 
@@ -555,6 +646,23 @@ impl LlmClient {
         self.metrics.get_stats()
     }
 
+    /// Current breaker state for observability.
+    pub fn breaker_state(&self) -> (u32, u64) {
+        (
+            self.breaker_failures.load(Ordering::SeqCst),
+            self.breaker_open_until_ms.load(Ordering::SeqCst),
+        )
+    }
+
+    /// True when breaker is in cooldown window.
+    pub fn breaker_is_open_now(&self) -> bool {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now_ms < self.breaker_open_until_ms.load(Ordering::SeqCst)
+    }
+
     /// Health check all providers
     pub async fn health_check(&self) -> Vec<(LlmProvider, bool, String)> {
         let mut results = Vec::new();
@@ -621,6 +729,18 @@ impl LlmClient {
 mod tests {
     use super::*;
 
+    fn test_client() -> LlmClient {
+        LlmClient {
+            http: Client::new(),
+            providers: Vec::new(),
+            retry_config: RetryConfig::default(),
+            default_model: "test".to_string(),
+            metrics: Arc::new(LlmMetrics::default()),
+            breaker_failures: AtomicU32::new(0),
+            breaker_open_until_ms: AtomicU64::new(0),
+        }
+    }
+
     #[test]
     fn test_message_creation() {
         let user_msg = Message::user("Hello");
@@ -633,17 +753,23 @@ mod tests {
 
     #[test]
     fn test_retry_backoff() {
-        let client = LlmClient {
-            http: Client::new(),
-            providers: Vec::new(),
-            retry_config: RetryConfig::default(),
-            default_model: "test".to_string(),
-            metrics: Arc::new(LlmMetrics::default()),
-        };
+        let client = test_client();
 
         assert_eq!(client.calculate_backoff(1), 1000);
         assert_eq!(client.calculate_backoff(2), 2000);
         assert_eq!(client.calculate_backoff(3), 4000);
         assert_eq!(client.calculate_backoff(10), 30000); // capped at max
+    }
+
+    #[test]
+    fn test_breaker_state_accessor() {
+        let client = test_client();
+        client.breaker_failures.store(3, Ordering::SeqCst);
+        client
+            .breaker_open_until_ms
+            .store(12345, Ordering::SeqCst);
+        let (fails, open_until) = client.breaker_state();
+        assert_eq!(fails, 3);
+        assert_eq!(open_until, 12345);
     }
 }

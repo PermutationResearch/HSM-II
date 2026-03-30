@@ -135,6 +135,7 @@ Open Telegram, find your bot, and send it a message. That's it.
 | `OLLAMA_HOST` | `http://localhost` | Ollama server address |
 | `OLLAMA_PORT` | `11434` | Ollama server port |
 | `OLLAMA_MODEL` | `auto` (detects installed) | Force a specific Ollama model |
+| `OPENROUTER_API_KEY` | *(optional)* | For `qwencoder:480b-cloud` – routes to OpenRouter (Qwen3 Coder free tier) |
 | `ANTHROPIC_API_KEY` | *(optional)* | Anthropic API key for Claude |
 | `OPENAI_API_KEY` | *(optional)* | OpenAI API key for GPT-4 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom OpenAI-compatible endpoint |

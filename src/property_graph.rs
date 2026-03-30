@@ -174,6 +174,32 @@ impl HyperStigmergicMorphogenesis {
                 PropertyValue::String(belief.content.clone()),
             );
             properties.insert("confidence".into(), PropertyValue::Float(belief.confidence));
+            if let Some(ref o) = belief.owner_namespace {
+                properties.insert("owner_namespace".into(), PropertyValue::String(o.clone()));
+            }
+            if let Some(sid) = belief.supersedes_belief_id {
+                properties.insert(
+                    "supersedes_belief_id".into(),
+                    PropertyValue::Integer(sid as i64),
+                );
+            }
+            if !belief.evidence_belief_ids.is_empty() {
+                properties.insert(
+                    "evidence_belief_ids".into(),
+                    PropertyValue::String(
+                        belief
+                            .evidence_belief_ids
+                            .iter()
+                            .map(|i| i.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                );
+            }
+            properties.insert(
+                "human_committed".into(),
+                PropertyValue::Boolean(belief.human_committed),
+            );
             nodes.push(GraphNodeRecord {
                 id: format!("belief:{idx}"),
                 labels: vec!["Belief".into()],

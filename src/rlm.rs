@@ -245,6 +245,7 @@ pub enum RlmAction {
     QueryEnvironment(String),
     PredictCoherence { context: String },
     ComputeNovelty { proposal: String },
+    /// Trigger one world `execute_self_improvement_cycle` (supervision loop: propose → review → record).
     SelfImprove { intent: String },
     SpawnSubAgent { role: Role, specialty: String },
 }
@@ -276,7 +277,7 @@ pub enum Context {
     },
 }
 
-/// Self-improvement cycle controller
+/// Runs multiple bounded supervision iterations against the same intent (recursive conditioning via `history`).
 pub struct SelfImprovementCycle {
     pub intent: String,
     pub iterations: usize,

@@ -17,6 +17,7 @@ futures-util = "0.3"
 
 # Database & Persistence
 mysql_async = "0.34"
+rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
@@ -90,10 +91,14 @@ reedline = "0.10"
 
 # Directories
 dirs = "5"
+lbug = { version = "0.15.2", optional = true }
 
 [features]
 default = ["gpu"]
 gpu = ["wgpu", "bytemuck", "pollster"]
+# Native Ladybug graph (`lbug` crate): bundled build needs several GB free disk and CMake.
+# Alternatively set LBUG_LIBRARY_DIR + LBUG_INCLUDE_DIR (and LBUG_SHARED=1 for dynamic link); see docs on docs.rs/crate/lbug.
+lbug = ["dep:lbug"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -119,3 +124,32 @@ path = "src/bin/tui_codex_demo.rs"
 [[bin]]
 name = "teamd"
 path = "src/bin/teamd.rs"
+
+[[bin]]
+name = "integrated_agent"
+path = "src/bin/integrated_agent.rs"
+
+[[bin]]
+name = "integration_test"
+path = "src/bin/integration_test.rs"
+
+[[bin]]
+name = "deep_test"
+path = "src/bin/deep_test.rs"
+
+[[bin]]
+name = "hsm-api"
+path = "src/bin/hsm_api.rs"
+
+[[bin]]
+name = "hsm-bench"
+path = "src/bin/hsm_bench.rs"
+
+[[bin]]
+name = "hsm-eval"
+path = "src/bin/hsm_eval.rs"
+
+[[bin]]
+name = "hsm_golden"
+path = "src/bin/hsm_golden.rs"
+required-features = ["lbug"]

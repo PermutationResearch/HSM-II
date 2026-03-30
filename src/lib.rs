@@ -33,6 +33,7 @@ pub mod skill;
 pub mod transaction_layer;
 pub mod workflow;
 pub mod world_controller;
+pub mod world_guardrails;
 
 // New modules
 pub mod agent_core;
@@ -42,6 +43,7 @@ pub mod communication;
 pub mod council;
 pub mod dks;
 pub mod email;
+pub mod governance;
 pub mod gpu;
 pub mod graph_runtime;
 pub mod hnsw_index;
@@ -64,6 +66,9 @@ pub mod personal;
 // Feature flags for anti-fragile agent deployment
 pub mod flags;
 
+/// Atomic filesystem writes for config and other small persisted state
+pub mod fs_atomic;
+
 // Tool system (Rust-native, async)
 pub mod tools;
 
@@ -84,6 +89,18 @@ pub mod scenario_simulator;
 
 // Codex-style TUI - Dark minimalist terminal aesthetic
 pub mod tui_codex_style;
+
+// SQLite-backed subsystem store (HsmSqliteStore — not LadybugDB / lbug)
+pub mod persistence;
+
+// Benchmark suite for HSM-II subsystems
+pub mod bench;
+
+// REST API (axum-based)
+pub mod api;
+
+// Comparative evaluation harness (HSM-II vs baseline)
+pub mod eval;
 
 // Demo tests (only in test mode)
 #[cfg(test)]
@@ -112,8 +129,14 @@ pub use federation::{
     InjectedEdge, KnowledgeLayer, MetaHyperedge, PromotedEdge, Provenance, SharedEdge,
     SharedVertexMeta, Subscription, SubscriptionFilter, SystemId, SystemInfo, TrustEdge,
     TrustGraph, TrustPolicy,
+    // Federation distribution (propagation, state sync, partition tolerance)
+    PropagationEngine, PropagationEnvelope, PropagationPayload, PropagationStrategy,
+    StateSyncEngine, StateDigest, SyncMessage, VectorClock,
+    PartitionDetector, PartitionMerger, PartitionState, MergeStrategy, PeerState,
 };
-pub use hyper_stigmergy::HyperStigmergicMorphogenesis;
+pub use hyper_stigmergy::{
+    AddBeliefExtras, DecisionRecord, HyperStigmergicMorphogenesis,
+};
 pub use hypergraph::{Hypergraph, HypergraphConv};
 pub use kuramoto::{
     build_adjacency as kuramoto_build_adjacency, confidence_to_phase, KuramotoConfig,
@@ -165,6 +188,7 @@ pub use flags::{
     EvaluationContext, FeatureFlag, FlagMetadata, FlagStats, FlagStore, FlagsAware, Operator,
     TargetingRule,
 };
+pub use fs_atomic::write_atomic;
 pub use stigmergic_policy::{
     PolicyShift, RoutingDirective, StigmergicMemory as RuntimeStigmergicMemory, StigmergicTrace,
     TraceKind,
@@ -266,6 +290,10 @@ pub use database::{
     OuroborosMemoryEventRow, RewardLogRow, RooDb, RooDbConfig, SkillEvidenceRow, SkillRow,
     VaultEmbeddingRow,
 };
+
+pub use persistence::{CouncilDecisionRow, ContextSnapshotRow, HsmSqliteStore, TrustEdgeRow};
+#[allow(deprecated)]
+pub use persistence::LadybugDb;
 
 pub use disk_backed_vector_index::DiskBackedVectorIndex;
 pub use dspy::{

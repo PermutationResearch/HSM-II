@@ -8,9 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{error, info};
 
-use hyper_stigmergy::personal::{
-    gateway, hsmii_home, EnhancedPersonalAgent,
-};
+use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent};
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -31,9 +29,13 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Custom config directory
+    /// Custom config directory (overrides profile / HSMII_HOME)
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+
+    /// Profile name: data under ~/.hsmii/profiles/<name>/ (Hermes-style isolation)
+    #[arg(short = 'p', long = "profile", global = true)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -159,8 +161,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Determine config path
-    let home = cli.config.unwrap_or_else(hsmii_home);
+    let home = resolve_hsmii_home(cli.config, cli.profile.as_deref());
 
     match cli.command {
         Commands::Start {
@@ -530,6 +531,10 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
                 created_at: now,
                 updated_at: now,
                 update_count: 0,
+                owner_namespace: None,
+                supersedes_belief_id: None,
+                evidence_belief_ids: Vec::new(),
+                human_committed: true,
             });
             agent.save().await?;
             println!("✓ Added to LadybugDB beliefs");
@@ -1238,6 +1243,24 @@ struct ModelInfo {
 
 const AVAILABLE_MODELS: &[ModelInfo] = &[
     ModelInfo {
+        name: "qwen3-coder:480b-cloud",
+        provider: "ollama",
+        description: "QwEncoder 480B Cloud - default model",
+        context_window: "128k tokens",
+        cost_in: "Cloud",
+        cost_out: "Cloud",
+        reasoning: false,
+    },
+    ModelInfo {
+        name: "qwen3.5-35b-a3b",
+        provider: "ollama",
+        description: "Qwen 3.5 35B A3B - local model",
+        context_window: "128k tokens",
+        cost_in: "Free",
+        cost_out: "Free",
+        reasoning: false,
+    },
+    ModelInfo {
         name: "llama3.2",
         provider: "ollama",
         description: "Local model - your data stays on your machine",
@@ -1403,6 +1426,20 @@ async fn handle_slash_command(cmd: &str, state: &mut CodexState) {
                 "llama" | "llama3.2" | "local" => {
                     state.model = "llama3.2".to_string();
                     state.push_message("system", "✓ Switched to **Llama 3.2**\n\nLocal model - your data stays on your machine. Fully private!");
+                }
+                "qwencoder" | "qwen3-coder" | "qwen3-coder:480b-cloud" | "480b-cloud" => {
+                    state.model = "qwen3-coder:480b-cloud".to_string();
+                    state.push_message(
+                        "system",
+                        "✓ Switched to **QwEncoder 480B Cloud**\n\nLarge cloud model.",
+                    );
+                }
+                "qwen3.5" | "qwen3.5-35b" | "qwen3.5-35b-a3b" => {
+                    state.model = "qwen3.5-9b-q4km".to_string();
+                    state.push_message(
+                        "system",
+                        "✓ Switched to **Qwen 3.5 35B A3B**\n\nDefault local model - efficient, capable.",
+                    );
                 }
                 "qwen" | "qwen3-8b" => {
                     state.model = "qwen3-8b".to_string();

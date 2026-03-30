@@ -1022,15 +1022,15 @@ impl App {
             chat_input: String::new(),
             chat_models: vec![
                 (
-                    "qwen3-8b-heretic-q6_k",
-                    "hf.co/mradermacher/Qwen3-8B-heretic-GGUF:Q6_K",
+                    "QwenEncoder 480B Cloud",
+                    "qwen3-coder:480b-cloud",
                 ),
                 (
-                    "llama-3.3-8b-heretic",
-                    "hf.co/mradermacher/Llama-3.3-8B-Instruct-heretic-i1-GGUF:Q5_K_M",
+                    "llama3.2",
+                    "llama3.2",
                 ),
             ],
-            selected_model: 0, // Default to qwen3-8b-heretic-q6_k
+            selected_model: 0, // Default to qwen3-coder:480b-cloud
             chat_tx,
             chat_rx,
             chat_streaming: false,

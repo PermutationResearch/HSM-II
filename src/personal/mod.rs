@@ -14,6 +14,7 @@ use crate::tools::ToolRegistry;
 use tokio::sync::{mpsc, oneshot};
 
 pub mod enhanced_agent;
+pub mod integrated_agent;
 pub mod gateway;
 pub mod heartbeat;
 pub mod hypergraph_client;
@@ -24,6 +25,12 @@ pub use enhanced_agent::{
     EnhancedPersonalAgent, EnhancedAgentConfig, AgentResponse, WorldStats,
     JouleWorkRecord, ContributionType, AgentMetrics, MessageContext,
 };
+pub use integrated_agent::{
+    integrated_home, AgentComponents, ComponentStatus, IntegratedAgentConfig, IntegratedPersonalAgent,
+};
+
+/// Full-stack agent: same as [`IntegratedPersonalAgent`] (shared `EnhancedPersonalAgent` core + integration layer).
+pub type UnifiedPersonalAgent = IntegratedPersonalAgent;
 pub use heartbeat::{CronJob, Heartbeat, Routine, RoutineAction, RoutineTrigger};
 pub use hypergraph_client::HypergraphClient;
 pub use memory::{MemoryFact, MemoryMd, PersonalMemory, Project, UserMd};
@@ -407,9 +414,59 @@ impl gateway::MessageHandler for ChannelMessageHandler {
     }
 }
 
-/// Get default HSM-II home directory
-pub fn hsmii_home() -> PathBuf {
-    dirs::home_dir()
+/// Resolve HSM-II home directory (Hermes-style multi-instance / profiles).
+///
+/// Precedence: explicit `cli_config` if set, else environment `HSMII_HOME`, else
+/// `~/.hsmii`, optionally scoped to `~/.hsmii/profiles/<profile>/` when `profile` or
+/// `HSMII_PROFILE` is set.
+pub fn resolve_hsmii_home(cli_config: Option<PathBuf>, profile: Option<&str>) -> PathBuf {
+    if let Some(p) = cli_config {
+        return p;
+    }
+    if let Ok(h) = std::env::var("HSMII_HOME") {
+        if !h.is_empty() {
+            return PathBuf::from(h);
+        }
+    }
+    let base = dirs::home_dir()
         .expect("Could not find home directory")
-        .join(".hsmii")
+        .join(".hsmii");
+    let profile_name = profile
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("HSMII_PROFILE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
+    if let Some(name) = profile_name {
+        return base.join("profiles").join(sanitize_profile_dir_name(&name));
+    }
+    base
+}
+
+fn sanitize_profile_dir_name(name: &str) -> String {
+    let t = name.trim();
+    if t.is_empty() || t == "." || t == ".." {
+        return "default".to_string();
+    }
+    let out: String = t
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' => '_',
+            c if c.is_alphanumeric() || c == '-' || c == '_' => c,
+            ' ' => '_',
+            _ => '_',
+        })
+        .collect();
+    if out.is_empty() {
+        "default".into()
+    } else {
+        out
+    }
+}
+
+/// Default HSM-II home (`resolve_hsmii_home` with no CLI override; respects `HSMII_HOME` / `HSMII_PROFILE`).
+pub fn hsmii_home() -> PathBuf {
+    resolve_hsmii_home(None, None)
 }

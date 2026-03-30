@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+pub mod gardening;
 pub mod worker;
 
 pub use worker::JobWorker;

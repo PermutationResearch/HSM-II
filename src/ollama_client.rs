@@ -2,6 +2,7 @@
 //!
 //! This module provides:
 //! - Actual Ollama API calls with configurable timeout
+//! - Cloud model routing (qwencoder:480b-cloud -> OpenRouter/Qwen API)
 //! - Request batching for efficiency
 //! - Latency budget enforcement with fallback
 
@@ -9,6 +10,7 @@ use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::chat::request::ChatMessageRequest;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use ollama_rs::Ollama;
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration, Instant};
@@ -51,7 +53,9 @@ impl Default for OllamaConfig {
         Self {
             host,
             port,
-            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "auto".to_string()),
+            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| {
+                "qwen3-coder:480b-cloud".to_string()
+            }),
             latency_budget_ms: 60000,
             enable_batching: false,
             batch_size: 4,
@@ -300,15 +304,116 @@ impl OllamaConfig {
                         }
                     }
                 }
-                eprintln!("[HSM-II] No suitable chat models found in Ollama. Run: ollama pull llama3.2");
-                "llama3.2".to_string()
+                eprintln!("[HSM-II] No suitable chat models found in Ollama. Run: ollama pull qwen3.5:9b");
+                eprintln!("[HSM-II] Or import: ./scripts/import_qwen9b.sh");
+                "qwen3.5:9b".to_string()
             }
             Err(_) => {
                 eprintln!("[HSM-II] Cannot reach Ollama at {}:{}. Is it running?", host, port);
-                "llama3.2".to_string()
+                "qwen3.5:9b".to_string()
             }
         }
     }
+}
+
+/// Cloud API config for models like qwencoder:480b-cloud (OpenRouter/Qwen)
+struct CloudConfig {
+    base_url: String,
+    api_key: String,
+    model_id: String,
+}
+
+fn is_cloud_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains(":cloud") || m.contains("-cloud") || m == "qwencoder:480b-cloud" || m == "qwen3-coder:480b-cloud"
+}
+
+fn get_cloud_config(model: &str) -> Option<CloudConfig> {
+    if !is_cloud_model(model) {
+        return None;
+    }
+    // OpenRouter: free tier qwen3-coder
+    if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+        if !api_key.is_empty() {
+            let base_url = std::env::var("OPENROUTER_API_BASE")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+            let model_id = std::env::var("CLOUD_MODEL_ID")
+                .unwrap_or_else(|_| "qwen/qwen3-coder:free".to_string());
+            return Some(CloudConfig {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key,
+                model_id,
+            });
+        }
+    }
+    // Fallback: OpenAI-compat endpoint (user can point to OpenRouter/Groq/etc)
+    if let (Ok(api_key), Ok(base_url)) = (
+        std::env::var("OPENAI_API_KEY"),
+        std::env::var("OPENAI_BASE_URL"),
+    ) {
+        if !api_key.is_empty() && !base_url.is_empty() {
+            let model_id = std::env::var("CLOUD_MODEL_ID")
+                .unwrap_or_else(|_| "qwen/qwen3-coder:free".to_string());
+            return Some(CloudConfig {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key,
+                model_id,
+            });
+        }
+    }
+    None
+}
+
+async fn call_cloud_chat(
+    config: &CloudConfig,
+    messages: Vec<serde_json::Value>,
+    temperature: f64,
+    max_tokens: u32,
+) -> Result<LlmResult, String> {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    let url = format!("{}/chat/completions", config.base_url);
+    let body = json!({
+        "model": config.model_id,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, text));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let eval_count = json["usage"]["completion_tokens"]
+        .as_u64()
+        .unwrap_or(0) as usize;
+    let latency = start.elapsed().as_millis() as u64;
+
+    Ok(LlmResult {
+        text: content,
+        latency_ms: latency,
+        tokens_generated: eval_count,
+        cached: false,
+        timed_out: false,
+    })
 }
 
 /// Result of an LLM call with metadata
@@ -362,10 +467,11 @@ impl OllamaClient {
     }
 
     /// Generate text with latency budget enforcement
+    /// Tries local Ollama first (model may be installed locally). Falls back to cloud API only if Ollama fails.
     pub async fn generate(&self, prompt: &str) -> LlmResult {
         let start = Instant::now();
 
-        // Create generation request
+        // Local Ollama first (model may be installed, e.g. qwen3-coder:480b-cloud)
         let request = GenerationRequest::new(self.config.model.clone(), prompt.to_string())
             .options(
                 ollama_rs::generation::options::GenerationOptions::default()
@@ -373,10 +479,9 @@ impl OllamaClient {
                     .num_predict(self.config.max_tokens as i32),
             );
 
-        // No timeout - let LLM take as long as it needs
         let ollama = self.ollama.clone();
 
-        let result = match async move {
+        match async move {
             let ollama = ollama.lock().await;
             ollama.generate(request).await
         }
@@ -384,48 +489,50 @@ impl OllamaClient {
         {
             Ok(response) => {
                 let latency = start.elapsed().as_millis() as u64;
-
-                // Record latency for adaptive budgeting
                 self.record_latency(latency).await;
-
-                LlmResult {
+                return LlmResult {
                     text: response.response,
                     latency_ms: latency,
                     tokens_generated: response.eval_count.unwrap_or(0) as usize,
                     cached: false,
                     timed_out: false,
-                }
+                };
             }
             Err(e) => {
-                eprintln!("Ollama error: {}", e);
-                self.fallback_result("Error calling LLM")
+                let err_msg = e.to_string();
+                eprintln!("Ollama error: {}", err_msg);
+                // Fall back to cloud API if model is cloud-named and configured
+                if let Some(cloud) = get_cloud_config(&self.config.model) {
+                    let messages = vec![json!({"role": "user", "content": prompt})];
+                    if let Ok(r) = call_cloud_chat(&cloud, messages, self.config.temperature, self.config.max_tokens).await {
+                        self.record_latency(r.latency_ms).await;
+                        return r;
+                    }
+                }
+                return self.fallback_result(&err_msg);
             }
-        };
-
-        result
+        }
     }
 
     /// Chat with proper system/user message roles (uses /api/chat endpoint)
-    /// `history` contains prior (user, assistant) message pairs for conversation continuity.
+    /// Tries local Ollama first (model may be installed). Falls back to cloud API only if Ollama fails.
     pub async fn chat(&self, system_prompt: &str, user_message: &str, history: &[(String, String)]) -> LlmResult {
         let start = Instant::now();
 
+        // Local Ollama first (model may be installed, e.g. qwen3-coder:480b-cloud)
         let mut messages = vec![
             ChatMessage::new(MessageRole::System, system_prompt.to_string()),
         ];
 
-        // Add conversation history
         for (user_msg, assistant_msg) in history {
             messages.push(ChatMessage::new(MessageRole::User, user_msg.clone()));
             messages.push(ChatMessage::new(MessageRole::Assistant, assistant_msg.clone()));
         }
 
-        // Add current user message
         messages.push(ChatMessage::new(MessageRole::User, user_message.to_string()));
 
         let request = ChatMessageRequest::new(self.config.model.clone(), messages);
 
-        // No timeout - let LLM take as long as it needs
         let ollama = self.ollama.clone();
 
         let result = match async move {
@@ -447,8 +554,9 @@ impl OllamaClient {
                 }
             }
             Err(e) => {
-                eprintln!("Ollama chat error: {}", e);
-                self.fallback_result("Error calling LLM")
+                let err_msg = e.to_string();
+                eprintln!("Ollama chat error: {}", err_msg);
+                self.fallback_result(&err_msg)
             }
         };
 
@@ -481,8 +589,12 @@ impl OllamaClient {
         self.is_available().await
     }
 
-    /// Check if Ollama server is available
+    /// Check if Ollama server or cloud API is available
     pub async fn is_available(&self) -> bool {
+        // Cloud model with config: assume available (no local Ollama needed)
+        if is_cloud_model(&self.config.model) && get_cloud_config(&self.config.model).is_some() {
+            return true;
+        }
         let ollama = self.ollama.clone();
         match timeout(Duration::from_secs(2), async move {
             let ollama = ollama.lock().await;

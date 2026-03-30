@@ -122,6 +122,33 @@ pub struct Belief {
     pub created_at: u64,
     pub updated_at: u64,
     pub update_count: u32,
+    /// Owning namespace / org slice for write-policy (`None` = global default).
+    #[serde(default)]
+    pub owner_namespace: Option<String>,
+    /// Prior belief this one replaces (no silent merge).
+    #[serde(default)]
+    pub supersedes_belief_id: Option<usize>,
+    /// Linked belief IDs cited as evidence (provenance).
+    #[serde(default)]
+    pub evidence_belief_ids: Vec<usize>,
+    /// Human attestation bypasses automated explainability cap for high confidence.
+    #[serde(default)]
+    pub human_committed: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AddBeliefExtras {
+    #[serde(default)]
+    pub owner_namespace: Option<String>,
+    #[serde(default)]
+    pub supersedes_belief_id: Option<usize>,
+    #[serde(default)]
+    pub evidence_belief_ids: Vec<usize>,
+    #[serde(default)]
+    pub human_committed: bool,
+    /// Seed supporting strings (provenance / held-out evaluation hooks).
+    #[serde(default)]
+    pub supporting_evidence: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -396,7 +423,8 @@ pub struct HyperStigmergicMorphogenesis {
     #[serde(skip)]
     pub embedding_index: InMemoryEmbeddingIndex,
 
-    // Self-improvement tracking
+    /// Supervision-loop ledger: each entry is one bounded propose → review → record pass
+    /// (`execute_self_improvement_cycle`); later steps are conditioned on this history.
     pub improvement_history: Vec<ImprovementEvent>,
     pub current_intent: Option<String>,
     /// Avoid-hints from the last reflection cycle; used to penalize matching mutation types
@@ -439,6 +467,13 @@ pub struct HyperStigmergicMorphogenesis {
     /// Federation: configuration for distributed hypergraph federation.
     #[serde(default)]
     pub federation_config: Option<FederationConfig>,
+
+    /// Append-only decision audit (cap applied on push). Skipped in bincode world snapshots for backward compatibility; export via JSON/`SystemState` when needed.
+    #[serde(skip)]
+    pub decision_log: Vec<DecisionRecord>,
+    /// Lamport-style generation for contested writes (beliefs / merges). In-memory until a versioned migration exists for raw bincode worlds.
+    #[serde(skip)]
+    pub world_state_generation: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -450,6 +485,33 @@ pub struct ImprovementEvent {
     pub coherence_after: f64,
     pub novelty_score: f32,
     pub applied: bool,
+    /// Simulated coherence term for picked candidate (explicit, not folded into novelty_score only).
+    #[serde(default)]
+    pub score_coherence_term: f32,
+    #[serde(default)]
+    pub score_novelty_term: f32,
+    /// Cross-candidate disagreement signal used in ranking.
+    #[serde(default)]
+    pub score_dissent_term: f32,
+    #[serde(default)]
+    pub composite_objective: f32,
+    #[serde(default)]
+    pub exploration_pick: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    pub timestamp: u64,
+    pub kind: String,
+    pub tick_count: u64,
+    pub coherence_snapshot: f64,
+    pub alternatives: usize,
+    pub picked_exploration: bool,
+    pub score_coherence_term: f32,
+    pub score_novelty_term: f32,
+    pub score_dissent_term: f32,
+    pub composite_objective: f32,
+    pub intent_summary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -720,6 +782,8 @@ impl HyperStigmergicMorphogenesis {
             last_belief_reeval_tick: 0,
             skill_bank: crate::skill::SkillBank::new_with_seeds(),
             federation_config: None,
+            decision_log: Vec::new(),
+            world_state_generation: 0,
         }
     }
 
@@ -814,6 +878,22 @@ impl HyperStigmergicMorphogenesis {
             } else if node.labels.iter().any(|l| l == "Belief") {
                 let content = get_string(&node.properties, "content").unwrap_or_default();
                 let (l0, l1) = crate::memory::derive_hierarchy(&content);
+                let owner_namespace = get_string(&node.properties, "owner_namespace");
+                let supersedes_belief_id = get_int(&node.properties, "supersedes_belief_id")
+                    .map(|i| i as usize);
+                let evidence_belief_ids: Vec<usize> = get_string(
+                    &node.properties,
+                    "evidence_belief_ids",
+                )
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|t| t.trim().parse().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+                let human_committed = get_int(&node.properties, "human_committed")
+                    .map(|i| i != 0)
+                    .unwrap_or(false);
                 world.beliefs.push(Belief {
                     id: world.beliefs.len(),
                     content,
@@ -826,6 +906,10 @@ impl HyperStigmergicMorphogenesis {
                     created_at: 0,
                     updated_at: 0,
                     update_count: 0,
+                    owner_namespace,
+                    supersedes_belief_id,
+                    evidence_belief_ids,
+                    human_committed,
                 });
             } else if node.labels.iter().any(|l| l == "Experience") {
                 let desc = get_string(&node.properties, "description").unwrap_or_default();
@@ -2588,21 +2672,60 @@ impl HyperStigmergicMorphogenesis {
     }
 }
 
-// === FEATURE D: SELF-IMPROVEMENT CYCLE ===
+// === FEATURE D: RECURSIVE SUPERVISION LOOP (API: self-improvement cycle) ===
 impl HyperStigmergicMorphogenesis {
-    /// D. Prototype one full self-improvement cycle
+    fn push_decision_record(&mut self, rec: DecisionRecord) {
+        const MAX: usize = 10_000;
+        self.decision_log.push(rec);
+        if self.decision_log.len() > MAX {
+            let drop_n = self.decision_log.len() - MAX;
+            self.decision_log.drain(..drop_n);
+        }
+    }
+
+    /// One bounded supervision iteration: **propose** candidate mutations, **review** them with
+    /// simulation (and intent scoring), **record** the outcome in `improvement_history` and the
+    /// embedding index so the next step is **conditioned** on prior passes — not open-ended
+    /// self-modification.
     ///
     /// Integration 3: Mutation intent is scored before generating mutations.
     /// Vague intents are rewritten using keyword heuristics.
+    ///
+    /// Guardrails: multi-objective ranking (`GuardrailWeights`), ε exploration, optional freeze
+    /// (`HSM_FREEZE_MUTATIONS`), and `decision_log` audit rows.
     pub fn execute_self_improvement_cycle(&mut self, intent: &str) -> ImprovementResult {
         let coherence_before = self.global_coherence();
         let timestamp = Self::current_timestamp();
 
-        // Integration 3: Evaluate and potentially rewrite mutation intent
+        let freeze = matches!(
+            std::env::var("HSM_FREEZE_MUTATIONS").as_deref(),
+            Ok("1" | "true" | "yes")
+        );
+        if freeze {
+            return ImprovementResult {
+                success: false,
+                coherence_delta: 0.0,
+                mutation_applied: None,
+                event: ImprovementEvent {
+                    timestamp,
+                    intent: intent.to_string(),
+                    mutation_type: MutationType::ParameterTuning,
+                    coherence_before,
+                    coherence_after: coherence_before,
+                    novelty_score: 0.0,
+                    applied: false,
+                    score_coherence_term: 0.0,
+                    score_novelty_term: 0.0,
+                    score_dissent_term: 0.0,
+                    composite_objective: 0.0,
+                    exploration_pick: false,
+                },
+            };
+        }
+
         let (intent_score, rewritten_intent) = Self::evaluate_intent_fast(intent);
         let final_intent = rewritten_intent.as_deref().unwrap_or(intent);
 
-        // Log low-quality intents
         if intent_score < 0.6 {
             eprintln!(
                 "[optimize_anything] Low-quality mutation intent (score={:.2}): {}",
@@ -2613,49 +2736,100 @@ impl HyperStigmergicMorphogenesis {
             }
         }
 
-        // 1. MUTATE: Generate candidate mutations (using potentially rewritten intent)
         let candidates = self.generate_mutations(final_intent);
+        if candidates.is_empty() {
+            let event = ImprovementEvent {
+                timestamp,
+                intent: intent.to_string(),
+                mutation_type: MutationType::ParameterTuning,
+                coherence_before,
+                coherence_after: coherence_before,
+                novelty_score: 0.0,
+                applied: false,
+                score_coherence_term: 0.0,
+                score_novelty_term: 0.0,
+                score_dissent_term: 0.0,
+                composite_objective: 0.0,
+                exploration_pick: false,
+            };
+            self.improvement_history.push(event.clone());
+            let intent_emb = self.get_or_create_embedding(intent);
+            self.embedding_index
+                .insert(self.improvement_history.len() - 1, intent_emb);
+            return ImprovementResult {
+                success: false,
+                coherence_delta: 0.0,
+                mutation_applied: None,
+                event,
+            };
+        }
 
-        // 2. SIMULATE: Evaluate each candidate
-        let mut best_candidate: Option<(MutationType, f32)> = None;
+        let weights = crate::world_guardrails::GuardrailWeights::from_env();
+        let mut scored: Vec<(MutationType, f32, f32)> = Vec::with_capacity(candidates.len());
         for mutation in candidates {
-            let simulated_coherence = self.simulate_mutation(&mutation);
-            let novelty = self.compute_novelty(&format!("{:?}", mutation));
-            let score = simulated_coherence * 0.7 + novelty * 0.3;
+            let sim = self.simulate_mutation(&mutation) as f32;
+            let nov = self.compute_novelty(&format!("{:?}", mutation));
+            scored.push((mutation, sim, nov));
+        }
+        let sims: Vec<f32> = scored.iter().map(|(_, s, _)| *s).collect();
+        let diss = crate::world_guardrails::dissent_from_simulations(&sims);
 
-            if best_candidate.as_ref().map_or(true, |(_, s)| score > *s) {
-                best_candidate = Some((mutation, score));
+        let mut best_i = 0usize;
+        let mut best_obj = f32::NEG_INFINITY;
+        for (i, (_, sim, nov)) in scored.iter().enumerate() {
+            let obj = weights.composite_rank(*sim, *nov, diss);
+            if obj > best_obj {
+                best_obj = obj;
+                best_i = i;
             }
         }
 
-        // 3. APPLY: Apply best mutation if it improves
-        let mut applied = false;
-        let coherence_after;
-        let final_mutation_type;
-
-        if let Some((ref mutation, _)) = best_candidate {
-            self.apply_mutation(mutation);
-            applied = true;
-            coherence_after = self.global_coherence();
-            final_mutation_type = mutation.clone();
+        let use_random = rand::thread_rng()
+            .gen_bool(crate::world_guardrails::exploration_epsilon());
+        let pick_i = if use_random {
+            rand::thread_rng().gen_range(0..scored.len())
         } else {
-            coherence_after = coherence_before;
-            final_mutation_type = MutationType::ParameterTuning;
+            best_i
         };
+
+        let (picked_mut, sim_c, nov_c) = &scored[pick_i];
+        let composite = weights.composite_rank(*sim_c, *nov_c, diss);
+        let final_mutation_type = picked_mut.clone();
+
+        self.apply_mutation(picked_mut);
+        let coherence_after = self.global_coherence();
+        let applied = true;
 
         let event = ImprovementEvent {
             timestamp,
             intent: intent.to_string(),
-            mutation_type: final_mutation_type,
+            mutation_type: final_mutation_type.clone(),
             coherence_before,
             coherence_after,
-            novelty_score: best_candidate.as_ref().map_or(0.0, |(_, s)| *s),
+            novelty_score: *nov_c,
             applied,
+            score_coherence_term: *sim_c,
+            score_novelty_term: *nov_c,
+            score_dissent_term: diss,
+            composite_objective: composite,
+            exploration_pick: use_random,
         };
 
-        self.improvement_history.push(event.clone());
+        self.push_decision_record(DecisionRecord {
+            timestamp,
+            kind: "supervision_mutation".to_string(),
+            tick_count: self.tick_count,
+            coherence_snapshot: coherence_before,
+            alternatives: scored.len(),
+            picked_exploration: use_random,
+            score_coherence_term: *sim_c,
+            score_novelty_term: *nov_c,
+            score_dissent_term: diss,
+            composite_objective: composite,
+            intent_summary: intent.chars().take(200).collect(),
+        });
 
-        // Update embedding index with this experience
+        self.improvement_history.push(event.clone());
         let intent_emb = self.get_or_create_embedding(intent);
         self.embedding_index
             .insert(self.improvement_history.len() - 1, intent_emb);
@@ -2663,11 +2837,10 @@ impl HyperStigmergicMorphogenesis {
         ImprovementResult {
             success: applied,
             coherence_delta: coherence_after - coherence_before,
-            mutation_applied: best_candidate.map(|(m, _)| format!("{:?}", m)),
+            mutation_applied: Some(format!("{:?}", final_mutation_type)),
             event,
         }
     }
-
     /// Fast synchronous intent evaluation using keyword heuristics.
     /// Returns (score 0-1, rewritten_intent if score < 0.6).
     ///
@@ -3472,9 +3645,20 @@ impl HyperStigmergicMorphogenesis {
 
     /// Add a belief with confidence scoring. If a similar belief exists, update it.
     pub fn add_belief(&mut self, content: &str, confidence: f64, source: BeliefSource) -> usize {
-        let now = Self::current_timestamp();
+        self.add_belief_with_extras(content, confidence, source, AddBeliefExtras::default())
+    }
 
-        // Check for existing similar belief (keyword match)
+    /// Add a belief with ownership / supersession / evidence linkage (conflict-aware provenance).
+    pub fn add_belief_with_extras(
+        &mut self,
+        content: &str,
+        mut confidence: f64,
+        source: BeliefSource,
+        extras: AddBeliefExtras,
+    ) -> usize {
+        let now = Self::current_timestamp();
+        let user_provided = matches!(source, BeliefSource::UserProvided);
+
         if let Some(existing) = self.beliefs.iter_mut().find(|b| {
             content
                 .split_whitespace()
@@ -3482,7 +3666,6 @@ impl HyperStigmergicMorphogenesis {
                 .any(|w| b.content.to_lowercase().contains(&w.to_lowercase()))
                 && b.content.len().abs_diff(content.len()) < content.len() / 2
         }) {
-            // Update existing belief — blend confidence
             existing.confidence = existing.confidence * 0.7 + confidence * 0.3;
             existing.update_count += 1;
             existing.updated_at = now;
@@ -3491,7 +3674,45 @@ impl HyperStigmergicMorphogenesis {
             } else {
                 existing.contradicting_evidence.push(content.to_string());
             }
+            for ev in &extras.supporting_evidence {
+                if !existing.supporting_evidence.contains(ev) {
+                    existing.supporting_evidence.push(ev.clone());
+                }
+            }
+            if let Some(ref ns) = extras.owner_namespace {
+                existing.owner_namespace = Some(ns.clone());
+            }
+            if extras.supersedes_belief_id.is_some() {
+                existing.supersedes_belief_id = extras.supersedes_belief_id;
+            }
+            for eid in &extras.evidence_belief_ids {
+                if !existing.evidence_belief_ids.contains(eid) {
+                    existing.evidence_belief_ids.push(*eid);
+                }
+            }
+            if extras.human_committed {
+                existing.human_committed = true;
+            }
+            if !existing.human_committed {
+                let up = matches!(existing.source, BeliefSource::UserProvided);
+                existing.confidence = crate::world_guardrails::apply_belief_explainability_cap(
+                    existing.confidence,
+                    existing.supporting_evidence.len(),
+                    existing.evidence_belief_ids.len(),
+                    up,
+                );
+            }
+            self.world_state_generation = self.world_state_generation.wrapping_add(1);
             return existing.id;
+        }
+
+        if !extras.human_committed {
+            confidence = crate::world_guardrails::apply_belief_explainability_cap(
+                confidence,
+                extras.supporting_evidence.len(),
+                extras.evidence_belief_ids.len(),
+                user_provided,
+            );
         }
 
         let id = self.beliefs.len();
@@ -3503,14 +3724,17 @@ impl HyperStigmergicMorphogenesis {
             overview_l1: Some(l1),
             confidence,
             source,
-            supporting_evidence: Vec::new(),
+            supporting_evidence: extras.supporting_evidence.clone(),
             contradicting_evidence: Vec::new(),
             created_at: now,
             updated_at: now,
             update_count: 0,
+            owner_namespace: extras.owner_namespace.clone(),
+            supersedes_belief_id: extras.supersedes_belief_id,
+            evidence_belief_ids: extras.evidence_belief_ids.clone(),
+            human_committed: extras.human_committed,
         };
 
-        // Create a vertex in the hypergraph for this belief
         self.vertex_meta.push(VertexMeta {
             kind: VertexKind::Belief,
             name: format!("belief_{}", id),
@@ -3522,6 +3746,7 @@ impl HyperStigmergicMorphogenesis {
         });
 
         self.beliefs.push(belief);
+        self.world_state_generation = self.world_state_generation.wrapping_add(1);
         id
     }
 
@@ -3743,6 +3968,15 @@ impl HyperStigmergicMorphogenesis {
     pub fn save_to_disk(&self, rlm_state: Option<&crate::rlm::RLMState>) -> anyhow::Result<()> {
         let bytes_len = EmbeddedGraphStore::save_world(self, rlm_state)?;
 
+        #[cfg(feature = "lbug")]
+        if crate::persistence::lbug_world_store::primary_enabled() {
+            println!(
+                "  System state saved to Ladybug primary store ({} bytes checkpoint payload)",
+                bytes_len
+            );
+            return Ok(());
+        }
+
         println!(
             "  System state saved to {} ({} bytes)",
             EMBEDDED_GRAPH_STORE_FILE, bytes_len
@@ -3753,6 +3987,15 @@ impl HyperStigmergicMorphogenesis {
     pub fn load_from_disk() -> anyhow::Result<(Self, Option<crate::rlm::RLMState>)> {
         if EmbeddedGraphStore::exists() {
             let loaded = EmbeddedGraphStore::load_world()?;
+            #[cfg(feature = "lbug")]
+            {
+                if crate::persistence::lbug_world_store::primary_enabled() {
+                    println!("  System state loaded from Ladybug primary store");
+                } else {
+                    println!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
+                }
+            }
+            #[cfg(not(feature = "lbug"))]
             println!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
             return Ok(loaded);
         }

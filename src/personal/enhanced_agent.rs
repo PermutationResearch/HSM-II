@@ -193,23 +193,42 @@ impl EnhancedPersonalAgent {
             let world = Self::create_new_world(&config).await?;
             (world, config)
         };
-        
+
+        Self::finish_from_world(base_path, world, config).await
+    }
+
+    /// Assemble an enhanced agent around an existing world (used by the integration layer).
+    pub async fn assemble_from_world(
+        base_path: impl AsRef<Path>,
+        world: HyperStigmergicMorphogenesis,
+        config: EnhancedAgentConfig,
+    ) -> Result<Self> {
+        let base_path = base_path.as_ref().to_path_buf();
+        Self::ensure_structure(&base_path).await?;
+        Self::finish_from_world(base_path, world, config).await
+    }
+
+    async fn finish_from_world(
+        base_path: PathBuf,
+        world: HyperStigmergicMorphogenesis,
+        config: EnhancedAgentConfig,
+    ) -> Result<Self> {
         // Initialize LLM with auto-detected model
         let mut llm_config = OllamaConfig::default();
         if llm_config.model == "auto" {
             llm_config.model = OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
         }
         let llm = OllamaClient::new(llm_config);
-        
+
         // Check Ollama availability
         let ollama_ready = llm.check_available().await;
         if !ollama_ready {
             warn!("Ollama LLM not detected. Council and CASS will be limited.");
         }
-        
+
         // Initialize runtime services
         let services = Self::initialize_services(&world).await?;
-        
+
         // Initialize tool registry with ALL tools (60+)
         let mut tool_registry = ToolRegistry::new();
         crate::tools::register_all_tools(&mut tool_registry);
@@ -263,7 +282,7 @@ impl EnhancedPersonalAgent {
     }
     
     /// Create a new world with configured agents
-    async fn create_new_world(config: &EnhancedAgentConfig) -> Result<HyperStigmergicMorphogenesis> {
+    pub(crate) async fn create_new_world(config: &EnhancedAgentConfig) -> Result<HyperStigmergicMorphogenesis> {
         let mut world = HyperStigmergicMorphogenesis::new(config.agent_count);
         
         // Assign specific roles to agents
@@ -297,6 +316,10 @@ impl EnhancedPersonalAgent {
             created_at: current_timestamp(),
             updated_at: current_timestamp(),
             update_count: 0,
+            owner_namespace: None,
+            supersedes_belief_id: None,
+            evidence_belief_ids: Vec::new(),
+            human_committed: false,
         });
 
         let content1 = "Complex decisions benefit from multi-agent council deliberation";
@@ -313,6 +336,10 @@ impl EnhancedPersonalAgent {
             created_at: current_timestamp(),
             updated_at: current_timestamp(),
             update_count: 0,
+            owner_namespace: None,
+            supersedes_belief_id: None,
+            evidence_belief_ids: Vec::new(),
+            human_committed: false,
         });
         
         // Create initial hyperedges for connectivity
@@ -1241,8 +1268,10 @@ impl EnhancedPersonalAgent {
         };
 
         // Tool execution loop: parse tool calls from LLM response and execute them
+        // Support: raw JSON, ```json ... ```, or embedded {...}
         let mut tool_used = false;
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&final_content) {
+        let json_candidate = Self::extract_tool_call_json(&final_content);
+        if let Some(json) = json_candidate {
             if let Some(tool_name) = json.get("tool").and_then(|v| v.as_str()) {
                 if let Some(params) = json.get("parameters") {
                     if self.tool_registry.has(tool_name) {
@@ -1345,6 +1374,35 @@ impl EnhancedPersonalAgent {
             .unwrap_or(0)
     }
     
+    /// Extract tool call JSON from LLM response (handles markdown-wrapped and inline JSON)
+    fn extract_tool_call_json(content: &str) -> Option<serde_json::Value> {
+        let trimmed = content.trim();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return Some(v);
+        }
+        if let Some(re) = regex::Regex::new(r"(?is)```(?:json)?\s*(\{[^`]*\})\s*```").ok() {
+            if let Some(cap) = re.captures(trimmed) {
+                if let Some(m) = cap.get(1) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(m.as_str().trim()) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        if let Some(re) = regex::Regex::new(r"(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})").ok() {
+            for cap in re.captures_iter(trimmed) {
+                if let Some(m) = cap.get(1) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(m.as_str()) {
+                        if v.get("tool").and_then(|t| t.as_str()).is_some() {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Strip leaked chat template tokens from LLM output
     fn clean_response(text: &str) -> String {
         let mut cleaned = text.to_string();
@@ -1364,27 +1422,50 @@ impl EnhancedPersonalAgent {
         cleaned.trim().to_string()
     }
 
+    /// Extract keywords for belief search (drops generic question words).
+    fn extract_search_keywords(&self, content: &str) -> Vec<String> {
+        let lower = content.to_lowercase();
+        let low_confidence = [
+            "discuss", "talk", "mention", "say", "tell", "yesterday", "last week", "recently",
+            "thing", "stuff", "issue", "problem", "conversation", "chat", "question", "did", "do",
+            "does", "what", "when", "where", "who", "why", "how",
+        ];
+        lower
+            .split_whitespace()
+            .filter(|w| {
+                let t = w.trim_matches(|c: char| !c.is_alphabetic());
+                !low_confidence.contains(&t)
+            })
+            .take(5)
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     /// Get relevant beliefs from world based on content (public for CLI access)
     pub async fn get_relevant_beliefs(&self, content: &str) -> Result<Vec<crate::hyper_stigmergy::Belief>> {
-        // Simple keyword matching - could be enhanced with embeddings
-        let content_lower = content.to_lowercase();
-        let words: Vec<&str> = content_lower.split_whitespace().collect();
-        
+        // Use extracted keywords when available (filters noise like "what", "when")
+        let keywords = self.extract_search_keywords(content);
+        let words: Vec<String> = if keywords.is_empty() {
+            content.to_lowercase().split_whitespace().map(|s| s.to_string()).collect()
+        } else {
+            keywords
+        };
+
         let relevant: Vec<_> = self.world.beliefs.iter()
             .filter(|b| {
                 let belief_lower = b.content.to_lowercase();
                 let belief_words: Vec<&str> = belief_lower.split_whitespace().collect();
-                words.iter().any(|w| belief_words.contains(w))
+                words.iter().any(|w| belief_words.contains(&w.as_str()))
             })
             .cloned()
             .take(5)
             .collect();
-        
+
         Ok(relevant)
     }
     
     /// Track JouleWork contributions
-    async fn track_contributions(
+    pub(crate) async fn track_contributions(
         &mut self,
         context: &MessageContext,
         response: &AgentResponse,
@@ -1423,9 +1504,36 @@ impl EnhancedPersonalAgent {
         
         Ok(())
     }
+
+    /// Finish a turn handled outside `handle_message` (integration-layer commands).
+    pub(crate) async fn finalize_integration_turn(
+        &mut self,
+        msg: &Message,
+        context: MessageContext,
+        response: &AgentResponse,
+    ) -> Result<()> {
+        self.track_contributions(&context, response).await?;
+        self.world.tick();
+        if self.config.enable_dks {
+            let dks_tick = self.services.dks.tick();
+            self.services.last_dks_tick = Some(dks_tick);
+        }
+        self.chat_history
+            .push(("user".to_string(), msg.content.clone()));
+        self.chat_history
+            .push(("assistant".to_string(), response.content.clone()));
+        if self.chat_history.len() > 40 {
+            let drain_count = self.chat_history.len() - 40;
+            self.chat_history.drain(..drain_count);
+        }
+        self.maybe_save().await?;
+        self.active_contexts
+            .insert(context.message_id.clone(), context);
+        Ok(())
+    }
     
     /// Save state to LadybugDB if interval elapsed
-    async fn maybe_save(&mut self) -> Result<()> {
+    pub async fn maybe_save(&mut self) -> Result<()> {
         let elapsed = self.last_save.elapsed().as_secs();
         if elapsed >= self.config.save_interval_secs {
             self.save().await?;
@@ -1443,13 +1551,15 @@ impl EnhancedPersonalAgent {
         
         // Create channel for message passing (avoids circular reference)
         let (tx, rx) = mpsc::channel::<(Message, oneshot::Sender<String>)>(100);
-        
+
+        self.gateway_tx = Some(tx.clone());
+
         // Create handler that uses the channel
         let handler = ChannelMessageHandler { sender: tx };
         gateway.on_message(handler);
-        
+
         gateway.start().await?;
-        
+
         // Store gateway to keep it alive (critical fix!)
         self.gateway = Some(gateway);
         
@@ -1514,7 +1624,12 @@ impl EnhancedPersonalAgent {
     async fn save_config(&self) -> Result<()> {
         let config_path = self.base_path.join("config.json");
         let content = serde_json::to_string_pretty(&self.config)?;
-        tokio::fs::write(config_path, content).await?;
+        let path = config_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::write_atomic(&path, content.as_bytes()).map_err(|e| anyhow::Error::from(e))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
         Ok(())
     }
     
@@ -1539,7 +1654,12 @@ impl EnhancedPersonalAgent {
     async fn save_metrics(&self) -> Result<()> {
         let metrics_path = self.base_path.join("metrics").join("joulework.json");
         let content = serde_json::to_string_pretty(&self.agent_metrics.joulework_history)?;
-        tokio::fs::write(metrics_path, content).await?;
+        let path = metrics_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::write_atomic(&path, content.as_bytes()).map_err(|e| anyhow::Error::from(e))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
         Ok(())
     }
 }
