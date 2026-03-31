@@ -8,6 +8,7 @@
 
 use clap::{Parser, Subcommand};
 use hyper_stigmergy::investigation_engine::{InvestigationEngine, InvestigationSession, SessionId};
+use hyper_stigmergy::harness::{ResumeSessionMap, RuntimeConfig};
 // use hyper_stigmergy::investigation_tools::InvestigationToolRegistry;
 use std::path::PathBuf;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -169,6 +170,7 @@ async fn cmd_new(
     } else {
         println!("{}", session_id.0);
     }
+    persist_resume_alias(&session_id.0.to_string(), &session_id.0.to_string())?;
 
     Ok(())
 }
@@ -229,6 +231,7 @@ async fn cmd_resume(workspace: &PathBuf, session_id: &str) -> anyhow::Result<()>
     println!("  Datasets: {}", session.datasets.len());
     println!("  Entities: {}", session.entities.len());
     println!("  Findings: {}", session.findings.len());
+    persist_resume_alias(&session.id.0.to_string(), &session.id.0.to_string())?;
 
     // Start REPL with this session
     start_repl(workspace, Some(session)).await?;
@@ -408,6 +411,7 @@ async fn cmd_query(
             engine.save().await?;
 
             let summary = engine.get_summary().await;
+            persist_resume_alias(&summary.id.0.to_string(), &summary.id.0.to_string())?;
             println!("\n✓ Investigation complete");
             println!("  Session ID: {}", summary.id.0);
             println!("  Findings: {}", summary.finding_count);
@@ -418,6 +422,14 @@ async fn cmd_query(
     }
 
     Ok(())
+}
+
+fn persist_resume_alias(task_id: &str, resume_id: &str) -> anyhow::Result<()> {
+    let cfg = RuntimeConfig::from_env();
+    let mut map = ResumeSessionMap::load(&cfg.resume.session_map_path)?;
+    map.task_to_resume
+        .insert(task_id.to_string(), resume_id.to_string());
+    map.save(&cfg.resume.session_map_path)
 }
 
 async fn cmd_status(workspace: &PathBuf, session_id: Option<String>) -> anyhow::Result<()> {

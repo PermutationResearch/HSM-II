@@ -130,6 +130,9 @@ __pycache__/
 config/local.*
 config/*.local
 
+# Local harness runtime (approvals, etc.)
+.hsmii/
+
 # Viz vendor libraries (loaded from CDN)
 viz/vendor/
 
@@ -138,3 +141,6 @@ tools/visual-explainer/output/
 
 # Agent tools output (generated)
 agent_tools/visual-explainer/output/
+
+# Npm-extracted @anthropic-ai/claude-code sources (reference only; check vendor license)
+/external/claude-code-from-npm/

@@ -1,0 +1,31 @@
+//! HarnessV1 — unified pause/resume substrate and observable turn lifecycle (incremental).
+//!
+//! Enable JSONL logging with:
+//! - `HSM_HARNESS_LOG=/path/to/harness_events.jsonl`
+//!
+//! Optional:
+//! - `HSM_HARNESS_TRACE_ID=...`
+//! - `HSM_HARNESS_AGENT_ID=...`
+//! - `HSM_HARNESS_CHECKPOINT_DIR=...`
+
+mod events;
+mod control_plane;
+mod approval;
+mod deeplink;
+mod migrations;
+mod resume;
+mod runtime;
+mod scheduler;
+mod store;
+pub mod types;
+
+pub use events::HarnessEvent;
+pub use control_plane::{ApprovalConfig, PluginConfig, ResumeConfig, RuntimeConfig};
+pub use approval::{ApprovalOutcome, ApprovalService, ApprovalStore, PendingApproval};
+pub use deeplink::{parse_hsm_deeplink, DeepLinkAction};
+pub use migrations::{Migration, MigrationRunner};
+pub use resume::ResumeSessionMap;
+pub use runtime::HarnessRuntime;
+pub use scheduler::Scheduler;
+pub use store::HarnessStore;
+pub use types::{ErrorClass, HarnessState, HarnessStepKey, ResumeToken, TaskOutcome};

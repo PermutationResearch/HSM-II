@@ -130,6 +130,17 @@ impl ToolRegistry {
         registry
     }
 
+    /// Build registry and auto-register enabled plugin manifests.
+    pub fn with_enabled_plugins_from_env() -> Self {
+        let mut registry = Self::new();
+        if let Err(e) = super::plugin_lifecycle::PluginManager::from_env()
+            .register_enabled_into_registry(&mut registry)
+        {
+            tracing::warn!("plugin registry bootstrap failed: {}", e);
+        }
+        registry
+    }
+
     pub fn register(&mut self, schema: ToolSchema) {
         let tool_name = schema.name.clone();
         self.tools.insert(tool_name.clone(), schema);
@@ -582,6 +593,7 @@ impl std::error::Error for ValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn registers_mcp_provider_and_external_tool() {
@@ -612,6 +624,53 @@ mod tests {
         assert_eq!(
             provider.endpoint.as_deref(),
             Some("http://127.0.0.1:3000/mcp")
+        );
+    }
+
+    #[test]
+    fn builtins_enforce_required_params_contract() {
+        let registry = ToolRegistry::new();
+        assert!(
+            matches!(
+                registry.validate("read", &json!({})),
+                Err(ValidationError::MissingParameter(p)) if p == "path"
+            ),
+            "read should require path"
+        );
+        assert!(
+            matches!(
+                registry.validate("write", &json!({"path": "a.txt"})),
+                Err(ValidationError::MissingParameter(p)) if p == "content"
+            ),
+            "write should require content"
+        );
+        assert!(
+            matches!(
+                registry.validate("edit", &json!({"path": "a.txt", "oldText": "x"})),
+                Err(ValidationError::MissingParameter(p)) if p == "newText"
+            ),
+            "edit should require newText"
+        );
+        assert!(
+            matches!(
+                registry.validate("bash", &json!({})),
+                Err(ValidationError::MissingParameter(p)) if p == "command"
+            ),
+            "bash should require command"
+        );
+        assert!(
+            matches!(
+                registry.validate("grep", &json!({})),
+                Err(ValidationError::MissingParameter(p)) if p == "pattern"
+            ),
+            "grep should require pattern"
+        );
+        assert!(
+            matches!(
+                registry.validate("find", &json!({})),
+                Err(ValidationError::MissingParameter(p)) if p == "pattern"
+            ),
+            "find should require pattern"
         );
     }
 }

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,14 +72,27 @@ struct SearchArgs {
     config: Option<PathBuf>,
     #[arg(long, default_value_t = true)]
     include_default: bool,
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 0.35)]
     objective_keyword_weight: f64,
-    #[arg(long, default_value_t = 0.6)]
+    /// Prioritize rubric composite over recall in the meta objective (defaults tuned for quality-first search).
+    #[arg(long, default_value_t = 0.3)]
     objective_recall_weight: f64,
     #[arg(long, default_value_t = 0.25)]
     objective_latency_penalty: f64,
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = 1.0)]
     objective_rubric_weight: f64,
+    /// Repeat each candidate this many times (different deterministic seeds) for confidence.
+    #[arg(long, default_value_t = 3)]
+    bootstrap_runs: usize,
+    /// Minimum total tasks required unless `--allow-small-sample` is set.
+    #[arg(long, default_value_t = 6)]
+    min_total_tasks: usize,
+    /// Allow tiny sample sizes (e.g., smoke runs) without hard failure.
+    #[arg(long, default_value_t = false)]
+    allow_small_sample: bool,
+    /// Require CI lower bound > 0 before promoting a winner.
+    #[arg(long, default_value_t = true)]
+    require_positive_ci: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +129,10 @@ struct CandidateResult {
     rubric_pass_rate_delta: f64,
     latency_ratio_vs_baseline: f64,
     objective_score: f64,
+    objective_stddev: f64,
+    objective_ci95_lower: f64,
+    bootstrap_runs: usize,
+    winner_eligible: bool,
     verdict: String,
     #[serde(default)]
     per_suite: Vec<PerSuiteEvalSummary>,
@@ -185,17 +202,28 @@ fn sample_config(rng: &mut StdRng) -> HsmRunnerConfig {
     HsmRunnerConfig {
         context_top_k: rng.gen_range(2..=8),
         context_score_threshold: rng.gen_range(0.05..=0.35),
+        summary_score_threshold: rng.gen_range(0.04..=0.22),
         skill_success_threshold: rng.gen_range(0.45..=0.75),
         skill_reputation_alpha: rng.gen_range(0.1..=0.6),
         store_belief_min_score: rng.gen_range(0.2..=0.6),
         context_char_budget: rng.gen_range(800..=6000),
         include_session_summaries: rng.gen_bool(0.8),
+        inject_memory_context: rng.gen_bool(0.85),
+        domain_memory_profiles: HashMap::new(),
+        max_belief_snippet_chars: rng.gen_range(180..=450),
+        max_summary_snippet_chars: rng.gen_range(220..=500),
+        max_session_summaries: rng.gen_range(1..=4),
         query_overlap_weight: rng.gen_range(0.05..=0.3),
         domain_match_bonus: rng.gen_range(0.1..=0.7),
         same_task_bonus: rng.gen_range(0.1..=0.9),
         belief_keyword_overlap_weight: rng.gen_range(0.05..=0.4),
         llm_temperature: rng.gen_range(0.1..=0.6),
         llm_max_tokens: rng.gen_range(700..=2000),
+        memory_entrypoint_max_lines: rng.gen_range(50..=300),
+        memory_entrypoint_max_bytes: rng.gen_range(5_000..=40_000),
+        session_compaction_enabled: rng.gen_bool(0.75),
+        session_compaction_trigger_messages: rng.gen_range(8..=24),
+        session_compaction_keep_tail_messages: rng.gen_range(2..=8),
     }
 }
 
@@ -264,13 +292,18 @@ fn resolve_eval_suites(cli: &SearchArgs) -> anyhow::Result<Vec<WeightedEvalSuite
     let mut out = if let Some(ref spec) = cli.suites {
         parse_weighted_suites(spec).map_err(anyhow::Error::msg)?
     } else {
-        let name = cli.suite.as_deref().unwrap_or("full").to_string();
-        let tasks = eval_tasks_for_suite(&name).map_err(anyhow::Error::msg)?;
-        vec![WeightedEvalSuite {
-            name,
-            weight: 1.0,
-            tasks,
-        }]
+        if let Some(name) = cli.suite.as_deref() {
+            let tasks = eval_tasks_for_suite(name).map_err(anyhow::Error::msg)?;
+            vec![WeightedEvalSuite {
+                name: name.to_string(),
+                weight: 1.0,
+                tasks,
+            }]
+        } else {
+            // Safer default for harness search: evaluate transfer across multiple suites.
+            parse_weighted_suites("memory:1,tool:1,council:1")
+                .map_err(anyhow::Error::msg)?
+        }
     };
     for s in &mut out {
         filter_tasks(&mut s.tasks, cli.tasks.as_deref(), cli.limit);
@@ -297,6 +330,13 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
         .iter()
         .map(|s| s.tasks.iter().map(|t| t.turns.len()).sum::<usize>())
         .sum();
+    if total_tasks < cli.min_total_tasks && !cli.allow_small_sample {
+        anyhow::bail!(
+            "insufficient coverage: {} task(s) selected (< {} min). Use broader suites/tasks or pass --allow-small-sample for smoke runs.",
+            total_tasks,
+            cli.min_total_tasks
+        );
+    }
 
     println!(
         "Baselines for {} suite slice(s) — {} tasks, {} turns…",
@@ -308,7 +348,8 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
     let mut baseline_by_name: BTreeMap<String, RunnerMetrics> = BTreeMap::new();
     for ws in &suites {
         println!("  baseline | {} | {} tasks", ws.name, ws.tasks.len());
-        let b = BaselineRunner::new(LlmClient::new()?).run(&ws.tasks).await;
+        let mut br = BaselineRunner::new(LlmClient::new()?);
+        let b = br.run(&ws.tasks).await;
         baseline_by_name.insert(ws.name.clone(), b);
     }
 
@@ -353,21 +394,35 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
         let cand_dir = run_dir.join(&candidate_id);
         fs::create_dir_all(&cand_dir)?;
 
+        let reps = cli.bootstrap_runs.max(1);
         let mut per_suite: Vec<PerSuiteEvalSummary> = Vec::new();
-        let mut w_sum = 0.0;
-        let mut obj_acc = 0.0;
-        let mut agg_kw = 0.0;
-        let mut agg_rec = 0.0;
-        let mut agg_rub = 0.0;
-        let mut agg_pr = 0.0;
-        let mut agg_lat = 0.0;
-        let mut agg_kd = 0.0;
-        let mut agg_rd = 0.0;
-        let mut agg_rcd = 0.0;
-        let mut agg_prd = 0.0;
-        let mut agg_lr = 0.0;
+        let mut rep_objectives = Vec::with_capacity(reps);
+        let mut mean_kw = 0.0;
+        let mut mean_rec = 0.0;
+        let mut mean_rub = 0.0;
+        let mut mean_pr = 0.0;
+        let mut mean_lat = 0.0;
+        let mut mean_kd = 0.0;
+        let mut mean_rd = 0.0;
+        let mut mean_rcd = 0.0;
+        let mut mean_prd = 0.0;
+        let mut mean_lr = 0.0;
 
-        for ws in &suites {
+        for rep in 0..reps {
+            let mut w_sum = 0.0;
+            let mut obj_acc = 0.0;
+            let mut agg_kw = 0.0;
+            let mut agg_rec = 0.0;
+            let mut agg_rub = 0.0;
+            let mut agg_pr = 0.0;
+            let mut agg_lat = 0.0;
+            let mut agg_kd = 0.0;
+            let mut agg_rd = 0.0;
+            let mut agg_rcd = 0.0;
+            let mut agg_prd = 0.0;
+            let mut agg_lr = 0.0;
+
+            for ws in &suites {
             let baseline = baseline_by_name.get(&ws.name).expect("baseline for suite");
             let mut runner = HsmRunner::with_config(LlmClient::new()?, cfg.clone());
             if cli.trace {
@@ -408,7 +463,7 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
             agg_prd += w * report.improvement.rubric_pass_rate_delta;
             agg_lr += w * latency_ratio_vs_baseline;
 
-            per_suite.push(PerSuiteEvalSummary {
+            let suite_summary = PerSuiteEvalSummary {
                 suite_name: ws.name.clone(),
                 weight: w,
                 task_count: ws.tasks.len(),
@@ -424,40 +479,85 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
                 latency_ratio_vs_baseline,
                 objective_score: obj,
                 verdict: report.verdict.clone(),
-            });
+            };
+            if rep == 0 {
+                per_suite.push(suite_summary);
+            }
 
-            let suite_dir = cand_dir.join(&ws.name);
-            fs::create_dir_all(&suite_dir)?;
-            fs::write(
-                suite_dir.join("hsm_metrics.json"),
-                serde_json::to_string_pretty(&hsm)?,
-            )?;
-            fs::write(
-                suite_dir.join("comparison_report.json"),
-                serde_json::to_string_pretty(&report)?,
-            )?;
-            write_turn_metrics_jsonl(&suite_dir.join("turns_hsm.jsonl"), &hsm.turns)?;
-            write_turn_metrics_jsonl(&suite_dir.join("turns_baseline.jsonl"), &baseline.turns)?;
-            if cli.trace && !traces.is_empty() {
-                write_jsonl(&suite_dir.join("hsm_trace.jsonl"), &traces)?;
+            if rep == 0 {
+                let suite_dir = cand_dir.join(&ws.name);
+                fs::create_dir_all(&suite_dir)?;
+                fs::write(
+                    suite_dir.join("hsm_metrics.json"),
+                    serde_json::to_string_pretty(&hsm)?,
+                )?;
+                fs::write(
+                    suite_dir.join("comparison_report.json"),
+                    serde_json::to_string_pretty(&report)?,
+                )?;
+                write_turn_metrics_jsonl(&suite_dir.join("turns_hsm.jsonl"), &hsm.turns)?;
+                write_turn_metrics_jsonl(&suite_dir.join("turns_baseline.jsonl"), &baseline.turns)?;
+                if cli.trace && !traces.is_empty() {
+                    write_jsonl(&suite_dir.join("hsm_trace.jsonl"), &traces)?;
+                }
             }
         }
 
-        let inv = if w_sum > 0.0 { 1.0 / w_sum } else { 0.0 };
+            let inv = if w_sum > 0.0 { 1.0 / w_sum } else { 0.0 };
+            rep_objectives.push(obj_acc * inv);
+            mean_kw += agg_kw * inv;
+            mean_rec += agg_rec * inv;
+            mean_rub += agg_rub * inv;
+            mean_pr += agg_pr * inv;
+            mean_lat += agg_lat * inv;
+            mean_kd += agg_kd * inv;
+            mean_rd += agg_rd * inv;
+            mean_rcd += agg_rcd * inv;
+            mean_prd += agg_prd * inv;
+            mean_lr += agg_lr * inv;
+        }
+
+        let rep_inv = 1.0 / reps as f64;
+        let objective_mean = rep_objectives.iter().sum::<f64>() * rep_inv;
+        let objective_stddev = if reps > 1 {
+            let var = rep_objectives
+                .iter()
+                .map(|v| {
+                    let d = *v - objective_mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (reps as f64 - 1.0);
+            var.sqrt()
+        } else {
+            0.0
+        };
+        let objective_ci95_lower =
+            objective_mean - 1.96 * (objective_stddev / (reps as f64).sqrt());
+        let winner_eligible = if cli.require_positive_ci {
+            objective_ci95_lower > 0.0
+        } else {
+            true
+        };
+
         let result = CandidateResult {
             candidate_id: candidate_id.clone(),
             config: cfg,
-            avg_keyword_score: agg_kw * inv,
-            avg_recall_score: agg_rec * inv,
-            avg_rubric_composite: agg_rub * inv,
-            rubric_pass_rate: agg_pr * inv,
-            avg_latency_ms: agg_lat * inv,
-            keyword_delta_vs_baseline: agg_kd * inv,
-            recall_delta_vs_baseline: agg_rd * inv,
-            rubric_composite_delta: agg_rcd * inv,
-            rubric_pass_rate_delta: agg_prd * inv,
-            latency_ratio_vs_baseline: agg_lr * inv,
-            objective_score: obj_acc * inv,
+            avg_keyword_score: mean_kw * rep_inv,
+            avg_recall_score: mean_rec * rep_inv,
+            avg_rubric_composite: mean_rub * rep_inv,
+            rubric_pass_rate: mean_pr * rep_inv,
+            avg_latency_ms: mean_lat * rep_inv,
+            keyword_delta_vs_baseline: mean_kd * rep_inv,
+            recall_delta_vs_baseline: mean_rd * rep_inv,
+            rubric_composite_delta: mean_rcd * rep_inv,
+            rubric_pass_rate_delta: mean_prd * rep_inv,
+            latency_ratio_vs_baseline: mean_lr * rep_inv,
+            objective_score: objective_mean,
+            objective_stddev,
+            objective_ci95_lower,
+            bootstrap_runs: reps,
+            winner_eligible,
             verdict: if per_suite.len() == 1 {
                 per_suite[0].verdict.clone()
             } else {
@@ -503,9 +603,14 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
     }
 
     results.sort_by(|a, b| {
-        b.objective_score
-            .partial_cmp(&a.objective_score)
+        b.objective_ci95_lower
+            .partial_cmp(&a.objective_ci95_lower)
             .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                b.objective_score
+                    .partial_cmp(&a.objective_score)
+                    .unwrap_or(Ordering::Equal)
+            })
     });
 
     fs::write(
@@ -564,28 +669,40 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
     println!("\nTop candidates by objective score:");
     for c in results.iter().take(5) {
         println!(
-            "{} | objective {:+.3} | rubric Δ {:+.3} | keyword Δ {:+.3} | recall Δ {:+.3} | latency x{:.2}",
+            "{} | objective {:+.3} | ci95_lb {:+.3} | rubric Δ {:+.3} | keyword Δ {:+.3} | recall Δ {:+.3} | latency x{:.2}",
             c.candidate_id,
             c.objective_score,
+            c.objective_ci95_lower,
             c.rubric_composite_delta,
             c.keyword_delta_vs_baseline,
             c.recall_delta_vs_baseline,
             c.latency_ratio_vs_baseline,
         );
     }
-    if let Some(best) = results.first() {
+    let best = results
+        .iter()
+        .find(|c| c.winner_eligible)
+        .or_else(|| results.first());
+    if let Some(best) = best {
         println!(
-            "\nBest candidate: {} (objective {:+.3}, rubric Δ {:+.3}, keyword Δ {:+.3}, latency x{:.2})",
+            "\nBest candidate: {} (objective {:+.3}, ci95_lb {:+.3}, rubric Δ {:+.3}, keyword Δ {:+.3}, latency x{:.2})",
             best.candidate_id,
             best.objective_score,
+            best.objective_ci95_lower,
             best.rubric_composite_delta,
             best.keyword_delta_vs_baseline,
             best.latency_ratio_vs_baseline
         );
-        fs::write(
-            run_dir.join("best_config.json"),
-            serde_json::to_string_pretty(&best.config)?,
-        )?;
+        if best.winner_eligible {
+            fs::write(
+                run_dir.join("best_config.json"),
+                serde_json::to_string_pretty(&best.config)?,
+            )?;
+        } else {
+            eprintln!(
+                "warning: no candidate cleared confidence gate; best_config.json not written (use --require-positive-ci=false to force)"
+            );
+        }
     }
 
     let manifest = RunManifest::new(
@@ -613,7 +730,7 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
     write_manifest(&run_dir, &manifest)?;
 
     if cli.write_runs_index {
-        if let Some(best) = results.first() {
+        if let Some(best) = best {
             let idx_path = default_runs_index(&run_dir);
             let line = serde_json::json!({
                 "harness": "hsm_meta_harness",
@@ -622,6 +739,8 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
                 "git_commit": manifest.git_commit,
                 "best_candidate": best.candidate_id,
                 "objective_score": best.objective_score,
+                "objective_ci95_lower": best.objective_ci95_lower,
+                "winner_eligible": best.winner_eligible,
                 "suites": suite_names,
             });
             append_runs_index(&idx_path, &line)?;

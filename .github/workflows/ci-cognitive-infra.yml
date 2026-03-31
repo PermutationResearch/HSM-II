@@ -1,0 +1,123 @@
+name: CI Cognitive Infrastructure
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  lib-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run library tests
+        run: cargo test --lib
+
+  smoke-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Golden offline smoke
+        run: bash scripts/smoke_e2e.sh
+
+  smoke-provider-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [openai, anthropic, ollama]
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Optional: set secret OLLAMA_URL (or a reachable proxy URL) to enable ollama matrix lane.
+      OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+      OLLAMA_MODEL: ${{ secrets.OLLAMA_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Provider smoke (${{ matrix.provider }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.provider }}" in
+            openai)
+              if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                echo "skip openai lane: OPENAI_API_KEY not configured"
+                exit 0
+              fi
+              export DEFAULT_LLM_MODEL="gpt-4o-mini"
+              SMOKE_RUN_LLM=1 bash scripts/smoke_e2e.sh
+              ;;
+            anthropic)
+              if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+                echo "skip anthropic lane: ANTHROPIC_API_KEY not configured"
+                exit 0
+              fi
+              export DEFAULT_LLM_MODEL="claude-3-5-sonnet-20241022"
+              SMOKE_RUN_LLM=1 bash scripts/smoke_e2e.sh
+              ;;
+            ollama)
+              if [[ -z "${OLLAMA_URL:-}" ]]; then
+                echo "skip ollama lane: OLLAMA_URL secret not configured"
+                exit 0
+              fi
+              export OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2}"
+              SMOKE_RUN_LLM=1 SMOKE_CHAT=1 bash scripts/smoke_e2e.sh
+              ;;
+            *)
+              echo "unknown provider lane"
+              exit 1
+              ;;
+          esac
+
+  context-benchmark:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [openai, anthropic]
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Context assembly benchmark (${{ matrix.provider }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.provider }}" in
+            openai)
+              [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "skip openai context benchmark"; exit 0; }
+              export DEFAULT_LLM_MODEL="gpt-4o-mini"
+              ;;
+            anthropic)
+              [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "skip anthropic context benchmark"; exit 0; }
+              export DEFAULT_LLM_MODEL="claude-3-5-sonnet-20241022"
+              ;;
+          esac
+          CONTEXT_SUITE=memory CONTEXT_LIMIT=3 \
+          CONTEXT_MIN_KEYWORD_DELTA=0.00 \
+          CONTEXT_MIN_RECALL_DELTA=0.00 \
+          CONTEXT_MIN_RUBRIC_DELTA=0.00 \
+          CONTEXT_MAX_LATENCY_RATIO=2.00 \
+          bash scripts/context_benchmark.sh
+
+  nightly-lbug:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Heavy feature compile check (lbug)
+        run: cargo check -p hyper-stigmergy --no-default-features --features lbug

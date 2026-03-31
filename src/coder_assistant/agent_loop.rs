@@ -246,7 +246,7 @@ impl AgentLoop {
     pub fn new(config: AgentConfig, session_id: String) -> Self {
         Self {
             config,
-            tool_registry: ToolRegistry::new(),
+            tool_registry: ToolRegistry::with_enabled_plugins_from_env(),
             tool_executor: ToolExecutor::new(),
             messages: Vec::new(),
             session_id,

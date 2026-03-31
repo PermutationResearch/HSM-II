@@ -104,6 +104,9 @@ pub mod api;
 // Comparative evaluation harness (HSM-II vs baseline)
 pub mod eval;
 
+// Unified generator / turn lifecycle substrate (HarnessV1)
+pub mod harness;
+
 // Demo tests (only in test mode)
 #[cfg(test)]
 pub mod social_memory_demo;
@@ -258,6 +261,10 @@ pub use communication::{
     protocol::{DeliveryGuarantee, MessageEnvelope, MessagePriority, RoutingStrategy},
     swarm::{FlockingForces, StigmergicField, SwarmCommunication, WaggleDance},
     CommunicationConfig, CommunicationHub, FieldType, GossipStats, Position, Target,
+};
+
+pub use harness::{
+    ApprovalOutcome, ApprovalService, ApprovalStore, PendingApproval, RuntimeConfig,
 };
 
 // GPU-accelerated graph processing

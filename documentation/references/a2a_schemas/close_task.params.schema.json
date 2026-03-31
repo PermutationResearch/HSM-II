@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hsm-ii.local/schemas/a2a/close_task.params.schema.json",
+  "title": "close_task params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trace_id",
+    "task_id",
+    "delegation_id",
+    "from_agent",
+    "outcome"
+  ],
+  "properties": {
+    "trace_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "delegation_id": { "type": "string", "minLength": 1 },
+    "from_agent": { "type": "string", "minLength": 1 },
+    "outcome": {
+      "type": "string",
+      "enum": ["accepted", "rejected", "needs_revision", "cancelled"]
+    },
+    "message": { "type": "string" },
+    "accepted_artifact_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "timestamp_unix": { "type": "integer", "minimum": 0 }
+  }
+}

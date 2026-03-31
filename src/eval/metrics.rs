@@ -188,6 +188,9 @@ pub struct DomainMetrics {
 pub fn turn_rubric_composite(keyword_score: f64, extras: &RubricExtras) -> f64 {
     let mut sum = keyword_score;
     let mut n = 1usize;
+    // Always include concision/relevance: penalizes verbose, weakly aligned turns.
+    sum += extras.concision_relevance_score;
+    n += 1;
     if extras.grounding_applicable {
         sum += extras.grounding_score;
         n += 1;
@@ -290,6 +293,8 @@ pub struct ImprovementMetrics {
     pub rubric_pass_rate_delta: f64,
     pub llm_http_requests_delta: f64,
     pub wall_clock_ms_delta: f64,
+    /// True when at least one side reports non-zero token usage.
+    pub token_metrics_available: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -315,8 +320,17 @@ pub fn compare(
     let keyword_delta = h.avg_keyword_score - b.avg_keyword_score;
     let recall_delta = h.avg_recall_score - b.avg_recall_score;
 
-    let token_reduction = b.total_tokens as f64 - h.total_tokens as f64;
-    let prompt_reduction = b.total_prompt_tokens as f64 - h.total_prompt_tokens as f64;
+    let token_metrics_available = !(b.total_tokens == 0 && h.total_tokens == 0);
+    let token_reduction = if token_metrics_available {
+        b.total_tokens as f64 - h.total_tokens as f64
+    } else {
+        0.0
+    };
+    let prompt_reduction = if token_metrics_available {
+        b.total_prompt_tokens as f64 - h.total_prompt_tokens as f64
+    } else {
+        0.0
+    };
     let call_reduction = b.total_llm_calls as f64 - h.total_llm_calls as f64;
     let latency_delta = h.avg_latency_ms - b.avg_latency_ms;
     let rubric_delta = h.avg_rubric_composite - b.avg_rubric_composite;
@@ -343,6 +357,7 @@ pub fn compare(
         rubric_pass_rate_delta: rubric_pass_delta,
         llm_http_requests_delta: http_delta,
         wall_clock_ms_delta: wall_delta,
+        token_metrics_available,
     };
 
     // Domain breakdown
@@ -365,7 +380,15 @@ pub fn compare(
     domain_breakdown.sort_by(|a, b| b.improvement_pct.partial_cmp(&a.improvement_pct).unwrap_or(std::cmp::Ordering::Equal));
 
     // Verdict
-    let overall_improvement = (improvement.keyword_score_pct + improvement.recall_score_pct + improvement.token_reduction_pct) / 3.0;
+    let mut components = vec![improvement.keyword_score_pct, improvement.recall_score_pct];
+    if improvement.token_metrics_available {
+        components.push(improvement.token_reduction_pct);
+    }
+    let overall_improvement = if components.is_empty() {
+        0.0
+    } else {
+        components.iter().sum::<f64>() / components.len() as f64
+    };
     let verdict = if overall_improvement >= 30.0 {
         format!("VALIDATED: {:.1}% average improvement across quality, recall, and cost. Exceeds 30% threshold.", overall_improvement)
     } else if overall_improvement >= 15.0 {
@@ -416,6 +439,9 @@ pub fn print_report(report: &ComparisonReport) {
     println!("{:<40} {:>+10.3} (Δ pass rate {:>+.3})", "Rubric composite", report.improvement.rubric_composite_delta, report.improvement.rubric_pass_rate_delta);
     println!("{:<40} {:>+10.1} ({:>+.0} extra reqs)", "LLM HTTP requests", report.improvement.llm_http_requests_delta, report.improvement.llm_http_requests_delta);
     println!("{:<40} {:>+10.0}ms", "Wall-clock (sum turns)", report.improvement.wall_clock_ms_delta);
+    if !report.improvement.token_metrics_available {
+        println!("{:<40} {}", "Token accounting", "unavailable (excluded from verdict)");
+    }
 
     if !report.domain_breakdown.is_empty() {
         println!("\n--- Domain Breakdown ---");

@@ -52,6 +52,8 @@ pub mod artifacts;
 pub mod calibration;
 pub mod external;
 pub mod judges;
+pub mod memory_graph;
+pub mod memory_graph_sqlite;
 pub mod metrics;
 pub mod proposer;
 pub mod runner;
@@ -83,7 +85,10 @@ pub use run_store::{
     query_best_objective, query_by_harness, query_by_run_dir_contains, query_recent, rebuild_fts,
     row_count, search_fts, sync_index_line_to_sqlite, RunRow,
 };
-pub use runner::{BaselineRunner, HarnessPolicy, HsmRunner, HsmRunnerConfig};
+pub use runner::{
+    BaselineRunner, DomainMemoryProfile, HarnessPolicy, HsmRunner, HsmRunnerConfig,
+    ResolvedMemoryInjection,
+};
 pub use suites::{eval_tasks_for_suite, parse_weighted_suites, filter_tasks, WeightedEvalSuite};
 pub use tasks::{
     load_eval_suite,
@@ -93,3 +98,11 @@ pub use tasks::{
     EvalTask,
 };
 pub use trace::{BeliefRankEntry, HsmTurnTrace, RankedContextResult};
+pub use memory_graph::{
+    BeliefSnapshot, BipartiteMemoryGraph, HsmMemorySnapshot, Incidence, MemoryEntity, MemoryLayer,
+    ReifiedFact, SessionSummarySnapshot, SkillSnapshot,
+};
+pub use memory_graph_sqlite::{
+    delete_all_graph_rows, ingest_json_file, init_schema as init_memory_graph_sqlite_schema,
+    upsert_bipartite_graph as upsert_memory_graph_sqlite, MEMORY_GRAPH_DDL,
+};

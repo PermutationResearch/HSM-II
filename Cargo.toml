@@ -168,6 +168,10 @@ name = "hsm_trace2skill"
 path = "src/bin/hsm_trace2skill.rs"
 
 [[bin]]
+name = "hsm_a2a_adapter"
+path = "src/bin/hsm_a2a_adapter.rs"
+
+[[bin]]
 name = "hsm_golden"
 path = "src/bin/hsm_golden.rs"
 required-features = ["lbug"]

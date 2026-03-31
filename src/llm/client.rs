@@ -1,10 +1,10 @@
 //! Production LLM Client with Multi-Provider Support
 //!
-//! Supports OpenAI, Anthropic, and Ollama with automatic failover,
+//! Supports OpenAI, OpenRouter (OpenAI-compatible), Anthropic, and Ollama with automatic failover,
 //! retry logic, and comprehensive observability.
 //!
 //! **Provider order (fallback chain):** set `HSM_LLM_PROVIDER_ORDER` to a comma-separated
-//! list: `openai`, `anthropic`, `ollama` (case-insensitive). Example:
+//! list: `openai`, `openrouter`, `anthropic`, `ollama` (case-insensitive). Example:
 //! `HSM_LLM_PROVIDER_ORDER=ollama,openai` tries local Ollama first, then OpenAI. When unset,
 //! available cloud providers are tried first, then Ollama (always included by default).
 
@@ -17,6 +17,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
+
+/// HTTP error from a provider response (used for retry / failover policy).
+#[derive(Debug)]
+struct LlmHttpError {
+    status: u16,
+    body: String,
+}
+
+impl std::fmt::Display for LlmHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for LlmHttpError {}
+
+impl LlmHttpError {
+    fn is_client_error(&self) -> bool {
+        (400..500).contains(&self.status)
+    }
+}
+
+fn root_http_err(e: &anyhow::Error) -> Option<&LlmHttpError> {
+    e.downcast_ref::<LlmHttpError>()
+        .or_else(|| e.chain().find_map(|c| c.downcast_ref::<LlmHttpError>()))
+}
+
+/// One configured upstream (OpenAI, OpenRouter, Anthropic, Ollama).
+#[derive(Clone, Debug)]
+struct ProviderSlot {
+    /// Human/log label: `openai`, `openrouter`, `anthropic`, `ollama`.
+    label: &'static str,
+    transport: LlmProvider,
+    api_key: String,
+    base_url: String,
+}
 
 /// LLM provider types
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,13 +77,21 @@ impl LlmProvider {
         Some((LlmProvider::Anthropic, api_key, base_url))
     }
 
+    fn try_openrouter() -> Option<(Self, String, String)> {
+        let api_key = std::env::var("OPENROUTER_API_KEY").ok()?;
+        let base_url = std::env::var("OPENROUTER_API_BASE")
+            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+        // OpenRouter uses OpenAI-compatible chat/completions paths.
+        Some((LlmProvider::OpenAi, api_key, base_url))
+    }
+
     fn ollama_endpoint() -> (Self, String, String) {
         let url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
         (LlmProvider::Ollama, String::new(), url)
     }
 
-    fn from_env() -> Vec<(Self, String, String)> {
+    fn slots_from_env() -> Vec<ProviderSlot> {
         if let Ok(order_str) = std::env::var("HSM_LLM_PROVIDER_ORDER") {
             let tokens: Vec<String> = order_str
                 .split(',')
@@ -60,21 +104,51 @@ impl LlmProvider {
                 for t in tokens {
                     match t.as_str() {
                         "openai" => {
-                            if let Some(p) = Self::try_openai() {
-                                providers.push(p);
+                            if let Some((transport, api_key, base_url)) = Self::try_openai() {
+                                providers.push(ProviderSlot {
+                                    label: "openai",
+                                    transport,
+                                    api_key,
+                                    base_url,
+                                });
                             } else {
                                 warn!("HSM_LLM_PROVIDER_ORDER lists openai but OPENAI_API_KEY is unset");
                             }
                         }
+                        "openrouter" => {
+                            if let Some((transport, api_key, base_url)) = Self::try_openrouter() {
+                                providers.push(ProviderSlot {
+                                    label: "openrouter",
+                                    transport,
+                                    api_key,
+                                    base_url,
+                                });
+                            } else {
+                                warn!("HSM_LLM_PROVIDER_ORDER lists openrouter but OPENROUTER_API_KEY is unset");
+                            }
+                        }
                         "anthropic" => {
-                            if let Some(p) = Self::try_anthropic() {
-                                providers.push(p);
+                            if let Some((transport, api_key, base_url)) = Self::try_anthropic() {
+                                providers.push(ProviderSlot {
+                                    label: "anthropic",
+                                    transport,
+                                    api_key,
+                                    base_url,
+                                });
                             } else {
                                 warn!("HSM_LLM_PROVIDER_ORDER lists anthropic but ANTHROPIC_API_KEY is unset");
                             }
                         }
-                        "ollama" => providers.push(Self::ollama_endpoint()),
-                        _ => warn!("HSM_LLM_PROVIDER_ORDER: unknown provider {:?}, expected openai|anthropic|ollama", t),
+                        "ollama" => {
+                            let (transport, api_key, base_url) = Self::ollama_endpoint();
+                            providers.push(ProviderSlot {
+                                label: "ollama",
+                                transport,
+                                api_key,
+                                base_url,
+                            });
+                        }
+                        _ => warn!("HSM_LLM_PROVIDER_ORDER: unknown provider {:?}, expected openai|openrouter|anthropic|ollama", t),
                     }
                 }
                 if !providers.is_empty() {
@@ -85,13 +159,37 @@ impl LlmProvider {
         }
 
         let mut providers = Vec::new();
-        if let Some(p) = Self::try_openai() {
-            providers.push(p);
+        if let Some((transport, api_key, base_url)) = Self::try_openai() {
+            providers.push(ProviderSlot {
+                label: "openai",
+                transport,
+                api_key,
+                base_url,
+            });
         }
-        if let Some(p) = Self::try_anthropic() {
-            providers.push(p);
+        if let Some((transport, api_key, base_url)) = Self::try_openrouter() {
+            providers.push(ProviderSlot {
+                label: "openrouter",
+                transport,
+                api_key,
+                base_url,
+            });
         }
-        providers.push(Self::ollama_endpoint());
+        if let Some((transport, api_key, base_url)) = Self::try_anthropic() {
+            providers.push(ProviderSlot {
+                label: "anthropic",
+                transport,
+                api_key,
+                base_url,
+            });
+        }
+        let (transport, api_key, base_url) = Self::ollama_endpoint();
+        providers.push(ProviderSlot {
+            label: "ollama",
+            transport,
+            api_key,
+            base_url,
+        });
         providers
     }
 }
@@ -191,7 +289,7 @@ impl Default for RetryConfig {
 /// Production LLM client with failover and retry
 pub struct LlmClient {
     http: Client,
-    providers: Vec<(LlmProvider, String, String)>,
+    providers: Vec<ProviderSlot>,
     retry_config: RetryConfig,
     default_model: String,
     metrics: Arc<LlmMetrics>,
@@ -245,11 +343,11 @@ pub struct MetricsSnapshot {
 impl LlmClient {
     /// Create new LLM client from environment variables
     pub fn new() -> Result<Self> {
-        let providers = LlmProvider::from_env();
+        let providers = LlmProvider::slots_from_env();
         
         if providers.is_empty() {
             return Err(anyhow!(
-                "No LLM providers configured. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_URL"
+                "No LLM providers configured. Set one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_URL"
             ));
         }
 
@@ -303,8 +401,17 @@ impl LlmClient {
         let mut last_error = None;
 
         // Try each provider in order
-        for (provider, api_key, base_url) in &self.providers {
-            match self.try_provider(request.clone(), provider, api_key, base_url).await {
+        for slot in &self.providers {
+            match self
+                .try_provider(
+                    request.clone(),
+                    &slot.transport,
+                    slot.label,
+                    &slot.api_key,
+                    &slot.base_url,
+                )
+                .await
+            {
                 Ok(response) => {
                     self.breaker_failures.store(0, Ordering::SeqCst);
                     let latency_ms = start.elapsed().as_millis() as u64;
@@ -312,7 +419,7 @@ impl LlmClient {
                     self.metrics.record_request(true, tokens, latency_ms);
                     
                     info!(
-                        provider = ?provider,
+                        provider = %slot.label,
                         model = %response.model,
                         latency_ms = latency_ms,
                         tokens = tokens,
@@ -325,7 +432,7 @@ impl LlmClient {
                     });
                 }
                 Err(e) => {
-                    warn!(provider = ?provider, error = %e, "Provider failed, trying next");
+                    warn!(provider = %slot.label, error = %e, "Provider failed, trying next");
                     last_error = Some(e);
                 }
             }
@@ -366,6 +473,7 @@ impl LlmClient {
         &self,
         request: LlmRequest,
         provider: &LlmProvider,
+        provider_label: &str,
         api_key: &str,
         base_url: &str,
     ) -> Result<LlmResponse> {
@@ -374,17 +482,27 @@ impl LlmClient {
         for attempt in 0..=self.retry_config.max_retries {
             if attempt > 0 {
                 let delay = self.calculate_backoff(attempt);
-                warn!(attempt = attempt, delay_ms = delay, "Retrying LLM request");
+                warn!(
+                    provider = %provider_label,
+                    attempt = attempt,
+                    delay_ms = delay,
+                    "Retrying LLM request"
+                );
                 sleep(Duration::from_millis(delay)).await;
             }
 
             match self.send_request(request.clone(), provider, api_key, base_url).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
-                    // Don't retry on 4xx errors (client errors)
-                    if let Some(status) = e.downcast_ref::<reqwest::StatusCode>() {
-                        if status.is_client_error() {
-                            return Err(anyhow!("Client error ({}): {}", status, e));
+                    // Don't retry on HTTP 4xx — quota/rate-limit/model-not-found won't heal by waiting.
+                    if let Some(http) = root_http_err(&e) {
+                        if http.is_client_error() {
+                            warn!(
+                                provider = %provider_label,
+                                status = http.status,
+                                "LLM HTTP client error; not retrying this provider"
+                            );
+                            return Err(e);
                         }
                     }
                     last_error = Some(e);
@@ -550,7 +668,10 @@ impl LlmClient {
         
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("HTTP {}: {}", status, error_text));
+            return Err(anyhow::Error::new(LlmHttpError {
+                status: status.as_u16(),
+                body: error_text,
+            }));
         }
 
         let json: Value = response.json().await?;
@@ -667,14 +788,18 @@ impl LlmClient {
     pub async fn health_check(&self) -> Vec<(LlmProvider, bool, String)> {
         let mut results = Vec::new();
 
-        for (provider, api_key, base_url) in &self.providers {
-            let result = match provider {
-                LlmProvider::OpenAi => self.check_openai(api_key, base_url).await,
-                LlmProvider::Anthropic => self.check_anthropic(api_key, base_url).await,
-                LlmProvider::Ollama => self.check_ollama(base_url).await,
+        for slot in &self.providers {
+            let result = match &slot.transport {
+                LlmProvider::OpenAi => self.check_openai(&slot.api_key, &slot.base_url).await,
+                LlmProvider::Anthropic => self.check_anthropic(&slot.api_key, &slot.base_url).await,
+                LlmProvider::Ollama => self.check_ollama(&slot.base_url).await,
             };
 
-            results.push((provider.clone(), result.is_ok(), result.unwrap_or_else(|e| e.to_string())));
+            results.push((
+                slot.transport.clone(),
+                result.is_ok(),
+                result.unwrap_or_else(|e| format!("{}: {}", slot.label, e)),
+            ));
         }
 
         results
@@ -732,7 +857,7 @@ mod tests {
     fn test_client() -> LlmClient {
         LlmClient {
             http: Client::new(),
-            providers: Vec::new(),
+            providers: Vec::<ProviderSlot>::new(),
             retry_config: RetryConfig::default(),
             default_model: "test".to_string(),
             metrics: Arc::new(LlmMetrics::default()),
@@ -771,5 +896,28 @@ mod tests {
         let (fails, open_until) = client.breaker_state();
         assert_eq!(fails, 3);
         assert_eq!(open_until, 12345);
+    }
+
+    #[test]
+    fn test_llm_http_error_in_chain_for_retry_policy() {
+        let e = anyhow::Error::new(LlmHttpError {
+            status: 429,
+            body: "{\"error\":\"quota\"}".to_string(),
+        });
+        let he = root_http_err(&e).expect("root http");
+        assert!(he.is_client_error());
+        assert_eq!(he.status, 429);
+    }
+
+    #[test]
+    fn root_http_err_finds_llm_http_under_context() {
+        let inner = anyhow::Error::new(LlmHttpError {
+            status: 429,
+            body: "{}".into(),
+        });
+        let e: anyhow::Error = inner.context("outer wrap");
+        let he = root_http_err(&e).expect("nested");
+        assert!(he.is_client_error());
+        assert_eq!(he.status, 429);
     }
 }

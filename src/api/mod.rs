@@ -24,6 +24,7 @@ use crate::council::CouncilDecision;
 use crate::council::Proposal;
 use crate::federation::trust::TrustEdge;
 use crate::governance;
+use crate::harness::{ApprovalOutcome, ApprovalService, PendingApproval};
 use crate::hyper_stigmergy::{
     AddBeliefExtras, Belief, BeliefSource, HyperStigmergicMorphogenesis,
 };
@@ -216,6 +217,21 @@ pub struct GovernanceBundle {
     pub federation_operations: String,
 }
 
+#[derive(Deserialize)]
+pub struct ApprovalDecisionRequest {
+    pub key: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ApprovalDecisionResponse {
+    pub ok: bool,
+    pub key: String,
+    pub outcome: String,
+}
+
 #[derive(Serialize)]
 pub struct SkillSummary {
     pub id: String,
@@ -262,6 +278,8 @@ pub fn api_router(state: ApiState) -> Router {
         // Health
         .route("/api/health", get(health))
         .route("/api/governance", get(get_governance))
+        .route("/api/approvals/pending", get(list_pending_approvals))
+        .route("/api/approvals/decide", post(decide_approval))
         // Beliefs
         .route("/api/beliefs", get(list_beliefs).post(create_belief))
         .route(
@@ -303,6 +321,39 @@ async fn get_governance() -> Json<GovernanceBundle> {
         incident_playbook: governance::INCIDENT_PLAYBOOK.to_string(),
         federation_operations: governance::FEDERATION_OPERATIONS.to_string(),
     })
+}
+
+async fn list_pending_approvals() -> ApiResult<Vec<PendingApproval>> {
+    let svc = ApprovalService::from_env();
+    let pending = svc
+        .list_pending()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(pending))
+}
+
+async fn decide_approval(Json(req): Json<ApprovalDecisionRequest>) -> ApiResult<ApprovalDecisionResponse> {
+    let outcome = match req.outcome.to_ascii_lowercase().as_str() {
+        "allow" => ApprovalOutcome::Allow,
+        "deny" => ApprovalOutcome::Deny,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "outcome must be `allow` or `deny`".to_string(),
+            ))
+        }
+    };
+    let actor = req.actor.unwrap_or_else(|| "api".to_string());
+    let svc = ApprovalService::from_env();
+    svc.decide(&req.key, outcome.clone(), &actor)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(ApprovalDecisionResponse {
+        ok: true,
+        key: req.key,
+        outcome: match outcome {
+            ApprovalOutcome::Allow => "allow".to_string(),
+            ApprovalOutcome::Deny => "deny".to_string(),
+        },
+    }))
 }
 
 // ── Beliefs ────────────────────────────────────────────────────────────────

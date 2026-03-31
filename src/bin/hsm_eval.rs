@@ -11,12 +11,16 @@ use std::path::PathBuf;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use rusqlite::Connection;
+
 use hyper_stigmergy::eval::{
     self, append_runs_index, calibration_report, compare, default_runs_index, eval_tasks_for_suite,
-    filter_tasks, load_gold_labels, parse_weighted_suites, sync_index_line_to_sqlite, write_jsonl,
-    write_manifest, write_turn_metrics_jsonl, ArtifactPaths, BaselineRunner, ComparisonReport,
-    EvalTask, HsmRunner, RunManifest, RunnerMetrics, WeightedEvalSuite,
+    filter_tasks, ingest_json_file, load_gold_labels, parse_weighted_suites,
+    sync_index_line_to_sqlite, write_jsonl, write_manifest, write_turn_metrics_jsonl, ArtifactPaths,
+    BaselineRunner, BipartiteMemoryGraph, ComparisonReport, EvalTask, HsmRunner, HsmRunnerConfig,
+    RunManifest, RunnerMetrics, WeightedEvalSuite,
 };
+use hyper_stigmergy::eval::{init_memory_graph_sqlite_schema, upsert_memory_graph_sqlite};
 use hyper_stigmergy::llm::client::LlmClient;
 
 #[derive(Parser)]
@@ -26,8 +30,66 @@ struct Cli {
     #[arg(long)]
     tasks: Option<String>,
 
+    /// Keep only tasks whose `EvalTask.domain` equals this (e.g. `software_engineering`, `data_science`).
+    #[arg(long)]
+    task_domain: Option<String>,
+
     #[arg(long)]
     json: Option<PathBuf>,
+
+    /// Load HSM harness JSON (`HsmRunnerConfig`). CLI memory flags override fields after load.
+    #[arg(long)]
+    hsm_config: Option<PathBuf>,
+
+    /// Ablation: disable cross-session memory injection (beliefs still accumulate).
+    #[arg(long, default_value_t = false)]
+    hsm_no_memory: bool,
+
+    #[arg(long)]
+    hsm_context_top_k: Option<usize>,
+
+    #[arg(long)]
+    hsm_context_budget: Option<usize>,
+
+    #[arg(long)]
+    hsm_belief_threshold: Option<f64>,
+
+    #[arg(long)]
+    hsm_summary_threshold: Option<f64>,
+
+    /// Max lines for aggregate injected recall block (memdir `MEMORY.md` parity).
+    #[arg(long)]
+    hsm_memory_max_lines: Option<usize>,
+
+    /// Max bytes for that block (UTF-8).
+    #[arg(long)]
+    hsm_memory_max_bytes: Option<usize>,
+
+    /// Disable in-session snip / `<compact_boundary>` folding.
+    #[arg(long, default_value_t = false)]
+    hsm_no_session_compaction: bool,
+
+    #[arg(long)]
+    hsm_compaction_trigger_messages: Option<usize>,
+
+    #[arg(long)]
+    hsm_compaction_keep_tail: Option<usize>,
+
+    /// After HSM run, write bipartite entity–fact JSON (`<artifacts>/<suite>/memory_graph.json`, or `memory_graph_<suite>.json` without `--artifacts`).
+    #[arg(long, default_value_t = false)]
+    memory_graph: bool,
+
+    /// Upsert the same bipartite graph into SQLite (runs after eval; use with `--trace` to include `retrieval_turn` / `ranked_belief` facts). Relative paths resolve from cwd.
+    #[arg(long)]
+    memory_graph_sqlite: Option<PathBuf>,
+
+    /// Load `memory_graph.json` into a SQLite DB and exit (no LLM run). Use with `--memory-graph-json` and `--memory-graph-sqlite-out`.
+    #[arg(long)]
+    memory_graph_json: Option<PathBuf>,
+
+    /// Output DB path for `--memory-graph-json` ingest-only mode.
+    #[arg(long)]
+    memory_graph_sqlite_out: Option<PathBuf>,
 
     #[arg(long)]
     baseline_only: bool,
@@ -78,7 +140,62 @@ fn resolve_suites(cli: &Cli) -> anyhow::Result<Vec<WeightedEvalSuite>> {
             anyhow::bail!("suite {:?} empty after filters", s.name);
         }
     }
+    if let Some(ref dom) = cli.task_domain {
+        let dom = dom.trim();
+        if dom.is_empty() {
+            anyhow::bail!("--task-domain must not be empty");
+        }
+        for s in &mut out {
+            s.tasks.retain(|t| t.domain == dom);
+            if s.tasks.is_empty() {
+                anyhow::bail!("suite {:?} empty after --task-domain {:?}", s.name, dom);
+            }
+        }
+    }
     Ok(out)
+}
+
+fn hsm_runner_config(cli: &Cli) -> anyhow::Result<HsmRunnerConfig> {
+    let mut cfg = if let Some(ref path) = cli.hsm_config {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("read {}: {}", path.display(), e))?;
+        serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("parse HSM config {}: {}", path.display(), e)
+        })?
+    } else {
+        HsmRunnerConfig::default()
+    };
+    if cli.hsm_no_memory {
+        cfg.inject_memory_context = false;
+    }
+    if let Some(k) = cli.hsm_context_top_k {
+        cfg.context_top_k = k;
+    }
+    if let Some(b) = cli.hsm_context_budget {
+        cfg.context_char_budget = b;
+    }
+    if let Some(t) = cli.hsm_belief_threshold {
+        cfg.context_score_threshold = t;
+    }
+    if let Some(t) = cli.hsm_summary_threshold {
+        cfg.summary_score_threshold = t;
+    }
+    if let Some(n) = cli.hsm_memory_max_lines {
+        cfg.memory_entrypoint_max_lines = n;
+    }
+    if let Some(n) = cli.hsm_memory_max_bytes {
+        cfg.memory_entrypoint_max_bytes = n;
+    }
+    if cli.hsm_no_session_compaction {
+        cfg.session_compaction_enabled = false;
+    }
+    if let Some(n) = cli.hsm_compaction_trigger_messages {
+        cfg.session_compaction_trigger_messages = n;
+    }
+    if let Some(n) = cli.hsm_compaction_keep_tail {
+        cfg.session_compaction_keep_tail_messages = n;
+    }
+    Ok(cfg)
 }
 
 #[tokio::main]
@@ -92,6 +209,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if let Some(ref json_path) = cli.memory_graph_json {
+        let db_out = cli.memory_graph_sqlite_out.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("--memory-graph-sqlite-out is required with --memory-graph-json")
+        })?;
+        ingest_json_file(db_out, json_path)?;
+        println!(
+            "Ingested {} → {}",
+            json_path.display(),
+            db_out.display()
+        );
+        return Ok(());
+    }
+
+    let hsm_cfg = hsm_runner_config(&cli)?;
     let suites = resolve_suites(&cli)?;
 
     let suite_names: Vec<String> = suites.iter().map(|s| s.name.clone()).collect();
@@ -142,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
 
         let baseline_metrics = if !cli.hsm_only {
             println!("  Baseline…");
-            let runner = BaselineRunner::new(LlmClient::new()?);
+            let mut runner = BaselineRunner::new(LlmClient::new()?);
             let m = runner.run(&ws.tasks).await;
             println!(
                 "    {} turns | {:.1}% kw | {} tokens",
@@ -157,12 +289,46 @@ async fn main() -> anyhow::Result<()> {
 
         let hsm_metrics = if !cli.baseline_only {
             println!("  HSM-II…");
-            let mut runner = HsmRunner::new(LlmClient::new()?);
+            let mut runner = HsmRunner::with_config(LlmClient::new()?, hsm_cfg.clone());
             if cli.trace {
                 runner.set_collect_traces(true);
             }
             let m = runner.run(&ws.tasks).await;
-            let traces = if cli.trace { runner.take_traces() } else { vec![] };
+            let traces = if cli.trace {
+                runner.take_traces()
+            } else {
+                vec![]
+            };
+
+            let write_graph = cli.memory_graph || cli.memory_graph_sqlite.is_some();
+            if write_graph {
+                let mut graph =
+                    BipartiteMemoryGraph::project_from_snapshot(&runner.export_memory_snapshot());
+                if !traces.is_empty() {
+                    graph.append_traces(&traces);
+                }
+                if cli.memory_graph {
+                    let path = if let Some(ref root) = art_dir {
+                        root.join(&ws.name).join("memory_graph.json")
+                    } else {
+                        PathBuf::from(format!("memory_graph_{}.json", ws.name))
+                    };
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, serde_json::to_string_pretty(&graph)?)?;
+                    eprintln!("    wrote bipartite memory graph → {}", path.display());
+                }
+                if let Some(ref dbpath) = cli.memory_graph_sqlite {
+                    let mut conn = Connection::open(dbpath)?;
+                    init_memory_graph_sqlite_schema(&conn)?;
+                    upsert_memory_graph_sqlite(&mut conn, &graph)?;
+                    eprintln!(
+                        "    upserted bipartite memory graph (SQLite) → {}",
+                        dbpath.display()
+                    );
+                }
+            }
             println!(
                 "    {} turns | {:.1}% kw | {} tokens",
                 m.turns.len(),

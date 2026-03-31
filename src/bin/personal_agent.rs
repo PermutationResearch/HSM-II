@@ -10,6 +10,7 @@ use tracing::{error, info};
 
 use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent};
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
+use hyper_stigmergy::{ApprovalOutcome, ApprovalService};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -1368,6 +1369,9 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands"),
     ("/model", "Show or switch LLM model"),
     ("/model list", "List all available models"),
+    ("/approve list", "List pending tool approvals"),
+    ("/approve allow <key>", "Approve a pending tool key"),
+    ("/approve deny <key>", "Deny a pending tool key"),
     ("/clear", "Clear conversation history"),
     ("/exit", "Exit the TUI"),
 ];
@@ -1389,6 +1393,9 @@ async fn handle_slash_command(cmd: &str, state: &mut CodexState) {
 | /model | Show current model info |
 | /model list | List all available models |
 | /model <name> | Switch to a different model |
+| /approve list | Show pending approvals |
+| /approve allow <key> | Approve an action key |
+| /approve deny <key> | Deny an action key |
 | /clear | Clear conversation history |
 | /exit | Exit the TUI |
 
@@ -1463,6 +1470,44 @@ async fn handle_slash_command(cmd: &str, state: &mut CodexState) {
         "/clear" => {
             state.messages.clear();
             state.push_message("system", "🗑️ Conversation cleared.");
+        }
+
+        "/approve" => {
+            let svc = ApprovalService::from_env();
+            match subcommand {
+                "list" | "" => match svc.list_pending() {
+                    Ok(items) if items.is_empty() => {
+                        state.push_message("system", "No pending approvals.");
+                    }
+                    Ok(items) => {
+                        let mut out = String::from("## Pending Approvals\n\n");
+                        for p in items {
+                            out.push_str(&format!("- `{}`\n  - {}\n", p.key, p.summary));
+                        }
+                        state.push_message("system", &out);
+                    }
+                    Err(e) => state.push_message("system", &format!("Approval error: {}", e)),
+                },
+                "allow" | "deny" => {
+                    let key = parts.get(2).copied().unwrap_or_default();
+                    if key.is_empty() {
+                        state.push_message("system", "Usage: /approve allow|deny <key>");
+                    } else {
+                        let outcome = if subcommand == "allow" {
+                            ApprovalOutcome::Allow
+                        } else {
+                            ApprovalOutcome::Deny
+                        };
+                        match svc.decide(key, outcome, "tui_user") {
+                            Ok(()) => {
+                                state.push_message("system", &format!("Recorded decision for `{}`.", key))
+                            }
+                            Err(e) => state.push_message("system", &format!("Approval error: {}", e)),
+                        }
+                    }
+                }
+                _ => state.push_message("system", "Usage: /approve list | /approve allow <key> | /approve deny <key>"),
+            }
         }
 
         "/exit" => {

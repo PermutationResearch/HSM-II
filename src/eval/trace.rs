@@ -24,6 +24,12 @@ pub struct HsmTurnTrace {
     pub session_summaries_injected: Vec<u32>,
     pub injected_char_len: usize,
     pub injected_preview: String,
+    /// True when in-session history was folded via snip-style compaction this turn.
+    #[serde(default)]
+    pub session_compaction_applied: bool,
+    /// Messages in the active session buffer after compaction (before the current user turn is appended for the call).
+    #[serde(default)]
+    pub session_history_len: usize,
 }
 
 /// Result of context ranking: text injected into the prompt plus trace metadata.

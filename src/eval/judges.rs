@@ -45,6 +45,8 @@ pub struct RubricExtras {
     pub tool_pass: Option<bool>,
     pub llm_judge_pass: Option<bool>,
     pub llm_judge_notes: Option<String>,
+    /// Penalize overlong/off-topic responses even when keyword match is high.
+    pub concision_relevance_score: f64,
     pub judge_prompt_tokens: usize,
     pub judge_completion_tokens: usize,
     pub judge_llm_calls: u32,
@@ -58,6 +60,8 @@ pub fn evaluate_turn_rubric(
 ) -> RubricExtras {
     let kw_thr = deterministic_keyword_threshold();
     let deterministic_pass = keyword_score >= kw_thr;
+    let concision_relevance_score =
+        concision_relevance_score(&turn.user, response, keyword_score);
 
     let (grounding_applicable, grounding_score, grounding_pass) =
         grounding_metrics(turn.requires_recall, injected_memory_context, response);
@@ -71,8 +75,27 @@ pub fn evaluate_turn_rubric(
         grounding_pass,
         tool_check_applicable,
         tool_pass,
+        concision_relevance_score,
         ..Default::default()
     }
+}
+
+fn concision_relevance_score(user_prompt: &str, response: &str, keyword_score: f64) -> f64 {
+    let resp_len = response.chars().count();
+    let user_len = user_prompt.chars().count().max(1);
+    let ratio = resp_len as f64 / user_len as f64;
+
+    // Strong penalties only when responses are both long and weakly aligned.
+    if resp_len > 2600 && ratio > 16.0 && keyword_score < 0.45 {
+        return 0.15;
+    }
+    if resp_len > 1800 && ratio > 12.0 && keyword_score < 0.60 {
+        return 0.35;
+    }
+    if resp_len > 1200 && ratio > 8.0 && keyword_score < 0.70 {
+        return 0.60;
+    }
+    1.0
 }
 
 pub fn rubric_turn_pass(extras: &RubricExtras) -> bool {

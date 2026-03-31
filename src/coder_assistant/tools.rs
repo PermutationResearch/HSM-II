@@ -6,6 +6,7 @@ use super::schemas::{ToolProviderKind, ToolProviderMetadata, ToolProviderRuntime
 use super::*;
 use crate::agent::Role;
 use crate::council::CouncilMember;
+use crate::harness::{ApprovalOutcome, ApprovalService};
 use crate::ouroboros_compat::phase1_policy::{
     ConstitutionConfig, PolicyContext, PolicyDecision, PolicyEngine, ReleaseState,
 };
@@ -85,10 +86,20 @@ impl Default for SecretBoundary {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkBoundary {
     pub allowed_hosts: Vec<String>,
     pub block_network_for_bash: bool,
+}
+
+impl Default for NetworkBoundary {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            // Safety baseline: deny network by default unless explicitly enabled.
+            block_network_for_bash: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -213,7 +224,7 @@ impl ToolExecutor {
                 started_at,
                 false,
                 true,
-                err.to_string(),
+                format!("blocked(policy): {}", err),
                 None,
                 false,
                 Vec::new(),
@@ -229,7 +240,23 @@ impl ToolExecutor {
                 started_at,
                 false,
                 true,
-                err.to_string(),
+                format!("blocked(policy): {}", err),
+                None,
+                false,
+                Vec::new(),
+                None,
+            );
+            return Err(err);
+        }
+
+        if let Err(err) = self.enforce_human_approval(tool_name, args, provider) {
+            self.record_audit(
+                tool_name,
+                args,
+                started_at,
+                false,
+                true,
+                format!("blocked(approval): {}", err),
                 None,
                 false,
                 Vec::new(),
@@ -274,7 +301,7 @@ impl ToolExecutor {
                         started_at,
                         false,
                         true,
-                        err.to_string(),
+                        format!("blocked(policy): {}", err),
                         None,
                         false,
                         Vec::new(),
@@ -290,7 +317,7 @@ impl ToolExecutor {
                     started_at,
                     false,
                     matches!(err, ToolError::SecurityViolation(_)),
-                    err.to_string(),
+                    format!("blocked(policy): {}", err),
                     None,
                     false,
                     Vec::new(),
@@ -298,6 +325,38 @@ impl ToolExecutor {
                 );
                 Err(err)
             }
+        }
+    }
+
+    fn enforce_human_approval(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        provider: Option<&ToolProviderMetadata>,
+    ) -> Result<(), ToolError> {
+        let high_risk_local = matches!(tool_name, "bash" | "write" | "edit");
+        let external_provider = provider.is_some_and(|p| p.kind != ToolProviderKind::Builtin);
+        if !(high_risk_local || external_provider) {
+            return Ok(());
+        }
+        let provider_id = provider
+            .map(|p| p.id.as_str())
+            .unwrap_or("builtin");
+        let key = format!("tool:{}@{}", tool_name, provider_id);
+        let summary = format!(
+            "tool={} provider={} args={}",
+            tool_name,
+            provider_id,
+            Self::preview(&args.to_string())
+        );
+        let svc = ApprovalService::from_env();
+        match svc.evaluate_or_queue(&key, &summary) {
+            Ok(ApprovalOutcome::Allow) => Ok(()),
+            Ok(ApprovalOutcome::Deny) => Err(ToolError::SecurityViolation(format!(
+                "approval denied for {}",
+                key
+            ))),
+            Err(e) => Err(ToolError::SecurityViolation(e.to_string())),
         }
     }
 
@@ -1709,6 +1768,7 @@ mod tests {
     #[tokio::test]
     async fn blocks_non_allowlisted_network_hosts() {
         let mut context = ToolContext::default();
+        context.execution_policy.network_boundary.block_network_for_bash = false;
         context.execution_policy.network_boundary.allowed_hosts = vec!["api.example.com".into()];
         let executor = ToolExecutor::with_context(context);
 
@@ -1729,6 +1789,7 @@ mod tests {
     #[tokio::test]
     async fn bash_receives_only_injected_environment_variables() {
         let mut context = ToolContext::default();
+        context.execution_policy.network_boundary.block_network_for_bash = false;
         context
             .env_vars
             .insert("API_TOKEN".into(), "super-secret-value".into());
@@ -1806,7 +1867,10 @@ mod tests {
             .cloned()
             .expect("provider should exist");
 
-        let executor = ToolExecutor::new();
+        let mut context = ToolContext::default();
+        context.execution_policy.network_boundary.block_network_for_bash = false;
+        context.execution_policy.network_boundary.allowed_hosts = vec!["127.0.0.1".into()];
+        let executor = ToolExecutor::with_context(context);
         let output = executor
             .execute_with_provider(
                 Some(&provider),

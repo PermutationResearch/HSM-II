@@ -13,6 +13,8 @@ Essential guides for running and using HSM-II:
 | [DEPLOYMENT.md](guides/DEPLOYMENT.md) | 🐳 Production deployment with Docker |
 | [COMMANDS_GUIDE.md](guides/COMMANDS_GUIDE.md) | ⌨️ CLI commands and usage reference |
 | [PERSONAL_AGENT_README.md](guides/PERSONAL_AGENT_README.md) | 🤖 Personal AI companion setup |
+| [A2A_MESSAGE_CONTRACTS.md](guides/A2A_MESSAGE_CONTRACTS.md) | 🔌 JSON-RPC contracts for CEO/PM + engineer orchestration |
+| [HARNESS_V1_PLAN.md](guides/HARNESS_V1_PLAN.md) | 🧱 Incremental file-by-file harness hardening plan |
 | [REPL.md](guides/REPL.md) | 💻 Interactive REPL usage |
 
 ### [architecture/](architecture/) — System Design & Architecture
@@ -33,6 +35,8 @@ Detailed technical documentation:
 | [TOOLS_SUITE.md](references/TOOLS_SUITE.md) | 🛠️ Complete tool suite documentation (57 tools) |
 | [RUST_TOOLS.md](references/RUST_TOOLS.md) | ⚙️ Rust development tools and utilities |
 | [METRICS_README.md](references/METRICS_README.md) | 📈 Observability and metrics reference |
+| [a2a_schemas/README.md](references/a2a_schemas/README.md) | 🧩 JSON Schema contracts for inter-agent JSON-RPC |
+| [CLAUDE_PROMPT_CATALOG.md](references/CLAUDE_PROMPT_CATALOG.md) | 🗂️ Mapping of extracted prompt modules to numbered catalog concepts |
 | [EXPERIMENTS.md](references/EXPERIMENTS.md) | 🧪 Experimental features and protocols |
 | [INVESTIGATION_SYSTEM.md](references/INVESTIGATION_SYSTEM.md) | 🔍 Investigation and debugging tools |
 
