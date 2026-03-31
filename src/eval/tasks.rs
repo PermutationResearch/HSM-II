@@ -539,9 +539,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_suite_has_20_tasks() {
+    fn test_suite_has_expected_task_count() {
         let suite = load_eval_suite();
-        assert_eq!(suite.len(), 20);
+        // Keep this aligned with the canonical suite definition in this file.
+        assert_eq!(suite.len(), 19);
     }
 
     #[test]

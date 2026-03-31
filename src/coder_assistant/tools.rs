@@ -987,6 +987,8 @@ impl ToolExecutor {
     ) -> Result<std::process::Output, ToolError> {
         let mut process = tokio::process::Command::new("/bin/bash");
         process
+            .arg("--noprofile")
+            .arg("--norc")
             .arg("-c")
             .arg(command)
             .current_dir(&self.context.cwd);
@@ -1011,6 +1013,8 @@ impl ToolExecutor {
             .arg("-p")
             .arg(profile)
             .arg("/bin/bash")
+            .arg("--noprofile")
+            .arg("--norc")
             .arg("-c")
             .arg(command)
             .current_dir(&self.context.cwd);

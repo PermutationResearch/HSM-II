@@ -1015,28 +1015,28 @@ mod tests {
 
         // Verify tables exist by inserting into each one.
         db.conn
-            .execute("SELECT count(*) FROM beliefs", [])
+            .query_row("SELECT count(*) FROM beliefs", [], |_r| Ok(()))
             .expect("beliefs table should exist");
         db.conn
-            .execute("SELECT count(*) FROM skills", [])
+            .query_row("SELECT count(*) FROM skills", [], |_r| Ok(()))
             .expect("skills table should exist");
         db.conn
-            .execute("SELECT count(*) FROM experiences", [])
+            .query_row("SELECT count(*) FROM experiences", [], |_r| Ok(()))
             .expect("experiences table should exist");
         db.conn
-            .execute("SELECT count(*) FROM predictions", [])
+            .query_row("SELECT count(*) FROM predictions", [], |_r| Ok(()))
             .expect("predictions table should exist");
         db.conn
-            .execute("SELECT count(*) FROM council_decisions", [])
+            .query_row("SELECT count(*) FROM council_decisions", [], |_r| Ok(()))
             .expect("council_decisions table should exist");
         db.conn
-            .execute("SELECT count(*) FROM trust_edges", [])
+            .query_row("SELECT count(*) FROM trust_edges", [], |_r| Ok(()))
             .expect("trust_edges table should exist");
         db.conn
-            .execute("SELECT count(*) FROM context_snapshots", [])
+            .query_row("SELECT count(*) FROM context_snapshots", [], |_r| Ok(()))
             .expect("context_snapshots table should exist");
         db.conn
-            .execute("SELECT count(*) FROM world_snapshots", [])
+            .query_row("SELECT count(*) FROM world_snapshots", [], |_r| Ok(()))
             .expect("world_snapshots table should exist");
     }
 
