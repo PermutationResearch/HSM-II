@@ -1,0 +1,16 @@
+{
+  "benchmarks": [
+    {
+      "name": "smoke_json_pass",
+      "command": ["echo", "{\"pass\": true, \"score\": 1.0}"],
+      "cwd": null,
+      "timeout_sec": 60
+    },
+    {
+      "name": "smoke_exit_zero",
+      "command": ["true"],
+      "cwd": null,
+      "timeout_sec": 60
+    }
+  ]
+}

@@ -10,6 +10,8 @@ pub mod database;
 pub mod disk_backed_vector_index;
 pub mod dspy;
 pub mod dspy_session;
+pub mod gepa;
+pub mod trace2skill;
 pub mod embedded_graph_store;
 pub mod embedding_index;
 pub mod experiment;
@@ -178,6 +180,12 @@ pub use rlm_v2::{
     Trajectory, TrajectoryStore, TrajectoryViewer, IterationSnapshot, RlmToolCall,
 };
 pub use skill::{ApplicabilityCondition, Skill, SkillBank, SkillLevel, SkillSource};
+pub use trace2skill::{
+    append_jsonl, heuristic_lesson, import_eval_artifacts_to_jsonl, infer_turn_route, load_merged,
+    merge_pool, outcome_from_turn, read_jsonl, redact_params, save_merged, summarize_tool_output,
+    task_map_for_artifacts, trajectory_from_eval_turn, MergedTraceSkill, ToolStepRecord,
+    TrajectoryOutcome, TrajectoryRecord,
+};
 pub use social_memory::{
     AgentReputation, CapabilityEvidence, CollaborationStats, DataSensitivity, DelegationCandidate,
     DelegationScoreComponents, PromiseRecord, PromiseStatus, SharePolicy, SocialMemory,
@@ -297,9 +305,9 @@ pub use persistence::LadybugDb;
 
 pub use disk_backed_vector_index::DiskBackedVectorIndex;
 pub use dspy::{
-    bootstrap_demonstrations, optimize_all_signatures, optimize_signature, persist_trace,
-    run_signature, run_signature_traced, Demonstration, DspyContext, DspySignature,
-    OptimizationResult, ResolvedSignature, SignatureStore, TraceResult,
+    bootstrap_demonstrations, infer_failure_metadata, optimize_all_signatures, optimize_signature,
+    persist_trace, run_signature, run_signature_traced, Demonstration, DspyContext, DspyMutationStyle,
+    DspySignature, OptimizationResult, ResolvedSignature, SignatureStore, TraceResult,
 };
 pub use dspy_session::{
     DspySession, DspySessionAdapter, OptimizationExample, SessionConfig, SessionSnapshot,

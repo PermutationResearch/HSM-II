@@ -101,6 +101,61 @@ pub fn morph_from_snapshot(
 }
 
 impl EmbeddedGraphStore {
+    /// Read and deserialize the embedded snapshot (bincode primary path).
+    /// Used by [`Self::load_world`] and [`Self::load_skill_bank`].
+    pub fn read_embedded_snapshot() -> anyhow::Result<EmbeddedGraphStoreSnapshot> {
+        let bytes = match fs::read(EMBEDDED_GRAPH_STORE_FILE) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
+                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
+                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
+                    wal_bytes
+                } else {
+                    return Err(err.into());
+                }
+            }
+        };
+        match bincode::deserialize::<EmbeddedGraphStoreSnapshot>(&bytes) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(main_err) => {
+                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
+                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
+                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
+                    bincode::deserialize(&wal_bytes).map_err(|e| e.into())
+                } else {
+                    Err(main_err.into())
+                }
+            }
+        }
+    }
+
+    /// Load only the skill bank from the on-disk embedded store.
+    /// Uses the same resolution order as [`load_world`] (Ladybug primary when enabled, else bincode).
+    /// Pair with `HSM_SKILL_BANK_RELOAD_SECS` on the personal agent to pick up `hsm_trace2skill apply`
+    /// without a full process restart.
+    pub fn load_skill_bank() -> anyhow::Result<crate::skill::SkillBank> {
+        #[cfg(feature = "lbug")]
+        {
+            if crate::persistence::lbug_world_store::primary_enabled() {
+                if let Some(ref pb) = crate::persistence::lbug_world_store::primary_path() {
+                    if pb.exists() {
+                        match crate::persistence::lbug_world_store::load_world_primary(pb) {
+                            Ok(snap) => return Ok(snap.metadata.skill_bank.clone()),
+                            Err(e) => tracing::warn!(
+                                target: "hsm",
+                                "Ladybug primary load failed ({}); falling back to bincode for skill_bank",
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        let snapshot = Self::read_embedded_snapshot()?;
+        Ok(snapshot.metadata.skill_bank.clone())
+    }
+
     pub fn save_world(
         world: &HyperStigmergicMorphogenesis,
         rlm_state: Option<&crate::rlm::RLMState>,
@@ -176,31 +231,7 @@ impl EmbeddedGraphStore {
             }
         }
 
-        let bytes = match fs::read(EMBEDDED_GRAPH_STORE_FILE) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
-                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
-                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
-                    wal_bytes
-                } else {
-                    return Err(err.into());
-                }
-            }
-        };
-        let snapshot: EmbeddedGraphStoreSnapshot = match bincode::deserialize(&bytes) {
-            Ok(snapshot) => snapshot,
-            Err(main_err) => {
-                if Path::new(EMBEDDED_GRAPH_WAL_FILE).exists() {
-                    let wal_bytes = fs::read(EMBEDDED_GRAPH_WAL_FILE)?;
-                    fs::write(EMBEDDED_GRAPH_STORE_FILE, &wal_bytes)?;
-                    bincode::deserialize(&wal_bytes)?
-                } else {
-                    return Err(main_err.into());
-                }
-            }
-        };
-
+        let snapshot = Self::read_embedded_snapshot()?;
         Ok(morph_from_snapshot(snapshot))
     }
 

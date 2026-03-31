@@ -417,6 +417,9 @@ impl RooDb {
                 model            VARCHAR(64),
                 latency_ms       INT NOT NULL DEFAULT 0,
                 created_at       BIGINT NOT NULL,
+                failure_code     VARCHAR(64) NULL,
+                failure_detail   TEXT NULL,
+                signals_json     TEXT NULL,
                 INDEX idx_sig_score (signature_name, score),
                 INDEX idx_created (created_at)
             )",
@@ -515,6 +518,29 @@ impl RooDb {
         )
         .await?;
 
+        drop(conn);
+        self.upgrade_dspy_gepa_columns().await?;
+
+        Ok(())
+    }
+
+    /// Add GEPA / failure-analysis columns to `dspy_traces` (idempotent for existing DBs).
+    async fn upgrade_dspy_gepa_columns(&self) -> anyhow::Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        let alters = [
+            "ALTER TABLE dspy_traces ADD COLUMN failure_code VARCHAR(64) NULL",
+            "ALTER TABLE dspy_traces ADD COLUMN failure_detail TEXT NULL",
+            "ALTER TABLE dspy_traces ADD COLUMN signals_json TEXT NULL",
+        ];
+        for sql in alters {
+            if let Err(e) = conn.query_drop(sql).await {
+                let msg = e.to_string();
+                if msg.contains("1060") || msg.contains("Duplicate column") {
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
@@ -1583,20 +1609,26 @@ impl RooDb {
         conn.exec_drop(
             "INSERT INTO dspy_traces \
              (signature_name, input_question, input_context_hash, output, score, \
-              semantic_ok, repair_count, model, latency_ms, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                &row.signature_name,
-                &row.input_question,
-                &row.input_context_hash,
-                &row.output,
-                row.score,
-                row.semantic_ok,
-                row.repair_count,
-                &row.model,
-                row.latency_ms,
-                row.created_at,
-            ),
+              semantic_ok, repair_count, model, latency_ms, created_at, \
+              failure_code, failure_detail, signals_json) \
+             VALUES (:signature_name, :input_question, :input_context_hash, :output, :score, \
+              :semantic_ok, :repair_count, :model, :latency_ms, :created_at, \
+              :failure_code, :failure_detail, :signals_json)",
+            mysql_async::params! {
+                "signature_name" => &row.signature_name,
+                "input_question" => &row.input_question,
+                "input_context_hash" => &row.input_context_hash,
+                "output" => &row.output,
+                "score" => row.score,
+                "semantic_ok" => row.semantic_ok,
+                "repair_count" => row.repair_count,
+                "model" => &row.model,
+                "latency_ms" => row.latency_ms,
+                "created_at" => row.created_at,
+                "failure_code" => &row.failure_code,
+                "failure_detail" => &row.failure_detail,
+                "signals_json" => &row.signals_json,
+            },
         )
         .await?;
         let id: i64 = conn
@@ -1617,7 +1649,10 @@ impl RooDb {
         let rows: Vec<mysql_async::Row> = conn
             .exec(
                 "SELECT id, signature_name, input_question, input_context_hash, output, \
-             score, semantic_ok, repair_count, model, latency_ms, created_at \
+             score, semantic_ok, repair_count, model, latency_ms, created_at, \
+             IFNULL(failure_code, '') AS failure_code, \
+             IFNULL(failure_detail, '') AS failure_detail, \
+             IFNULL(signals_json, '') AS signals_json \
              FROM dspy_traces \
              WHERE signature_name = ? AND score >= ? \
              ORDER BY score DESC LIMIT ?",
@@ -1638,6 +1673,52 @@ impl RooDb {
                 model: r.get("model").unwrap_or_default(),
                 latency_ms: r.get("latency_ms").unwrap_or(0),
                 created_at: r.get("created_at").unwrap_or(0),
+                failure_code: r.get("failure_code").unwrap_or_default(),
+                failure_detail: r.get("failure_detail").unwrap_or_default(),
+                signals_json: r.get("signals_json").unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Traces at or below `max_score` (failure band) for GEPA collect / diagnosis.
+    pub async fn fetch_dspy_traces_low_scoring(
+        &self,
+        signature_name: &str,
+        max_score: f64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<DspyTraceRow>> {
+        let mut conn = self.pool.get_conn().await?;
+        let rows: Vec<mysql_async::Row> = conn
+            .exec(
+                "SELECT id, signature_name, input_question, input_context_hash, output, \
+             score, semantic_ok, repair_count, model, latency_ms, created_at, \
+             IFNULL(failure_code, '') AS failure_code, \
+             IFNULL(failure_detail, '') AS failure_detail, \
+             IFNULL(signals_json, '') AS signals_json \
+             FROM dspy_traces \
+             WHERE signature_name = ? AND score <= ? \
+             ORDER BY score ASC, created_at DESC LIMIT ?",
+                (signature_name, max_score, limit as u32),
+            )
+            .await?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(DspyTraceRow {
+                id: r.get("id").unwrap_or(0),
+                signature_name: r.get("signature_name").unwrap_or_default(),
+                input_question: r.get("input_question").unwrap_or_default(),
+                input_context_hash: r.get("input_context_hash").unwrap_or_default(),
+                output: r.get("output").unwrap_or_default(),
+                score: r.get("score").unwrap_or(0.0),
+                semantic_ok: r.get("semantic_ok").unwrap_or(false),
+                repair_count: r.get("repair_count").unwrap_or(0),
+                model: r.get("model").unwrap_or_default(),
+                latency_ms: r.get("latency_ms").unwrap_or(0),
+                created_at: r.get("created_at").unwrap_or(0),
+                failure_code: r.get("failure_code").unwrap_or_default(),
+                failure_detail: r.get("failure_detail").unwrap_or_default(),
+                signals_json: r.get("signals_json").unwrap_or_default(),
             });
         }
         Ok(out)
@@ -2127,6 +2208,12 @@ pub struct DspyTraceRow {
     pub model: String,
     pub latency_ms: i32,
     pub created_at: u64,
+    /// Short slug from heuristic or manual tagging (e.g. `format`, `empty_output`).
+    pub failure_code: String,
+    /// One-line “why this failed” for GEPA clustering (local-only; may be redacted in bundles).
+    pub failure_detail: String,
+    /// JSON blob with numeric signals (score, repairs, lens, etc.).
+    pub signals_json: String,
 }
 
 /// A curated demonstration (few-shot example) for a signature.

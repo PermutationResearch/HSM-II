@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub mod enhanced_agent;
 pub mod integrated_agent;
+pub mod prompt_defaults;
 pub mod gateway;
 pub mod heartbeat;
 pub mod hypergraph_client;

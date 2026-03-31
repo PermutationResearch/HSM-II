@@ -109,6 +109,10 @@ pub struct TraceResult {
     pub input_question: String,
     pub input_context_hash: String,
     pub model: String,
+    /// Optional GEPA fields; [`persist_trace`] fills from [`infer_failure_metadata`] when absent.
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+    pub signals_json: Option<String>,
 }
 
 // ─── Stage 2: Signature Store (in-memory cache of optimized configs) ───
@@ -399,6 +403,9 @@ pub async fn run_signature_traced(
                 input_question: ctx.question.to_string(),
                 input_context_hash: context_hash,
                 model: model.to_string(),
+                failure_code: None,
+                failure_detail: None,
+                signals_json: None,
             };
             Ok(trace)
         }
@@ -419,6 +426,72 @@ pub async fn run_signature(
     Ok(trace.output)
 }
 
+/// Heuristic “why did this fail?” metadata for GEPA collect / clustering (local only).
+pub fn infer_failure_metadata(
+    score: f64,
+    semantic_ok: bool,
+    repair_count: i32,
+    output: &str,
+) -> (String, String, String) {
+    let signals = serde_json::json!({
+        "score": score,
+        "semantic_ok": semantic_ok,
+        "repair_count": repair_count,
+        "output_len": output.len(),
+    });
+    let sj = signals.to_string();
+
+    if score >= 0.65 && semantic_ok {
+        return (String::new(), String::new(), sj);
+    }
+
+    let out = output.trim();
+    if out.is_empty() {
+        return (
+            "empty_output".into(),
+            "Model returned empty text".into(),
+            sj,
+        );
+    }
+    if output.contains("[truncated]") {
+        return (
+            "truncation".into(),
+            "Output hit max length truncation".into(),
+            sj,
+        );
+    }
+    if repair_count > 0 {
+        return (
+            "repair_loop".into(),
+            format!("Needed {} semantic repair pass(es)", repair_count),
+            sj,
+        );
+    }
+    if !semantic_ok {
+        let lower = output.to_lowercase();
+        if lower.contains("claim:") && !lower.contains("evidence") {
+            return (
+                "claim_evidence".into(),
+                "Claim present but evidence section weak or missing".into(),
+                sj,
+            );
+        }
+        return ("semantic_fail".into(), "Semantic check failed".into(), sj);
+    }
+    if score < 0.55 {
+        return (
+            "low_score".into(),
+            format!("Low score {:.2}", score),
+            sj,
+        );
+    }
+    (
+        "low_score".into(),
+        format!("score {:.2}, semantic_ok={}", score, semantic_ok),
+        sj,
+    )
+}
+
 /// Persist a trace result to RooDB (fire-and-forget from caller).
 pub async fn persist_trace(db: &RooDb, trace: &TraceResult) {
     let now = std::time::SystemTime::now()
@@ -426,8 +499,30 @@ pub async fn persist_trace(db: &RooDb, trace: &TraceResult) {
         .unwrap_or_default()
         .as_secs();
 
+    let (mut fc, mut fd, mut sj) = infer_failure_metadata(
+        trace.score,
+        trace.semantic_ok,
+        trace.repair_count,
+        &trace.output,
+    );
+    if let Some(ref c) = trace.failure_code {
+        if !c.trim().is_empty() {
+            fc = c.clone();
+        }
+    }
+    if let Some(ref d) = trace.failure_detail {
+        if !d.trim().is_empty() {
+            fd = d.clone();
+        }
+    }
+    if let Some(ref s) = trace.signals_json {
+        if !s.trim().is_empty() {
+            sj = s.clone();
+        }
+    }
+
     let row = DspyTraceRow {
-        id: 0, // auto-increment
+        id: 0,
         signature_name: trace.signature_name.clone(),
         input_question: trace.input_question.clone(),
         input_context_hash: trace.input_context_hash.clone(),
@@ -438,6 +533,9 @@ pub async fn persist_trace(db: &RooDb, trace: &TraceResult) {
         model: trace.model.clone(),
         latency_ms: trace.latency_ms,
         created_at: now,
+        failure_code: fc,
+        failure_detail: fd,
+        signals_json: sj,
     };
 
     let _ = db.insert_dspy_trace(&row).await;
@@ -564,7 +662,7 @@ pub struct OptimizationResult {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum DspyMutationStyle {
+pub enum DspyMutationStyle {
     DemoSubset,
     DemoReorder,
     SystemRephrase,
@@ -584,6 +682,19 @@ impl DspyMutationStyle {
             _ => Self::LateInteraction,
         }
     }
+
+    /// Names must match [`crate::gepa::mutation_style_names_from_bundle`] output.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim() {
+            "DemoSubset" => Some(Self::DemoSubset),
+            "DemoReorder" => Some(Self::DemoReorder),
+            "SystemRephrase" => Some(Self::SystemRephrase),
+            "NotebookFirst" => Some(Self::NotebookFirst),
+            "XmlConverged" => Some(Self::XmlConverged),
+            "LateInteraction" => Some(Self::LateInteraction),
+            _ => None,
+        }
+    }
 }
 
 /// Run the optimizer for a single signature.
@@ -593,12 +704,16 @@ impl DspyMutationStyle {
 /// 3. Tries demo subset mutations
 /// 4. Tries instruction rephrasing via LLM
 /// 5. Persists winning config
+///
+/// When `gepa_mutation_names` is set (from [`crate::gepa::collect_bundle`] / bundle JSON),
+/// mutation order follows failure clusters first instead of a flat `trial % 6` rotation.
 pub async fn optimize_signature(
     ollama: &Ollama,
     model: &str,
     db: &RooDb,
     sig: &DspySignature,
     max_trials: usize,
+    gepa_mutation_names: Option<Vec<String>>,
 ) -> anyhow::Result<OptimizationResult> {
     let sig_name = sig.name;
 
@@ -679,11 +794,24 @@ pub async fn optimize_signature(
     let mut best_demo_ids = current_demo_ids.clone();
     let mut trials_run = 0;
 
+    let style_order: Vec<DspyMutationStyle> = if let Some(names) = gepa_mutation_names {
+        let mut v: Vec<DspyMutationStyle> = names
+            .iter()
+            .filter_map(|n| DspyMutationStyle::from_name(n))
+            .collect();
+        if v.is_empty() {
+            v = (0..6).map(DspyMutationStyle::from_trial).collect();
+        }
+        v
+    } else {
+        (0..6).map(DspyMutationStyle::from_trial).collect()
+    };
+
     // ─── Mutation trials ───
     for trial in 0..max_trials {
         trials_run += 1;
 
-        let mutation_style = DspyMutationStyle::from_trial(trial);
+        let mutation_style = style_order[trial % style_order.len()];
         let (trial_system, trial_prompt, trial_demo_ids) = match mutation_style {
             // Mutation 0: Different demo subset (random K of N)
             DspyMutationStyle::DemoSubset => {
@@ -1110,7 +1238,7 @@ pub async fn optimize_all_signatures(
             continue;
         }
         if let Some(tmpl) = get_template_by_name(name) {
-            match optimize_signature(ollama, model, db, &tmpl, max_trials_per_sig).await {
+            match optimize_signature(ollama, model, db, &tmpl, max_trials_per_sig, None).await {
                 Ok(result) => results.push(result),
                 Err(_) => {} // skip failures
             }

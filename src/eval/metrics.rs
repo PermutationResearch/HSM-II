@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::judges::RubricExtras;
+
 /// Metrics collected for a single turn
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnMetrics {
@@ -24,6 +26,35 @@ pub struct TurnMetrics {
     pub llm_calls: u32,
     /// Whether an error occurred
     pub error: Option<String>,
+    /// Deterministic pass from keyword rubric
+    #[serde(default)]
+    pub deterministic_pass: bool,
+    /// Combined rubric pass (keywords + grounding + tool + optional LLM judge)
+    #[serde(default)]
+    pub rubric_pass: bool,
+    /// Weighted composite quality score in \[0,1\]
+    #[serde(default)]
+    pub rubric_composite: f64,
+    #[serde(default)]
+    pub grounding_applicable: bool,
+    #[serde(default)]
+    pub grounding_score: f64,
+    #[serde(default)]
+    pub grounding_pass: bool,
+    #[serde(default)]
+    pub tool_check_applicable: bool,
+    #[serde(default)]
+    pub tool_pass: Option<bool>,
+    #[serde(default)]
+    pub llm_judge_pass: Option<bool>,
+    #[serde(default)]
+    pub llm_judge_notes: Option<String>,
+    /// Same as latency_ms; explicit for cost reports when tokens are missing
+    #[serde(default)]
+    pub wall_clock_ms: u64,
+    /// Outbound LLM HTTP calls for this turn (main + judge)
+    #[serde(default)]
+    pub llm_http_requests: u32,
 }
 
 /// Aggregate metrics for one runner across all tasks
@@ -95,6 +126,29 @@ impl RunnerMetrics {
         errors as f64 / self.turns.len() as f64
     }
 
+    pub fn avg_rubric_composite(&self) -> f64 {
+        if self.turns.is_empty() {
+            return 0.0;
+        }
+        self.turns.iter().map(|t| t.rubric_composite).sum::<f64>() / self.turns.len() as f64
+    }
+
+    pub fn rubric_pass_rate(&self) -> f64 {
+        if self.turns.is_empty() {
+            return 0.0;
+        }
+        let n = self.turns.iter().filter(|t| t.rubric_pass).count();
+        n as f64 / self.turns.len() as f64
+    }
+
+    pub fn total_llm_http_requests(&self) -> u64 {
+        self.turns.iter().map(|t| t.llm_http_requests as u64).sum()
+    }
+
+    pub fn total_wall_clock_ms(&self) -> u64 {
+        self.turns.iter().map(|t| t.wall_clock_ms).sum()
+    }
+
     /// Metrics broken down by domain
     pub fn by_domain(&self, tasks: &[super::tasks::EvalTask]) -> HashMap<String, DomainMetrics> {
         let mut domain_map: HashMap<String, Vec<&TurnMetrics>> = HashMap::new();
@@ -130,6 +184,25 @@ pub struct DomainMetrics {
     pub total_tokens: usize,
 }
 
+/// Blend keyword score, grounding, tool shape, and optional LLM judge into \[0,1\].
+pub fn turn_rubric_composite(keyword_score: f64, extras: &RubricExtras) -> f64 {
+    let mut sum = keyword_score;
+    let mut n = 1usize;
+    if extras.grounding_applicable {
+        sum += extras.grounding_score;
+        n += 1;
+    }
+    if let Some(tp) = extras.tool_pass {
+        sum += if tp { 1.0 } else { 0.0 };
+        n += 1;
+    }
+    if let Some(j) = extras.llm_judge_pass {
+        sum += if j { 1.0 } else { 0.0 };
+        n += 1;
+    }
+    sum / n as f64
+}
+
 /// Score a response against expected keywords (case-insensitive)
 pub fn score_keywords(response: &str, expected: &[String]) -> f64 {
     if expected.is_empty() {
@@ -159,9 +232,13 @@ pub struct RunnerSummary {
     pub avg_keyword_score: f64,
     pub avg_recall_score: f64,
     pub avg_cold_score: f64,
+    pub avg_rubric_composite: f64,
+    pub rubric_pass_rate: f64,
     pub total_tokens: usize,
     pub total_prompt_tokens: usize,
     pub total_llm_calls: u32,
+    pub total_llm_http_requests: u64,
+    pub total_wall_clock_ms: u64,
     pub avg_latency_ms: f64,
     pub error_rate: f64,
     pub total_duration_ms: u64,
@@ -174,9 +251,13 @@ impl RunnerSummary {
             avg_keyword_score: m.avg_keyword_score(),
             avg_recall_score: m.avg_recall_score(),
             avg_cold_score: m.avg_cold_score(),
+            avg_rubric_composite: m.avg_rubric_composite(),
+            rubric_pass_rate: m.rubric_pass_rate(),
             total_tokens: m.total_tokens(),
             total_prompt_tokens: m.total_prompt_tokens(),
             total_llm_calls: m.total_llm_calls(),
+            total_llm_http_requests: m.total_llm_http_requests(),
+            total_wall_clock_ms: m.total_wall_clock_ms(),
             avg_latency_ms: m.avg_latency_ms(),
             error_rate: m.error_rate(),
             total_duration_ms: m.total_duration_ms,
@@ -204,6 +285,11 @@ pub struct ImprovementMetrics {
     /// Latency change
     pub latency_delta_ms: f64,
     pub latency_delta_pct: f64,
+    /// Rubric composite (quality blend incl. grounding/tools/judge)
+    pub rubric_composite_delta: f64,
+    pub rubric_pass_rate_delta: f64,
+    pub llm_http_requests_delta: f64,
+    pub wall_clock_ms_delta: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -233,6 +319,10 @@ pub fn compare(
     let prompt_reduction = b.total_prompt_tokens as f64 - h.total_prompt_tokens as f64;
     let call_reduction = b.total_llm_calls as f64 - h.total_llm_calls as f64;
     let latency_delta = h.avg_latency_ms - b.avg_latency_ms;
+    let rubric_delta = h.avg_rubric_composite - b.avg_rubric_composite;
+    let rubric_pass_delta = h.rubric_pass_rate - b.rubric_pass_rate;
+    let http_delta = h.total_llm_http_requests as f64 - b.total_llm_http_requests as f64;
+    let wall_delta = h.total_wall_clock_ms as f64 - b.total_wall_clock_ms as f64;
 
     let safe_pct = |delta: f64, base: f64| if base.abs() < 1e-9 { 0.0 } else { (delta / base) * 100.0 };
 
@@ -249,6 +339,10 @@ pub fn compare(
         llm_call_reduction_pct: safe_pct(call_reduction, b.total_llm_calls as f64),
         latency_delta_ms: latency_delta,
         latency_delta_pct: safe_pct(latency_delta, b.avg_latency_ms),
+        rubric_composite_delta: rubric_delta,
+        rubric_pass_rate_delta: rubric_pass_delta,
+        llm_http_requests_delta: http_delta,
+        wall_clock_ms_delta: wall_delta,
     };
 
     // Domain breakdown
@@ -307,6 +401,10 @@ pub fn print_report(report: &ComparisonReport) {
     println!("{:<40} {:>20} {:>20}", "Total LLM calls", report.baseline.total_llm_calls, report.hsm.total_llm_calls);
     println!("{:<40} {:>18.0}ms {:>18.0}ms", "Avg latency/turn", report.baseline.avg_latency_ms, report.hsm.avg_latency_ms);
     println!("{:<40} {:>19.1}% {:>19.1}%", "Error rate", report.baseline.error_rate * 100.0, report.hsm.error_rate * 100.0);
+    println!("{:<40} {:>20.3} {:>20.3}", "Avg rubric composite", report.baseline.avg_rubric_composite, report.hsm.avg_rubric_composite);
+    println!("{:<40} {:>19.1}% {:>19.1}%", "Rubric pass rate", report.baseline.rubric_pass_rate * 100.0, report.hsm.rubric_pass_rate * 100.0);
+    println!("{:<40} {:>20} {:>20}", "Total LLM HTTP reqs", report.baseline.total_llm_http_requests, report.hsm.total_llm_http_requests);
+    println!("{:<40} {:>20} {:>20}", "Total wall-clock (turns ms)", report.baseline.total_wall_clock_ms, report.hsm.total_wall_clock_ms);
 
     println!("\n--- Improvements (positive = HSM-II better) ---");
     println!("{:<40} {:>+10.1}% (delta: {:>+.3})", "Keyword quality", report.improvement.keyword_score_pct, report.improvement.keyword_score_delta);
@@ -315,6 +413,9 @@ pub fn print_report(report: &ComparisonReport) {
     println!("{:<40} {:>+10.1}% ({:.0} tokens saved)", "Prompt token reduction", report.improvement.prompt_token_reduction_pct, report.improvement.prompt_token_reduction);
     println!("{:<40} {:>+10.1}% ({:.0} calls saved)", "LLM call reduction", report.improvement.llm_call_reduction_pct, report.improvement.llm_call_reduction);
     println!("{:<40} {:>+10.1}% ({:>+.0}ms)", "Latency", report.improvement.latency_delta_pct, report.improvement.latency_delta_ms);
+    println!("{:<40} {:>+10.3} (Δ pass rate {:>+.3})", "Rubric composite", report.improvement.rubric_composite_delta, report.improvement.rubric_pass_rate_delta);
+    println!("{:<40} {:>+10.1} ({:>+.0} extra reqs)", "LLM HTTP requests", report.improvement.llm_http_requests_delta, report.improvement.llm_http_requests_delta);
+    println!("{:<40} {:>+10.0}ms", "Wall-clock (sum turns)", report.improvement.wall_clock_ms_delta);
 
     if !report.domain_breakdown.is_empty() {
         println!("\n--- Domain Breakdown ---");

@@ -20,6 +20,8 @@ mysql_async = "0.34"
 rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+serde_yaml = "0.9"
 bincode = "1.3"
 
 # TUI
@@ -148,6 +150,22 @@ path = "src/bin/hsm_bench.rs"
 [[bin]]
 name = "hsm-eval"
 path = "src/bin/hsm_eval.rs"
+
+[[bin]]
+name = "hsm_gepa"
+path = "src/bin/hsm_gepa.rs"
+
+[[bin]]
+name = "hsm_outer_loop"
+path = "src/bin/hsm_outer_loop.rs"
+
+[[bin]]
+name = "hsm_meta_harness"
+path = "src/bin/hsm_meta_harness.rs"
+
+[[bin]]
+name = "hsm_trace2skill"
+path = "src/bin/hsm_trace2skill.rs"
 
 [[bin]]
 name = "hsm_golden"

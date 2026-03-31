@@ -1,0 +1,12 @@
+# Example GEPA collect settings (local-only; no LLM calls).
+# Copy to e.g. ~/.hsmii/gepa.yaml and pass: hsm_gepa collect --config ~/.hsmii/gepa.yaml ...
+
+failure_max_score: 0.55
+max_failure_traces: 200
+max_input_chars: 500
+max_output_chars: 800
+min_cluster_size: 1
+
+# Replace substrings in collected bundle JSON (therapy notes, PII, tokens).
+redact_substrings:
+  - "REPLACE_WITH_YOUR_PATTERN"

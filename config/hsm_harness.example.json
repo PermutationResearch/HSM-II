@@ -1,0 +1,34 @@
+{
+  "candidates": [
+    {
+      "context_top_k": 5,
+      "context_score_threshold": 0.1,
+      "skill_success_threshold": 0.5,
+      "skill_reputation_alpha": 0.3,
+      "store_belief_min_score": 0.3,
+      "context_char_budget": 3000,
+      "include_session_summaries": true,
+      "query_overlap_weight": 0.15,
+      "domain_match_bonus": 0.3,
+      "same_task_bonus": 0.4,
+      "belief_keyword_overlap_weight": 0.2,
+      "llm_temperature": 0.3,
+      "llm_max_tokens": 1500
+    },
+    {
+      "context_top_k": 8,
+      "context_score_threshold": 0.08,
+      "skill_success_threshold": 0.45,
+      "skill_reputation_alpha": 0.35,
+      "store_belief_min_score": 0.25,
+      "context_char_budget": 4000,
+      "include_session_summaries": true,
+      "query_overlap_weight": 0.2,
+      "domain_match_bonus": 0.35,
+      "same_task_bonus": 0.45,
+      "belief_keyword_overlap_weight": 0.25,
+      "llm_temperature": 0.25,
+      "llm_max_tokens": 1800
+    }
+  ]
+}

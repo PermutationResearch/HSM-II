@@ -3,18 +3,19 @@
 //! Usage:
 //!   hsm-eval                         # Run full suite (20 tasks)
 //!   hsm-eval --tasks se              # Run only software engineering tasks
-//!   hsm-eval --tasks ds,biz          # Run data science + business tasks
-//!   hsm-eval --json results.json     # Export results as JSON
-//!   hsm-eval --baseline-only         # Run baseline only (debug)
-//!   hsm-eval --hsm-only              # Run HSM-II only (debug)
+//!   hsm-eval --json results.json     # Export comparison JSON (per suite + combined)
+//!   hsm-eval --artifacts runs/foo    # manifest + JSONL turns + optional traces
+
+use std::path::PathBuf;
 
 use clap::Parser;
-use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 use hyper_stigmergy::eval::{
-    self, compare, load_eval_suite, print_report, suite_council_vs_single, suite_memory_retrieval,
-    suite_tool_routing, BaselineRunner, HsmRunner,
+    self, append_runs_index, calibration_report, compare, default_runs_index, eval_tasks_for_suite,
+    filter_tasks, load_gold_labels, parse_weighted_suites, sync_index_line_to_sqlite, write_jsonl,
+    write_manifest, write_turn_metrics_jsonl, ArtifactPaths, BaselineRunner, ComparisonReport,
+    EvalTask, HsmRunner, RunManifest, RunnerMetrics, WeightedEvalSuite,
 };
 use hyper_stigmergy::llm::client::LlmClient;
 
@@ -22,38 +23,66 @@ use hyper_stigmergy::llm::client::LlmClient;
 #[command(name = "hsm-eval")]
 #[command(about = "Comparative evaluation harness: HSM-II vs baseline LLM")]
 struct Cli {
-    /// Filter tasks by domain prefix (comma-separated: se,ds,biz,rw,stress)
     #[arg(long)]
     tasks: Option<String>,
 
-    /// Export results to JSON file
     #[arg(long)]
     json: Option<PathBuf>,
 
-    /// Run baseline only (skip HSM-II)
     #[arg(long)]
     baseline_only: bool,
 
-    /// Run HSM-II only (skip baseline)
     #[arg(long)]
     hsm_only: bool,
 
-    /// Limit number of tasks (for quick testing)
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Verbose: print each turn's response
     #[arg(short, long)]
     verbose: bool,
 
-    /// Pre-registered suite: full (default), memory, tool, council
     #[arg(long)]
     suite: Option<String>,
+
+    #[arg(long)]
+    suites: Option<String>,
+
+    #[arg(long)]
+    artifacts: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    trace: bool,
+
+    #[arg(long)]
+    gold: Option<PathBuf>,
+
+    #[arg(long, default_value_t = true)]
+    write_runs_index: bool,
+}
+
+fn resolve_suites(cli: &Cli) -> anyhow::Result<Vec<WeightedEvalSuite>> {
+    let mut out = if let Some(ref spec) = cli.suites {
+        parse_weighted_suites(spec).map_err(anyhow::Error::msg)?
+    } else {
+        let name = cli.suite.as_deref().unwrap_or("full").to_string();
+        let tasks = eval_tasks_for_suite(&name).map_err(anyhow::Error::msg)?;
+        vec![WeightedEvalSuite {
+            name,
+            weight: 1.0,
+            tasks,
+        }]
+    };
+    for s in &mut out {
+        filter_tasks(&mut s.tasks, cli.tasks.as_deref(), cli.limit);
+        if s.tasks.is_empty() {
+            anyhow::bail!("suite {:?} empty after filters", s.name);
+        }
+    }
+    Ok(out)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -63,122 +92,248 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let suites = resolve_suites(&cli)?;
 
-    // Load and filter tasks
-    let mut tasks = match cli.suite.as_deref() {
-        Some("memory") => suite_memory_retrieval(),
-        Some("tool") | Some("tools") => suite_tool_routing(),
-        Some("council") => suite_council_vs_single(),
-        Some("full") | None => load_eval_suite(),
-        Some(other) => {
-            eprintln!(
-                "Unknown --suite {:?}; use full | memory | tool | council",
-                other
-            );
-            std::process::exit(2);
-        }
-    };
-    if let Some(ref filter) = cli.tasks {
-        let prefixes: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
-        tasks.retain(|t| prefixes.iter().any(|p| t.id.starts_with(p)));
-    }
-    if let Some(limit) = cli.limit {
-        tasks.truncate(limit);
-    }
-
-    let total_turns: usize = tasks.iter().map(|t| t.turns.len()).sum();
-    let recall_turns: usize = tasks.iter().flat_map(|t| &t.turns).filter(|t| t.requires_recall).count();
+    let suite_names: Vec<String> = suites.iter().map(|s| s.name.clone()).collect();
+    let suite_weights: Vec<f64> = suites.iter().map(|s| s.weight).collect();
+    let total_tasks: usize = suites.iter().map(|s| s.tasks.len()).sum();
+    let total_turns: usize = suites
+        .iter()
+        .map(|s| s.tasks.iter().map(|t| t.turns.len()).sum::<usize>())
+        .sum();
 
     println!("\n╔══════════════════════════════════════════════════════════╗");
     println!("║         HSM-II Comparative Evaluation Harness           ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Tasks: {:>3}                                            ║", tasks.len());
+    println!("║  Suites: {:<47}║", suite_names.join(", "));
+    println!("║  Tasks: {:>3}                                              ║", total_tasks);
     println!("║  Total turns: {:>3}                                      ║", total_turns);
-    println!("║  Recall turns: {:>3} ({:.0}% of total)                   ║",
-        recall_turns, (recall_turns as f64 / total_turns as f64) * 100.0);
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
-    // Verify LLM client can be created (fail fast)
-    let _client = match LlmClient::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("ERROR: Failed to initialize LLM client: {}", e);
-            eprintln!("Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_URL");
-            std::process::exit(1);
-        }
-    };
+    if LlmClient::new().is_err() {
+        eprintln!("ERROR: Failed to initialize LLM client");
+        eprintln!("Set oneof: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_URL");
+        std::process::exit(1);
+    }
 
-    // ── RUN BASELINE ──
-    let baseline_metrics = if !cli.hsm_only {
-        println!("━━━ Running BASELINE (vanilla LLM, no memory) ━━━");
-        let runner = BaselineRunner::new(LlmClient::new()?);
-        let metrics = runner.run(&tasks).await;
-        println!(
-            "  ✓ Baseline complete: {} turns, {:.1}% avg keyword score, {} total tokens\n",
-            metrics.turns.len(),
-            metrics.avg_keyword_score() * 100.0,
-            metrics.total_tokens()
-        );
-
-        if cli.verbose {
-            print_turn_details(&metrics);
-        }
-
-        Some(metrics)
+    let gold = if let Some(ref p) = cli.gold {
+        Some(load_gold_labels(p)?)
     } else {
         None
     };
 
-    // ── RUN HSM-II ──
-    let hsm_metrics = if !cli.baseline_only {
-        println!("━━━ Running HSM-II (persistent memory + context ranking + reputation) ━━━");
-        let mut runner = HsmRunner::new(LlmClient::new()?);
-        let metrics = runner.run(&tasks).await;
+    let mut agg_baseline: Option<RunnerMetrics> = None;
+    let mut agg_hsm: Option<RunnerMetrics> = None;
+    let mut agg_tasks: Vec<EvalTask> = Vec::new();
+    let mut per_suite_reports: Vec<(String, ComparisonReport)> = Vec::new();
+
+    let art_dir = cli.artifacts.clone();
+    if let Some(ref root) = art_dir {
+        std::fs::create_dir_all(root)?;
+    }
+
+    for ws in &suites {
         println!(
-            "  ✓ HSM-II complete: {} turns, {:.1}% avg keyword score, {} total tokens\n",
-            metrics.turns.len(),
-            metrics.avg_keyword_score() * 100.0,
-            metrics.total_tokens()
+            "━━━ Suite: {} ({} tasks, weight {}) ━━━",
+            ws.name,
+            ws.tasks.len(),
+            ws.weight
         );
 
-        if cli.verbose {
-            print_turn_details(&metrics);
+        let baseline_metrics = if !cli.hsm_only {
+            println!("  Baseline…");
+            let runner = BaselineRunner::new(LlmClient::new()?);
+            let m = runner.run(&ws.tasks).await;
+            println!(
+                "    {} turns | {:.1}% kw | {} tokens",
+                m.turns.len(),
+                m.avg_keyword_score() * 100.0,
+                m.total_tokens()
+            );
+            Some(m)
+        } else {
+            None
+        };
+
+        let hsm_metrics = if !cli.baseline_only {
+            println!("  HSM-II…");
+            let mut runner = HsmRunner::new(LlmClient::new()?);
+            if cli.trace {
+                runner.set_collect_traces(true);
+            }
+            let m = runner.run(&ws.tasks).await;
+            let traces = if cli.trace { runner.take_traces() } else { vec![] };
+            println!(
+                "    {} turns | {:.1}% kw | {} tokens",
+                m.turns.len(),
+                m.avg_keyword_score() * 100.0,
+                m.total_tokens()
+            );
+
+            if let Some(ref root) = art_dir {
+                let sd = root.join(&ws.name);
+                std::fs::create_dir_all(&sd)?;
+                if let Some(ref b) = baseline_metrics {
+                    write_turn_metrics_jsonl(&sd.join("turns_baseline.jsonl"), &b.turns)?;
+                }
+                write_turn_metrics_jsonl(&sd.join("turns_hsm.jsonl"), &m.turns)?;
+                if cli.trace && !traces.is_empty() {
+                    write_jsonl(&sd.join("hsm_trace.jsonl"), &traces)?;
+                }
+                if let Some(ref g) = gold {
+                    let cal = calibration_report(&m.turns, g);
+                    std::fs::write(
+                        sd.join("calibration.json"),
+                        serde_json::to_string_pretty(&cal)?,
+                    )?;
+                    eprintln!(
+                        "    calibration | {} labeled | agreement {:.1}%",
+                        cal.labeled_turns,
+                        cal.agreement_with_gold * 100.0
+                    );
+                }
+            }
+
+            if cli.verbose {
+                print_turn_details(&m);
+            }
+            Some(m)
+        } else {
+            None
+        };
+
+        if let (Some(ref b), Some(ref h)) = (&baseline_metrics, &hsm_metrics) {
+            let report = compare(b, h, &ws.tasks);
+            eval::print_report(&report);
+            per_suite_reports.push((ws.name.clone(), report.clone()));
+
+            match (&mut agg_baseline, &mut agg_hsm) {
+                (None, None) => {
+                    let mut nb = RunnerMetrics::new("baseline");
+                    nb.turns = b.turns.clone();
+                    nb.total_duration_ms = b.total_duration_ms;
+                    let mut nh = RunnerMetrics::new("hsm-ii");
+                    nh.turns = h.turns.clone();
+                    nh.total_duration_ms = h.total_duration_ms;
+                    agg_baseline = Some(nb);
+                    agg_hsm = Some(nh);
+                    agg_tasks = ws.tasks.clone();
+                }
+                (Some(cb), Some(ch)) => {
+                    cb.turns.extend(b.turns.iter().cloned());
+                    ch.turns.extend(h.turns.iter().cloned());
+                    cb.total_duration_ms += b.total_duration_ms;
+                    ch.total_duration_ms += h.total_duration_ms;
+                    agg_tasks.extend(ws.tasks.clone());
+                }
+                _ => {}
+            }
+
+            if let Some(ref path) = cli.json {
+                let base = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("eval");
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("json");
+                let jp = path.with_file_name(format!("{}_{}.{}", base, ws.name, ext));
+                std::fs::write(&jp, serde_json::to_string_pretty(&report)?)?;
+                println!("Exported {}", jp.display());
+            }
+
+            if let Some(ref root) = art_dir {
+                let sd = root.join(&ws.name);
+                std::fs::write(
+                    sd.join("comparison_report.json"),
+                    serde_json::to_string_pretty(&report)?,
+                )?;
+                std::fs::write(sd.join("baseline_metrics.json"), serde_json::to_string_pretty(b)?)?;
+                std::fs::write(sd.join("hsm_metrics.json"), serde_json::to_string_pretty(h)?)?;
+            }
+        } else if let Some(ref b) = baseline_metrics {
+            if cli.verbose {
+                print_turn_details(b);
+            }
+        } else if let Some(ref h) = hsm_metrics {
+            if cli.verbose {
+                print_turn_details(h);
+            }
         }
+    }
 
-        Some(metrics)
-    } else {
-        None
-    };
-
-    // ── COMPARISON REPORT ──
-    if let (Some(ref baseline), Some(ref hsm)) = (&baseline_metrics, &hsm_metrics) {
-        let report = compare(baseline, hsm, &tasks);
-        print_report(&report);
-
-        // Export JSON if requested
-        if let Some(ref path) = cli.json {
-            let json = serde_json::to_string_pretty(&report)?;
-            std::fs::write(path, &json)?;
-            println!("Results exported to: {}", path.display());
+    if suites.len() > 1 {
+        if let (Some(ref b), Some(ref h)) = (&agg_baseline, &agg_hsm) {
+            println!("\n━━━ Combined (all suites) ━━━");
+            let report = compare(b, h, &agg_tasks);
+            eval::print_report(&report);
+            if let Some(ref path) = cli.json {
+                let base = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("eval");
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("json");
+                let comb = path.with_file_name(format!("{}_combined.{}", base, ext));
+                std::fs::write(&comb, serde_json::to_string_pretty(&report)?)?;
+                println!("Exported {}", comb.display());
+            }
         }
-    } else if let Some(ref metrics) = baseline_metrics {
-        println!("\n--- Baseline-only results ---");
-        println!("Avg keyword score: {:.1}%", metrics.avg_keyword_score() * 100.0);
-        println!("Avg recall score:  {:.1}%", metrics.avg_recall_score() * 100.0);
-        println!("Total tokens:      {}", metrics.total_tokens());
-        println!("Total LLM calls:   {}", metrics.total_llm_calls());
-    } else if let Some(ref metrics) = hsm_metrics {
-        println!("\n--- HSM-II-only results ---");
-        println!("Avg keyword score: {:.1}%", metrics.avg_keyword_score() * 100.0);
-        println!("Avg recall score:  {:.1}%", metrics.avg_recall_score() * 100.0);
-        println!("Total tokens:      {}", metrics.total_tokens());
-        println!("Total LLM calls:   {}", metrics.total_llm_calls());
+    }
+
+    if let Some(ref root) = art_dir {
+        let manifest = RunManifest::new(
+            "hsm-eval",
+            root,
+            suite_names.clone(),
+            Some(suite_weights.clone()),
+            cli.tasks.clone(),
+            total_tasks,
+            total_turns,
+            std::env::var("HSM_PARENT_RUN_ID").ok(),
+            ArtifactPaths {
+                manifest: "manifest.json".into(),
+                turns_baseline_jsonl: Some("<suite>/turns_baseline.jsonl".into()),
+                turns_hsm_jsonl: Some("<suite>/turns_hsm.jsonl".into()),
+                hsm_trace_jsonl: if cli.trace {
+                    Some("<suite>/hsm_trace.jsonl".into())
+                } else {
+                    None
+                },
+                comparison_json: Some("<suite>/comparison_report.json".into()),
+                per_suite_json: None,
+            },
+        );
+        write_manifest(root, &manifest)?;
+        if cli.write_runs_index {
+            if let Some((name, rep)) = per_suite_reports.first() {
+                let idx_path = default_runs_index(root);
+                let line = serde_json::json!({
+                    "harness": "hsm-eval",
+                    "run_dir": root.display().to_string(),
+                    "created_unix": manifest.created_unix,
+                    "git_commit": manifest.git_commit,
+                    "first_suite": name,
+                    "keyword_delta": rep.improvement.keyword_score_delta,
+                });
+                append_runs_index(&idx_path, &line)?;
+                if let Ok(db) = std::env::var("HSM_RUNS_SQLITE") {
+                    if let Err(e) = sync_index_line_to_sqlite(std::path::Path::new(&db), &line) {
+                        eprintln!("warning: HSM_RUNS_SQLITE sync failed: {}", e);
+                    }
+                }
+            }
+        }
+        println!("Artifacts written to {}", root.display());
     }
 
     Ok(())
 }
 
-fn print_turn_details(metrics: &eval::RunnerMetrics) {
+fn print_turn_details(metrics: &RunnerMetrics) {
     for turn in &metrics.turns {
         let recall_marker = if turn.requires_recall { " [RECALL]" } else { "" };
         println!(

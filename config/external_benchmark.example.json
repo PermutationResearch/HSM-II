@@ -1,0 +1,6 @@
+{
+  "name": "example_tb2_placeholder",
+  "command": ["echo", "{\"pass\": true, \"score\": 1.0}"],
+  "cwd": null,
+  "timeout_sec": 3600
+}

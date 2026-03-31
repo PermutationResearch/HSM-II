@@ -862,6 +862,80 @@ impl SkillBank {
         skill
     }
 
+    /// Ingest a merged Trace2Skill document as a **Proposed** general skill (or update by title).
+    pub fn ingest_trace2skill_proposal(
+        &mut self,
+        title: &str,
+        principle: &str,
+        trajectory_ids: &[String],
+    ) -> Skill {
+        let now = now_secs();
+        let source_description = format!(
+            "trace2skill:{}",
+            trajectory_ids
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if let Some(skill) = self
+            .general_skills
+            .iter_mut()
+            .find(|s| s.title == title)
+        {
+            skill.principle = format!(
+                "{}\n\n--- trace2skill ---\n{}",
+                skill.principle, principle
+            );
+            skill.last_evolved = now;
+            skill.curation = SkillCuration::Proposed {
+                source_description,
+                proposed_at: now,
+            };
+            skill.source = SkillSource::Distilled {
+                from_experience_ids: Vec::new(),
+                trajectory_type: TrajectoryType::Success,
+            };
+            return skill.clone();
+        }
+        let id = format!("t2s_{}", self.next_id);
+        self.next_id += 1;
+        let skill = Skill {
+            id: id.clone(),
+            title: title.to_string(),
+            principle: principle.to_string(),
+            when_to_apply: Vec::new(),
+            level: SkillLevel::General,
+            source: SkillSource::Distilled {
+                from_experience_ids: Vec::new(),
+                trajectory_type: TrajectoryType::Success,
+            },
+            confidence: 0.65,
+            usage_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            embedding: None,
+            created_at: now,
+            last_evolved: now,
+            status: SkillStatus::Active,
+            bayesian: BayesianConfidence::new(1.5, 1.0),
+            credit_ema: 0.0,
+            credit_count: 0,
+            last_credit_tick: now,
+            curation: SkillCuration::Proposed {
+                source_description,
+                proposed_at: now,
+            },
+            scope: SkillScope::default(),
+            delegation_ema: 0.0,
+            delegation_count: 0,
+            hired_count: 0,
+        };
+        self.general_skills.push(skill.clone());
+        skill
+    }
+
     // ── Distillation (SkillRL §4.1) ──────────────────────────────────────
 
     /// Distill skills from experience trajectories.

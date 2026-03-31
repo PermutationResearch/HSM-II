@@ -5,9 +5,78 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::llm::client::{LlmClient, LlmRequest, Message};
-use super::metrics::{score_keywords, RunnerMetrics, TurnMetrics};
-use super::tasks::EvalTask;
+use crate::personal::prompt_defaults::LIVING_PROMPT_SEED;
+use super::judges;
+use super::metrics::{score_keywords, turn_rubric_composite, RunnerMetrics, TurnMetrics};
+use super::tasks::{EvalTask, Turn};
+use super::trace::{BeliefRankEntry, HsmTurnTrace, RankedContextResult};
+
+const BASELINE_EVAL_SYSTEM: &str = "You are a helpful AI assistant. Answer the user's questions thoroughly and accurately. Be concise.";
+
+async fn finalize_turn_metrics(
+    client: &LlmClient,
+    model: &str,
+    task_id: String,
+    turn_idx: usize,
+    turn: &Turn,
+    response: String,
+    latency_ms: u64,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    error: Option<String>,
+    injected_memory_context: &str,
+) -> TurnMetrics {
+    let keyword_score = score_keywords(&response, &turn.expected_keywords);
+    let mut extras = judges::evaluate_turn_rubric(turn, &response, injected_memory_context, keyword_score);
+    let mut pt = prompt_tokens;
+    let mut ct = completion_tokens;
+    let mut judge_calls = 0u32;
+    if judges::llm_judge_enabled() && !judges::rubric_turn_pass(&extras) {
+        if let Ok((pass, note, jpt, jct, jc)) =
+            judges::llm_judge_turn(client, model, turn, &response).await
+        {
+            extras.llm_judge_pass = pass;
+            extras.llm_judge_notes = note;
+            extras.judge_prompt_tokens = jpt;
+            extras.judge_completion_tokens = jct;
+            extras.judge_llm_calls = jc;
+            pt += jpt;
+            ct += jct;
+            judge_calls = jc;
+        }
+    }
+    let rubric_composite = turn_rubric_composite(keyword_score, &extras);
+    let rubric_pass = judges::rubric_turn_pass_with_llm(&extras);
+    let http = 1u32 + judge_calls;
+    TurnMetrics {
+        task_id,
+        turn_index: turn_idx,
+        session: turn.session,
+        requires_recall: turn.requires_recall,
+        response,
+        latency_ms,
+        prompt_tokens: pt,
+        completion_tokens: ct,
+        keyword_score,
+        llm_calls: http,
+        error,
+        deterministic_pass: extras.deterministic_pass,
+        rubric_pass,
+        rubric_composite,
+        grounding_applicable: extras.grounding_applicable,
+        grounding_score: extras.grounding_score,
+        grounding_pass: extras.grounding_pass,
+        tool_check_applicable: extras.tool_check_applicable,
+        tool_pass: extras.tool_pass,
+        llm_judge_pass: extras.llm_judge_pass,
+        llm_judge_notes: extras.llm_judge_notes.clone(),
+        wall_clock_ms: latency_ms,
+        llm_http_requests: http,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // BASELINE RUNNER — Vanilla LLM, no memory
@@ -29,7 +98,7 @@ impl BaselineRunner {
         // /no_think disables qwen3's internal chain-of-thought to save tokens and time
         Self {
             client,
-            system_prompt: "You are a helpful AI assistant. Answer the user's questions thoroughly and accurately. Be concise.".to_string(),
+            system_prompt: BASELINE_EVAL_SYSTEM.to_string(),
             model,
         }
     }
@@ -57,26 +126,25 @@ impl BaselineRunner {
                 // Make LLM call
                 let (response_text, prompt_tokens, completion_tokens, error) =
                     self.call_llm(&messages).await;
+                let latency_ms = turn_start.elapsed().as_millis() as u64;
 
-                // Record the exchange in session history
                 history.push(Message::user(&turn.user));
-                history.push(Message::assistant(&response_text));
-
-                let keyword_score = score_keywords(&response_text, &turn.expected_keywords);
-
-                metrics.turns.push(TurnMetrics {
-                    task_id: task.id.clone(),
-                    turn_index: turn_idx,
-                    session: turn.session,
-                    requires_recall: turn.requires_recall,
-                    response: response_text,
-                    latency_ms: turn_start.elapsed().as_millis() as u64,
+                let tm = finalize_turn_metrics(
+                    &self.client,
+                    &self.model,
+                    task.id.clone(),
+                    turn_idx,
+                    turn,
+                    response_text,
+                    latency_ms,
                     prompt_tokens,
                     completion_tokens,
-                    keyword_score,
-                    llm_calls: 1,
                     error,
-                });
+                    "",
+                )
+                .await;
+                history.push(Message::assistant(tm.response.clone()));
+                metrics.turns.push(tm);
             }
         }
 
@@ -114,9 +182,20 @@ impl BaselineRunner {
 // HSM-II RUNNER — Persistent memory + context ranking + reputation routing
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Tunable harness policy for meta-search (see [`HsmRunnerConfig`]).
+pub trait HarnessPolicy: Clone + Send + Sync {
+    fn runner_config(&self) -> &HsmRunnerConfig;
+}
+
+impl HarnessPolicy for HsmRunnerConfig {
+    fn runner_config(&self) -> &HsmRunnerConfig {
+        self
+    }
+}
+
 /// HSM-II runner: uses persistent memory (beliefs), context ranking,
 /// and reputation-based skill selection to augment each LLM call.
-pub struct HsmRunner {
+pub struct HsmRunner<P: HarnessPolicy = HsmRunnerConfig> {
     client: LlmClient,
     system_prompt: String,
     model: String,
@@ -126,6 +205,48 @@ pub struct HsmRunner {
     skills: Vec<TrackedSkill>,
     /// Cross-session conversation summaries
     session_summaries: HashMap<String, Vec<SessionSummary>>,
+    policy: P,
+    /// When true, each HSM turn appends to `traces` (for outer-loop / proposer feedback).
+    collect_traces: bool,
+    traces: Vec<HsmTurnTrace>,
+}
+
+/// Tunable HSM harness knobs used by meta-harness search.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HsmRunnerConfig {
+    pub context_top_k: usize,
+    pub context_score_threshold: f64,
+    pub skill_success_threshold: f64,
+    pub skill_reputation_alpha: f64,
+    pub store_belief_min_score: f64,
+    pub context_char_budget: usize,
+    pub include_session_summaries: bool,
+    pub query_overlap_weight: f64,
+    pub domain_match_bonus: f64,
+    pub same_task_bonus: f64,
+    pub belief_keyword_overlap_weight: f64,
+    pub llm_temperature: f64,
+    pub llm_max_tokens: usize,
+}
+
+impl Default for HsmRunnerConfig {
+    fn default() -> Self {
+        Self {
+            context_top_k: 5,
+            context_score_threshold: 0.1,
+            skill_success_threshold: 0.5,
+            skill_reputation_alpha: 0.3,
+            store_belief_min_score: 0.3,
+            context_char_budget: 3000,
+            include_session_summaries: true,
+            query_overlap_weight: 0.15,
+            domain_match_bonus: 0.3,
+            same_task_bonus: 0.4,
+            belief_keyword_overlap_weight: 0.2,
+            llm_temperature: 0.3,
+            llm_max_tokens: 1500,
+        }
+    }
 }
 
 /// A belief persisted across sessions
@@ -161,19 +282,54 @@ struct SessionSummary {
     keywords: Vec<String>,
 }
 
-impl HsmRunner {
+impl HsmRunner<HsmRunnerConfig> {
     pub fn new(client: LlmClient) -> Self {
+        Self::with_policy(client, HsmRunnerConfig::default())
+    }
+
+    /// Backwards-compatible alias for [`HsmRunner::with_policy`].
+    pub fn with_config(client: LlmClient, config: HsmRunnerConfig) -> Self {
+        HsmRunner::with_policy(client, config)
+    }
+}
+
+impl<P: HarnessPolicy> HsmRunner<P> {
+    #[inline]
+    fn cfg(&self) -> &HsmRunnerConfig {
+        self.policy.runner_config()
+    }
+
+    pub fn with_policy(client: LlmClient, policy: P) -> Self {
         let model = std::env::var("OLLAMA_MODEL")
             .or_else(|_| std::env::var("DEFAULT_LLM_MODEL"))
             .unwrap_or_else(|_| "qwen3:1.7b".to_string());
         Self {
             client,
             model,
-            system_prompt: "You are a helpful AI assistant with persistent memory. You remember previous conversations and use relevant context to give better answers. Be concise.".to_string(),
+            system_prompt: format!(
+                "You are a helpful AI assistant with persistent memory. You remember previous conversations and use relevant context to give better answers. Be concise.\n\n{}",
+                LIVING_PROMPT_SEED
+            ),
             beliefs: Vec::new(),
             skills: Self::seed_skills(),
             session_summaries: HashMap::new(),
+            policy,
+            collect_traces: false,
+            traces: Vec::new(),
         }
+    }
+
+    /// Enable per-turn HSM traces (retrieval ranks, skill, context preview). Clears any previous traces when set to true.
+    pub fn set_collect_traces(&mut self, on: bool) {
+        self.collect_traces = on;
+        if on {
+            self.traces.clear();
+        }
+    }
+
+    /// Take accumulated traces and reset the buffer.
+    pub fn take_traces(&mut self) -> Vec<HsmTurnTrace> {
+        std::mem::take(&mut self.traces)
     }
 
     /// Seed initial skill bank with domain knowledge
@@ -266,11 +422,30 @@ impl HsmRunner {
                 prev_session = turn.session;
 
                 // ── CONTEXT RANKING ──
-                // Retrieve relevant beliefs and skills for this turn
-                let relevant_context = self.rank_context(&turn.user, &task.domain, turn.requires_recall, &task.id);
+                let ctx = self.build_ranked_context(
+                    &turn.user,
+                    &task.domain,
+                    turn.requires_recall,
+                    &task.id,
+                );
 
                 // ── REPUTATION-BASED SKILL SELECTION ──
                 let best_skill = self.select_skill(&task.domain);
+
+                if self.collect_traces {
+                    self.traces.push(HsmTurnTrace {
+                        task_id: task.id.clone(),
+                        turn_index: turn_idx,
+                        session: turn.session,
+                        requires_recall: turn.requires_recall,
+                        selected_skill_id: best_skill.as_ref().map(|s| s.id.clone()),
+                        selected_skill_domain: best_skill.as_ref().map(|s| s.domain.clone()),
+                        belief_ranks: ctx.belief_ranks.clone(),
+                        session_summaries_injected: ctx.session_summary_sessions.clone(),
+                        injected_char_len: ctx.injected_text.len(),
+                        injected_preview: ctx.injected_text.chars().take(800).collect::<String>(),
+                    });
+                }
 
                 // ── BUILD AUGMENTED PROMPT ──
                 let mut messages = Vec::new();
@@ -286,10 +461,10 @@ impl HsmRunner {
                 messages.push(Message::system(&system));
 
                 // Inject persistent memory context (cross-session recall)
-                if !relevant_context.is_empty() {
+                if !ctx.injected_text.is_empty() {
                     let context_block = format!(
                         "## Relevant context from previous sessions:\n{}",
-                        relevant_context
+                        ctx.injected_text
                     );
                     messages.push(Message::system(&context_block));
                 }
@@ -304,25 +479,37 @@ impl HsmRunner {
                 // ── LLM CALL ──
                 let (response_text, prompt_tokens, completion_tokens, error) =
                     self.call_llm(&messages).await;
+                let latency_ms = turn_start.elapsed().as_millis() as u64;
 
-                // ── POST-PROCESSING ──
-                // Score and update reputation
-                let keyword_score = score_keywords(&response_text, &turn.expected_keywords);
+                let tm = finalize_turn_metrics(
+                    &self.client,
+                    &self.model,
+                    task.id.clone(),
+                    turn_idx,
+                    turn,
+                    response_text,
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    error,
+                    &ctx.injected_text,
+                )
+                .await;
 
                 // Update skill reputation
                 if let Some(skill) = &best_skill {
-                    self.update_skill_reputation(&skill.id, keyword_score);
+                    self.update_skill_reputation(&skill.id, tm.keyword_score);
                 }
 
                 // Extract and store new beliefs from this response
-                if keyword_score > 0.3 {
+                if tm.keyword_score > self.cfg().store_belief_min_score {
                     self.beliefs.push(StoredBelief {
                         content: format!(
                             "Q: {}\nA: {}",
                             truncate(&turn.user, 300),
-                            truncate(&response_text, 600)
+                            truncate(&tm.response, 600)
                         ),
-                        confidence: keyword_score,
+                        confidence: tm.keyword_score,
                         domain: turn.domain.clone(),
                         source_task: task.id.clone(),
                         source_turn: turn_idx,
@@ -334,23 +521,9 @@ impl HsmRunner {
                     });
                 }
 
-                // Record in session history
                 history.push(Message::user(&turn.user));
-                history.push(Message::assistant(&response_text));
-
-                metrics.turns.push(TurnMetrics {
-                    task_id: task.id.clone(),
-                    turn_index: turn_idx,
-                    session: turn.session,
-                    requires_recall: turn.requires_recall,
-                    response: response_text,
-                    latency_ms: turn_start.elapsed().as_millis() as u64,
-                    prompt_tokens,
-                    completion_tokens,
-                    keyword_score,
-                    llm_calls: 1,
-                    error,
-                });
+                history.push(Message::assistant(tm.response.clone()));
+                metrics.turns.push(tm);
             }
 
             // End of task: summarize final session
@@ -386,22 +559,21 @@ impl HsmRunner {
         metrics
     }
 
-    /// Rank and retrieve relevant context from persistent memory
-    fn rank_context(
+    /// Rank beliefs and session summaries; build injected context block + trace metadata.
+    fn build_ranked_context(
         &self,
         query: &str,
         domain: &str,
         requires_recall: bool,
         task_id: &str,
-    ) -> String {
+    ) -> RankedContextResult {
         if !requires_recall {
-            return String::new();
+            return RankedContextResult::empty();
         }
 
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
-        // Score beliefs by relevance
         let mut scored: Vec<(usize, f64)> = self
             .beliefs
             .iter()
@@ -409,57 +581,77 @@ impl HsmRunner {
             .map(|(i, belief)| {
                 let mut score = 0.0;
 
-                // Keyword overlap (Jaccard-like)
                 let belief_lower = belief.content.to_lowercase();
                 let matching_words = query_words
                     .iter()
                     .filter(|w| w.len() > 3 && belief_lower.contains(**w))
                     .count();
-                score += matching_words as f64 * 0.15;
+                score += matching_words as f64 * self.cfg().query_overlap_weight;
 
-                // Domain match bonus
                 if belief.domain.as_deref() == Some(domain) {
-                    score += 0.3;
+                    score += self.cfg().domain_match_bonus;
                 }
 
-                // Same task bonus (for cross-session recall within same task)
                 if belief.source_task == task_id {
-                    score += 0.4;
+                    score += self.cfg().same_task_bonus;
                 }
 
-                // Keyword overlap with belief's stored keywords
-                let kw_overlap = belief.keywords.iter()
+                let kw_overlap = belief
+                    .keywords
+                    .iter()
                     .filter(|kw| query_lower.contains(&kw.to_lowercase()))
                     .count();
-                score += kw_overlap as f64 * 0.2;
+                score += kw_overlap as f64 * self.cfg().belief_keyword_overlap_weight;
 
-                // Confidence weighting
                 score *= belief.confidence;
 
                 (i, score)
             })
-            .filter(|(_, s)| *s > 0.1)
+            .filter(|(_, s)| *s > self.cfg().context_score_threshold)
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Include session summaries for this task
+        let mut session_summary_sessions = Vec::new();
         let mut context_parts: Vec<String> = Vec::new();
 
-        if let Some(summaries) = self.session_summaries.get(task_id) {
-            for s in summaries {
-                context_parts.push(format!("- [Session {}] {}", s.session, truncate(&s.summary, 500)));
+        if self.cfg().include_session_summaries {
+            if let Some(summaries) = self.session_summaries.get(task_id) {
+                for s in summaries {
+                    session_summary_sessions.push(s.session);
+                    context_parts.push(format!(
+                        "- [Session {}] {}",
+                        s.session,
+                        truncate(&s.summary, 500)
+                    ));
+                }
             }
         }
 
-        // Top-K beliefs (full context with large models)
-        let top_k = 5;
-        for (idx, _score) in scored.iter().take(top_k) {
+        let mut belief_ranks: Vec<BeliefRankEntry> = Vec::new();
+        for (idx, score) in scored.iter().take(self.cfg().context_top_k) {
             let belief = &self.beliefs[*idx];
+            belief_ranks.push(BeliefRankEntry {
+                belief_index: *idx,
+                score: *score,
+                source_task: belief.source_task.clone(),
+                preview: truncate(&belief.content, 400).to_string(),
+            });
             context_parts.push(format!("- {}", truncate(&belief.content, 400)));
         }
 
-        context_parts.join("\n")
+        let joined = context_parts.join("\n");
+        let injected_text = if joined.len() > self.cfg().context_char_budget {
+            truncate(&joined, self.cfg().context_char_budget).to_string()
+        } else {
+            joined
+        };
+
+        RankedContextResult {
+            injected_text,
+            belief_ranks,
+            session_summary_sessions: session_summary_sessions,
+        }
     }
 
     /// Select the best skill based on domain + reputation
@@ -494,13 +686,13 @@ impl HsmRunner {
 
     /// Update skill reputation after a turn
     fn update_skill_reputation(&mut self, skill_id: &str, keyword_score: f64) {
+        let thr = self.cfg().skill_success_threshold;
+        let alpha = self.cfg().skill_reputation_alpha;
         if let Some(skill) = self.skills.iter_mut().find(|s| s.id == skill_id) {
             skill.usage_count += 1;
-            if keyword_score >= 0.5 {
+            if keyword_score >= thr {
                 skill.success_count += 1;
             }
-            // Exponential moving average
-            let alpha = 0.3;
             skill.avg_keyword_score =
                 alpha * keyword_score + (1.0 - alpha) * skill.avg_keyword_score;
         }
@@ -541,8 +733,8 @@ impl HsmRunner {
         let request = LlmRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
-            temperature: 0.3,
-            max_tokens: Some(1500),
+            temperature: self.cfg().llm_temperature,
+            max_tokens: Some(self.cfg().llm_max_tokens),
             ..LlmRequest::default()
         };
 

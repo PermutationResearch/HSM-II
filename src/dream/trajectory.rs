@@ -154,6 +154,10 @@ mod tests {
             created_at: 0,
             updated_at,
             update_count: 1,
+            owner_namespace: None,
+            supersedes_belief_id: None,
+            evidence_belief_ids: vec![],
+            human_committed: false,
         }
     }
 

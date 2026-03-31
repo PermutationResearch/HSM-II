@@ -26,10 +26,11 @@ use crate::{
     CASS, CouncilMember, Proposal, RalphCouncil, RalphConfig,
     DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis,
     EmbeddedGraphStore, AgentId, Role,
+    trace2skill::{self, ToolStepRecord, TrajectoryRecord},
     cass::{ContextSnapshot, embedding::EmbeddingEngine},
     council::{CouncilEvidence, CouncilEvidenceKind, CouncilFactory, ModeConfig,
               StigmergicCouncilContext, Decision, RalphVerdict},
-    personal::gateway::{Message, Platform},
+    personal::{gateway::{Message, Platform}, prompt_defaults},
     tools::{Tool, ToolRegistry, ToolCall as ToolCallEntry, RlmProcessTool},
     rlm::LivingPrompt,
     ollama_client::{OllamaClient, OllamaConfig},
@@ -90,6 +91,8 @@ pub struct MessageContext {
     pub assigned_agents: Vec<AgentId>,
     pub council_used: bool,
     pub skills_accessed: Vec<String>,
+    /// Tool steps for Trace2Skill export (skills path and similar).
+    pub tool_steps: Vec<ToolStepRecord>,
     pub start_time: Instant,
     pub joulework_contributions: HashMap<AgentId, f64>,
 }
@@ -122,6 +125,8 @@ pub struct EnhancedPersonalAgent {
     pub last_save: Instant,
     /// Messages since last RLM reflection
     pub messages_since_reflection: u64,
+    /// Last time we attempted a disk skill-bank reload (`HSM_SKILL_BANK_RELOAD_SECS`).
+    last_skill_bank_reload: Instant,
     /// Gateway message channel
     pub gateway_tx: Option<mpsc::Sender<(Message, oneshot::Sender<String>)>>,
     /// Gateway instance (kept alive to keep bots running)
@@ -239,9 +244,7 @@ impl EnhancedPersonalAgent {
         info!("Council factory initialized with automatic mode selection (Debate/Orchestrate/Simple/LLM)");
 
         // Initialize RLM LivingPrompt for self-evolving prompt enrichment
-        let living_prompt = LivingPrompt::new(
-            "You are an HSM-II multi-agent system. Use your tools when the user asks you to perform actions like searching, reading files, running commands, or calculations. Respond with a JSON tool call when appropriate.",
-        );
+        let living_prompt = LivingPrompt::new(prompt_defaults::LIVING_PROMPT_SEED);
         info!("RLM LivingPrompt initialized for prompt evolution");
 
         // Load metrics
@@ -275,6 +278,7 @@ impl EnhancedPersonalAgent {
             agent_metrics,
             last_save: Instant::now(),
             messages_since_reflection: 0,
+            last_skill_bank_reload: Instant::now(),
             gateway_tx: None,
             gateway: None,
             autocontext,
@@ -366,6 +370,41 @@ impl EnhancedPersonalAgent {
     }
     
     /// Initialize runtime services
+    /// Reload `world.skill_bank` from `EmbeddedGraphStore` if `HSM_SKILL_BANK_RELOAD_SECS` elapsed.
+    async fn maybe_reload_skill_bank_from_disk(&mut self) {
+        let Ok(s) = std::env::var("HSM_SKILL_BANK_RELOAD_SECS") else {
+            return;
+        };
+        let Ok(interval) = s.parse::<u64>() else {
+            return;
+        };
+        if interval == 0 {
+            return;
+        }
+        let period = std::time::Duration::from_secs(interval);
+        if self.last_skill_bank_reload.elapsed() < period {
+            return;
+        }
+        self.last_skill_bank_reload = Instant::now();
+        if !EmbeddedGraphStore::exists() {
+            return;
+        }
+        match EmbeddedGraphStore::load_skill_bank() {
+            Ok(bank) => {
+                self.world.skill_bank = bank;
+                let mut cass = CASS::new(self.world.skill_bank.clone());
+                if let Err(e) = cass.initialize().await {
+                    warn!("CASS re-init after skill bank reload failed: {}", e);
+                } else {
+                    self.services.cass = cass;
+                    self.services.cass_initialized = true;
+                    info!("Skill bank reloaded from disk (HSM_SKILL_BANK_RELOAD_SECS={})", interval);
+                }
+            }
+            Err(e) => warn!("Skill bank reload skipped: {}", e),
+        }
+    }
+
     async fn initialize_services(
         world: &HyperStigmergicMorphogenesis,
     ) -> Result<RuntimeServices> {
@@ -389,6 +428,8 @@ impl EnhancedPersonalAgent {
     
     /// Process incoming message with full HSM-II pipeline
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
+        self.maybe_reload_skill_bank_from_disk().await;
+
         let start_time = Instant::now();
         let message_id = msg.id.clone();
         
@@ -401,6 +442,7 @@ impl EnhancedPersonalAgent {
             assigned_agents: Vec::new(),
             council_used: false,
             skills_accessed: Vec::new(),
+            tool_steps: Vec::new(),
             start_time,
             joulework_contributions: HashMap::new(),
         };
@@ -646,6 +688,25 @@ impl EnhancedPersonalAgent {
 
         // Save if needed
         self.maybe_save().await?;
+
+        if let Ok(path) = std::env::var("HSM_TRACE2SKILL_JSONL") {
+            let path = path.trim();
+            if !path.is_empty() {
+                let rec = TrajectoryRecord::from_turn(
+                    &msg.content,
+                    context.council_used,
+                    response.primary_agent,
+                    &context.skills_accessed,
+                    &response.skills_used,
+                    &context.tool_steps,
+                    response.confidence,
+                    &response.content,
+                );
+                if let Err(e) = trace2skill::append_jsonl(std::path::Path::new(path), &rec) {
+                    warn!("Trace2Skill export failed: {}", e);
+                }
+            }
+        }
 
         // Store context
         self.active_contexts.insert(message_id, context);
@@ -1284,6 +1345,23 @@ impl EnhancedPersonalAgent {
 
                         let result = self.tool_registry.execute(call).await;
                         tool_used = true;
+
+                        let args_redacted =
+                            serde_json::to_string(&trace2skill::redact_params(
+                                &result.call.parameters,
+                            ))
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let result_summary = trace2skill::summarize_tool_output(
+                            result.output.success,
+                            &result.output.result,
+                            result.output.error.as_deref(),
+                        );
+                        context.tool_steps.push(ToolStepRecord {
+                            name: tool_name.to_string(),
+                            args_redacted,
+                            ok: result.output.success,
+                            result_summary,
+                        });
 
                         let tool_output = if result.output.success {
                             result.output.result.clone()

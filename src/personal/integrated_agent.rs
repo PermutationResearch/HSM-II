@@ -315,6 +315,7 @@ impl IntegratedPersonalAgent {
             assigned_agents: Vec::new(),
             council_used: false,
             skills_accessed: Vec::new(),
+            tool_steps: Vec::new(),
             start_time,
             joulework_contributions: HashMap::new(),
         };

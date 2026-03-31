@@ -7261,7 +7261,7 @@ impl App {
                                         hyper_stigmergy::dspy::get_template_by_name(&name)
                                     {
                                         match hyper_stigmergy::dspy::optimize_signature(
-                                            &ollama, &model, &db, &sig, 5,
+                                            &ollama, &model, &db, &sig, 5, None,
                                         )
                                         .await
                                         {
@@ -9740,6 +9740,9 @@ async fn council_run_simple(
                 input_question: trace.input_question.clone(),
                 input_context_hash: trace.input_context_hash.clone(),
                 model: trace.model.clone(),
+                failure_code: None,
+                failure_detail: None,
+                signals_json: None,
             };
             let bg = bg_tx.clone();
             tokio::spawn(async move {
