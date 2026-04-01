@@ -52,6 +52,17 @@ type PackContract = {
   description: string;
 };
 
+/** Example that satisfies `property_management_ops_v1` gates + server `missing_critical` heuristics. */
+export const GESTION_VELORA_EXAMPLE_TRANSCRIPT = [
+  "We are Gestion Velora Inc., residential property management in Montreal and Laval.",
+  "Emergency maintenance same day. Standard work orders: we acknowledge the tenant within 24h and follow up until the work order is closed.",
+  "Routine tenant email and portal messages get a written response within one business day.",
+  "Legal notices, lease disputes, and fair housing complaints escalate to outside counsel—never auto-replied by staff.",
+  "Refunds, rent credits, and operating budget changes require owner approval before we act.",
+] as const;
+
+const VELORA_COMPANY_NAME = "Gestion Velora Inc.";
+
 type Props = {
   api: string;
   obVertical: string;
@@ -134,19 +145,24 @@ export function OnboardingWizard(props: Props) {
     [obDraft]
   );
 
-  async function refreshDraft(transcript: string[]) {
+  async function refreshDraft(
+    transcript: string[],
+    opts?: { companyName?: string; verticalTemplate?: string; packContractId?: string }
+  ) {
     if (!transcript.length) return;
     setErr(null);
     setObLoading(true);
     try {
+      const vertical = opts?.verticalTemplate ?? obVertical;
+      const packId = opts?.packContractId ?? selectedPack;
       const r = await fetch(`${api}/api/company/onboarding/draft`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           transcript: transcript.join("\n"),
-          vertical_template: obVertical,
-          pack_contract_id: selectedPack,
-          company_name: obDraft?.company_name ?? "",
+          vertical_template: vertical,
+          pack_contract_id: packId,
+          company_name: opts?.companyName ?? obDraft?.company_name ?? "",
         }),
       });
       const j = await r.json();
@@ -188,6 +204,30 @@ export function OnboardingWizard(props: Props) {
           onClick={() => void refreshDraft(obTranscript)}
         >
           Refresh draft
+        </button>
+        <button
+          type="button"
+          className="rounded border border-emerald-900/50 bg-emerald-950/30 px-3 py-1 text-sm text-emerald-200"
+          disabled={obLoading}
+          onClick={() => {
+            const pmPack =
+              contracts.find((c) => c.id === "property_management_ops_v1") ??
+              contracts.find((c) => c.vertical === "property_management");
+            const packId = pmPack?.id ?? "property_management_ops_v1";
+            setObVertical("property_management");
+            setSelectedPack(packId);
+            const lines = [...GESTION_VELORA_EXAMPLE_TRANSCRIPT];
+            setObTranscript(lines);
+            setObInput("");
+            setObApplyMsg(null);
+            void refreshDraft(lines, {
+              companyName: VELORA_COMPANY_NAME,
+              verticalTemplate: "property_management",
+              packContractId: packId,
+            });
+          }}
+        >
+          Example: Gestion Velora
         </button>
         <select
           className="rounded border border-line bg-panel px-2 py-1 text-sm text-gray-200"

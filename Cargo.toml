@@ -195,6 +195,10 @@ name = "hsm_meta_harness"
 path = "src/bin/hsm_meta_harness.rs"
 
 [[bin]]
+name = "hsm_cc_orchestrate"
+path = "src/bin/hsm_cc_orchestrate.rs"
+
+[[bin]]
 name = "hsm_trace2skill"
 path = "src/bin/hsm_trace2skill.rs"
 

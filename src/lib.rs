@@ -266,7 +266,10 @@ pub use communication::{
 };
 
 pub use harness::{
-    ApprovalOutcome, ApprovalService, ApprovalStore, PendingApproval, RuntimeConfig,
+    run_anti_sycophancy_loop, sycophancy_heuristic, AntiSycophancyConfig, AntiSycophancyRoundLog,
+    AntiSycophancyRunResult, ApprovalOutcome, ApprovalService, ApprovalStore, CcAgentSlot,
+    CcCrossReviewMode, CcDraft, CcOrchestrator, CcOrchestratorConfig, CcReview, CcRunResult,
+    CcTask, CriticParse, CriticVerdict, PendingApproval, RuntimeConfig,
 };
 
 // GPU-accelerated graph processing

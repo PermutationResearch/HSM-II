@@ -9,6 +9,8 @@
 //! - `HSM_HARNESS_CHECKPOINT_DIR=...`
 
 mod events;
+mod anti_sycophancy;
+mod cc_orchestrator;
 mod control_plane;
 mod approval;
 mod deeplink;
@@ -19,6 +21,14 @@ mod scheduler;
 mod store;
 pub mod types;
 
+pub use anti_sycophancy::{
+    run_anti_sycophancy_loop, AntiSycophancyConfig, AntiSycophancyRoundLog, AntiSycophancyRunResult,
+    CriticVerdict, CriticParse, sycophancy_heuristic,
+};
+pub use cc_orchestrator::{
+    CcAgentSlot, CcCrossReviewMode, CcDraft, CcOrchestrator, CcOrchestratorConfig, CcReview,
+    CcRunResult, CcTask,
+};
 pub use events::HarnessEvent;
 pub use control_plane::{ApprovalConfig, PluginConfig, ResumeConfig, RuntimeConfig};
 pub use approval::{ApprovalOutcome, ApprovalService, ApprovalStore, PendingApproval};

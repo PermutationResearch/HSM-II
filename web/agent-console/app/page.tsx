@@ -2,10 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OnboardingWizard, OnboardDraft } from "./components/OnboardingWizard";
-import { PolicyQueuePanel, QueueView } from "./components/PolicyQueuePanel";
-import { TaskListPanel } from "./components/TaskListPanel";
+import { CompanyAgentsPanel, type CoAgentRow } from "./components/CompanyAgentsPanel";
+import { PolicyQueuePanel } from "./components/PolicyQueuePanel";
+import type { QueueView } from "./lib/inboxPlainLanguage";
+import { TaskListPanel, type TaskListDashboardFilter } from "./components/TaskListPanel";
 import { GoalGovernancePanel } from "./components/GoalGovernancePanel";
 import { OrchestrationPanels } from "./components/OrchestrationPanels";
+import { AntiSycophancyPanel } from "./components/AntiSycophancyPanel";
+import { useCompaniesShCatalog, type CompaniesShItem } from "../ui/src/hooks/useCompaniesShCatalog";
+import { WorkspaceSidebar, type WorkspaceConsoleView } from "../ui/src/components/WorkspaceSidebar";
+import { Dashboard, type DashboardDrillDown } from "../ui/src/pages/Dashboard";
 
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -48,13 +54,24 @@ type MemoryFilesResp = {
 
 type AutoDreamResp = Record<string, unknown>;
 
-type NavId = "dash" | "onboard" | "company" | "trail" | "memory" | "graph" | "search" | "email";
+type NavId =
+  | "dash"
+  | "onboard"
+  | "company"
+  | "command"
+  | "quality"
+  | "trail"
+  | "memory"
+  | "graph"
+  | "search"
+  | "email";
 
 type CompanyRow = {
   id: string;
   slug: string;
   display_name: string;
   hsmii_home?: string | null;
+  issue_key_prefix?: string;
   created_at: string;
 };
 type CoHealth = { postgres_configured: boolean; postgres_ok: boolean };
@@ -106,7 +123,7 @@ type PolicyRule = {
 
 export default function ConsolePage() {
   const api = process.env.NEXT_PUBLIC_API_BASE ?? defaultApi;
-  const [view, setView] = useState<NavId>("dash");
+  const [view, setView] = useState<NavId>("command");
   const [stats, setStats] = useState<Stats | null>(null);
   const [trail, setTrail] = useState<TrailResp | null>(null);
   const [trailGraph, setTrailGraph] = useState<TrailGraphPayload | null>(null);
@@ -129,6 +146,10 @@ export default function ConsolePage() {
   const [coHealth, setCoHealth] = useState<CoHealth | null>(null);
   const [coCompanies, setCoCompanies] = useState<CompanyRow[]>([]);
   const [coSel, setCoSel] = useState<string | null>(null);
+  const [focusAgentPersona, setFocusAgentPersona] = useState<string | null>(null);
+  const [taskDashboardFilter, setTaskDashboardFilter] = useState<TaskListDashboardFilter | null>(null);
+  const [dashScrollTaskId, setDashScrollTaskId] = useState<string | null>(null);
+  const [coSpendOpen, setCoSpendOpen] = useState(false);
   const [coTasks, setCoTasks] = useState<TaskRow[]>([]);
   const [coErr, setCoErr] = useState<string | null>(null);
   const [coNewSlug, setCoNewSlug] = useState("");
@@ -158,8 +179,11 @@ export default function ConsolePage() {
   const [coPolicyDecision, setCoPolicyDecision] = useState("admin_required");
   const [coEvalAmount, setCoEvalAmount] = useState("");
   const [coPolicyEvalRes, setCoPolicyEvalRes] = useState<string | null>(null);
+  const [coAgents, setCoAgents] = useState<CoAgentRow[]>([]);
   const [coQueueView, setCoQueueView] = useState<QueueView>("all");
   const [coQueueTasks, setCoQueueTasks] = useState<TaskRow[]>([]);
+  /** Splits Company OS into daily work vs team setup vs power tools. */
+  const [coWorkspaceTab, setCoWorkspaceTab] = useState<"work" | "team" | "advanced">("work");
   const [coSlaDueAt, setCoSlaDueAt] = useState<Record<string, string>>({});
   const [coSlaEscAt, setCoSlaEscAt] = useState<Record<string, string>>({});
   const [coSlaPol, setCoSlaPol] = useState<Record<string, string>>({});
@@ -174,6 +198,29 @@ export default function ConsolePage() {
   const [obApplyLoading, setObApplyLoading] = useState(false);
   const [obApplyMsg, setObApplyMsg] = useState<string | null>(null);
   const coImportRef = useRef<HTMLInputElement>(null);
+  const companiesSh = useCompaniesShCatalog();
+
+  const DASH_LAYOUT_STORAGE = "hsm-dashboard-layout";
+  /** Default Paperclip-style dense console; user can switch to "Overview" in the toggle. */
+  const [commandDashboardLayout, setCommandDashboardLayout] = useState<"nothing" | "admin">("admin");
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DASH_LAYOUT_STORAGE);
+      if (raw === "admin" || raw === "nothing") setCommandDashboardLayout(raw);
+    } catch {
+      /* private mode */
+    }
+  }, []);
+
+  const persistCommandDashboardLayout = useCallback((next: "nothing" | "admin") => {
+    setCommandDashboardLayout(next);
+    try {
+      localStorage.setItem(DASH_LAYOUT_STORAGE, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -267,6 +314,7 @@ export default function ConsolePage() {
           setCoCompanies([]);
           setCoTasks([]);
           setCoGoals([]);
+          setCoAgents([]);
           setCoGovernance([]);
           setCoSpend(null);
           setCoPolicyRules([]);
@@ -281,7 +329,7 @@ export default function ConsolePage() {
         const effectiveSel = selOverride !== undefined ? selOverride : coSel;
         if (effectiveSel) {
           const cid = effectiveSel;
-          const [g, t, gov, sp, pr, q] = await Promise.all([
+          const [g, t, ag, gov, sp, pr, q] = await Promise.all([
             fetch(`${api}/api/company/companies/${cid}/goals`).then((r) => {
               if (!r.ok) throw new Error(`goals ${r.status}`);
               return r.json() as Promise<{ goals: GoalRowUi[] }>;
@@ -289,6 +337,10 @@ export default function ConsolePage() {
             fetch(`${api}/api/company/companies/${cid}/tasks`).then((r) => {
               if (!r.ok) throw new Error(`tasks ${r.status}`);
               return r.json() as Promise<{ tasks: TaskRow[] }>;
+            }),
+            fetch(`${api}/api/company/companies/${cid}/agents`).then((r) => {
+              if (!r.ok) throw new Error(`agents ${r.status}`);
+              return r.json() as Promise<{ agents: CoAgentRow[] }>;
             }),
             fetch(`${api}/api/company/companies/${cid}/governance/events`).then((r) => {
               if (!r.ok) throw new Error(`gov ${r.status}`);
@@ -309,6 +361,7 @@ export default function ConsolePage() {
           ]);
           setCoGoals(g.goals ?? []);
           setCoTasks(t.tasks ?? []);
+          setCoAgents(ag.agents ?? []);
           setCoGovernance(gov.events ?? []);
           setCoSpend(sp);
           setCoPolicyRules(pr.rules ?? []);
@@ -316,6 +369,7 @@ export default function ConsolePage() {
         } else {
           setCoTasks([]);
           setCoGoals([]);
+          setCoAgents([]);
           setCoGovernance([]);
           setCoSpend(null);
           setCoPolicyRules([]);
@@ -409,6 +463,119 @@ export default function ConsolePage() {
     [api, coSel, coQueueView]
   );
 
+  const clearDashScrollTask = useCallback(() => setDashScrollTaskId(null), []);
+
+  const handleDashboardDrill = useCallback(
+    async (d: DashboardDrillDown) => {
+      setView("company");
+      setTaskDashboardFilter(null);
+      setDashScrollTaskId(null);
+      setFocusAgentPersona(null);
+      setCoSpendOpen(false);
+      setCoErr(null);
+      setCoWorkspaceTab(d.type === "spend" ? "advanced" : "work");
+
+      if (!coSel) return;
+
+      const q = async (v: QueueView) => {
+        setCoQueueView(v);
+        await loadQueueView(v);
+      };
+
+      switch (d.type) {
+        case "inbox":
+          await q("all");
+          return;
+        case "queue":
+          await q(d.view as QueueView);
+          return;
+        case "task":
+          await q("all");
+          setDashScrollTaskId(d.taskId);
+          return;
+        case "persona":
+          setFocusAgentPersona(d.persona);
+          await q("all");
+          return;
+        case "filter_priority":
+          setTaskDashboardFilter({ kind: "priority", level: d.level });
+          await q("all");
+          return;
+        case "filter_state":
+          setTaskDashboardFilter({ kind: "state", state: d.state });
+          await q("all");
+          return;
+        case "filter_task_ids":
+          setTaskDashboardFilter({ kind: "ids", ids: d.ids });
+          await q("all");
+          return;
+        case "filter_in_progress":
+          setTaskDashboardFilter({ kind: "in_progress" });
+          await q("all");
+          return;
+        case "filter_open":
+          setTaskDashboardFilter({ kind: "open" });
+          await q("all");
+          return;
+        case "filter_blocked":
+          setTaskDashboardFilter({ kind: "blocked" });
+          await q("all");
+          return;
+        case "filter_completed":
+          setTaskDashboardFilter({ kind: "completed" });
+          await q("all");
+          return;
+        case "spend":
+          setCoSpendOpen(true);
+          await q("all");
+          return;
+        default:
+          return;
+      }
+    },
+    [coSel, loadQueueView]
+  );
+
+  const createFromCatalog = useCallback(
+    async (item: CompaniesShItem) => {
+      if (coHealth && !coHealth.postgres_configured) {
+        setCoErr("Set HSM_COMPANY_OS_DATABASE_URL and restart hsm_console to add companies.");
+        return;
+      }
+      setCoErr(null);
+      let base = item.slug
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
+      if (!base) base = "company";
+      const display_name = item.name.trim() || base;
+      let slug = base;
+      for (let i = 0; i < 8; i++) {
+        const r = await fetch(`${api}/api/company/companies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug, display_name, hsmii_home: null }),
+        });
+        const j = (await r.json()) as { company?: { id: string }; error?: string };
+        if (r.ok && j.company?.id) {
+          setCoSel(j.company.id);
+          await loadCompanyOs(j.company.id);
+          return;
+        }
+        if (r.status === 409) {
+          slug = `${base}-${i + 2}`;
+          continue;
+        }
+        setCoErr(j.error ?? `HTTP ${r.status}`);
+        return;
+      }
+      setCoErr("Could not create company (slug conflict).");
+    },
+    [api, coHealth, loadCompanyOs]
+  );
+
   useEffect(() => {
     load();
     const id = setInterval(load, 5000);
@@ -416,53 +583,146 @@ export default function ConsolePage() {
   }, [load]);
 
   useEffect(() => {
-    if (view !== "company") return;
     void loadCompanyOs();
     const id = setInterval(() => void loadCompanyOs(), 8000);
     return () => clearInterval(id);
-  }, [view, loadCompanyOs]);
+  }, [loadCompanyOs]);
 
-  const nav = (id: NavId, label: string) => (
-    <button
-      type="button"
-      key={id}
-      onClick={() => setView(id)}
-      className={`w-full rounded px-2 py-1 text-left ${
-        view === id ? "bg-white/10 text-accent" : "text-gray-400 hover:bg-white/5"
-      }`}
-    >
-      {label}
-    </button>
+  useEffect(() => {
+    if (coSel || coCompanies.length === 0) return;
+    setCoSel(coCompanies[0].id);
+  }, [coSel, coCompanies]);
+
+  useEffect(() => {
+    setFocusAgentPersona(null);
+    setTaskDashboardFilter(null);
+    setDashScrollTaskId(null);
+    setCoSpendOpen(false);
+    setCoWorkspaceTab("work");
+  }, [coSel]);
+
+  const workspaceLabel = coCompanies.find((c) => c.id === coSel)?.display_name ?? "Workspace";
+  const workspaceInitial = workspaceLabel.replace(/\s+/g, "").slice(0, 1) || "W";
+
+  const sidebarAgents = useMemo(() => {
+    const m = new Map<string, { id: string; name: string; liveCount: number }>();
+    for (const a of coAgents) {
+      if (a.status === "terminated") continue;
+      m.set(a.name, { id: a.name, name: a.name, liveCount: 0 });
+    }
+    for (const t of coTasks) {
+      const id = (t.owner_persona ?? t.checked_out_by ?? "").trim();
+      if (!id) continue;
+      if (!m.has(id)) m.set(id, { id, name: id, liveCount: 0 });
+      const row = m.get(id)!;
+      if (t.checked_out_by || /progress|doing|active/i.test(t.state)) row.liveCount += 1;
+    }
+    return Array.from(m.values());
+  }, [coTasks, coAgents]);
+
+  const dashboardLiveCount = useMemo(
+    () => coTasks.filter((t) => t.checked_out_by || /progress|doing|active/i.test(t.state)).length,
+    [coTasks]
   );
 
-  return (
-    <div className="grid min-h-screen grid-cols-[240px_1fr_300px] gap-0 border-line">
-      <aside className="border-r border-line bg-panel px-3 py-4">
-        <div className="mb-6 text-sm font-semibold tracking-tight text-white">HSM Console</div>
-        <nav className="space-y-1 text-sm">
-          {nav("dash", "Dashboard")}
-          {nav("onboard", "Onboarding")}
-          {nav("company", "Company OS")}
-          {nav("email", "Email draft")}
-          {nav("trail", "Trail")}
-          {nav("memory", "Memory")}
-          {nav("graph", "Graph")}
-          {nav("search", "Search")}
-        </nav>
-        <div className="mt-8 text-xs text-gray-500">
-          API: <span className="font-mono text-gray-400">{api}</span>
-        </div>
-      </aside>
+  const inboxCount = useMemo(() => {
+    if (coQueueTasks.length > 0) return coQueueTasks.length;
+    return coTasks.filter((t) => /open|todo|pending/i.test(t.state)).length;
+  }, [coQueueTasks, coTasks]);
 
-      <main className="border-r border-line bg-ink px-6 py-5">
+  /** Personas / checkout names on tasks → agent id suggestions in Team tab. */
+  const coAgentIdSuggestions = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of coTasks) {
+      const o = (t.owner_persona ?? "").trim();
+      if (o) s.add(o);
+      const c = (t.checked_out_by ?? "").trim();
+      if (c) s.add(c);
+    }
+    return [...s];
+  }, [coTasks]);
+
+  const sidebarProjects = useMemo(
+    () => coGoalsSorted.map((g) => ({ id: g.id, name: g.title })),
+    [coGoalsSorted]
+  );
+
+  const focusAgentGovernance = useMemo(() => {
+    const p = focusAgentPersona?.trim();
+    if (!p) return [];
+    return coGovernance
+      .filter((e) => (e.actor ?? "").trim() === p)
+      .slice()
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, 12);
+  }, [coGovernance, focusAgentPersona]);
+
+  /** Sidebar agent click sets persona id — match workforce row for friendlier labels. */
+  const focusAgentMeta = useMemo(() => {
+    const id = focusAgentPersona?.trim();
+    if (!id) return null;
+    const agent = coAgents.find((a) => a.name === id);
+    return {
+      id,
+      role: agent?.role?.trim() || null,
+      title: agent?.title?.trim() || null,
+      inRegistry: !!agent,
+    };
+  }, [focusAgentPersona, coAgents]);
+
+  return (
+    <div className="flex min-h-screen border-line bg-black">
+      <WorkspaceSidebar
+        workspaceLabel={workspaceLabel}
+        workspaceInitial={workspaceInitial}
+        companies={coCompanies.map((c) => ({ id: c.id, display_name: c.display_name }))}
+        selectedCompanyId={coSel}
+        onSelectCompany={(id) => {
+          setCoSel(id);
+          void loadCompanyOs(id);
+        }}
+        view={view as WorkspaceConsoleView}
+        onNavigate={(id) => setView(id as NavId)}
+        dashboardLiveCount={dashboardLiveCount}
+        inboxCount={inboxCount}
+        projects={sidebarProjects}
+        agents={sidebarAgents}
+        selectedAgentPersona={focusAgentPersona}
+        onSelectAgent={(persona) => {
+          setFocusAgentPersona(persona);
+          setView("company");
+          setCoWorkspaceTab("work");
+        }}
+        onNewIssue={() => {
+          setView("company");
+          setCoWorkspaceTab("work");
+        }}
+        onOpenOnboarding={() => setView("onboard")}
+        apiBase={api}
+        catalog={{
+          items: companiesSh.items,
+          loading: companiesSh.loading,
+          error: companiesSh.error,
+        }}
+        onCreateFromCatalog={createFromCatalog}
+      />
+
+      <main
+        className={
+          view === "command" || view === "company"
+            ? "min-h-screen min-w-0 flex-1 overflow-auto bg-[#010409] px-6 py-5"
+            : "min-h-screen min-w-0 flex-1 overflow-auto px-6 py-5"
+        }
+      >
         {err && (
-          <div className="mb-4 rounded border border-red-900/50 bg-red-950/30 px-3 py-2 text-sm text-red-300">
-            {err} — is <code className="font-mono">hsm_console</code> running?
+          <div className="mb-4 rounded-2xl border border-[#D71921] bg-card px-3 py-2 text-sm text-[#E8E8E8]">
+            <span className="font-mono text-[11px] uppercase tracking-wide text-[#D71921]">[ERROR]</span> {err} — is{" "}
+            <code className="font-mono text-[#999999]">hsm_console</code> running?
           </div>
         )}
         {view === "dash" && (
           <>
-            <h1 className="mb-6 text-lg font-medium text-white">Overview</h1>
+            <h1 className="mb-6 text-lg font-medium text-white">System overview</h1>
             <div className="mb-8 grid grid-cols-4 gap-3">
               <Stat label="Trail events" value={stats?.trail_lines ?? "—"} hint="task_trail.jsonl" />
               <Stat label="Memory .md files" value={stats?.memory_markdown_files ?? "—"} hint="under memory/" />
@@ -491,6 +751,57 @@ export default function ConsolePage() {
             </div>
           </>
         )}
+        {view === "command" && (
+          <div>
+            {coErr && (
+              <div className="mb-4 rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+                {coErr}
+              </div>
+            )}
+            <div className="mb-4 flex flex-wrap items-center justify-end gap-2 border-b border-[#222222] pb-4">
+              <span className="mr-auto font-mono text-[10px] uppercase tracking-[0.08em] text-[#666666]">
+                Dashboard view
+              </span>
+              <div className="inline-flex rounded-full border border-[#333333] p-0.5">
+                <button
+                  type="button"
+                  onClick={() => persistCommandDashboardLayout("nothing")}
+                  className={
+                    commandDashboardLayout === "nothing"
+                      ? "rounded-full bg-white px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-black"
+                      : "rounded-full px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-[#999999] transition-colors hover:text-white"
+                  }
+                >
+                  Overview
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistCommandDashboardLayout("admin")}
+                  className={
+                    commandDashboardLayout === "admin"
+                      ? "rounded-full bg-white px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-black"
+                      : "rounded-full px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-[#999999] transition-colors hover:text-white"
+                  }
+                >
+                  Admin console
+                </button>
+              </div>
+            </div>
+            <Dashboard
+              apiBase={api}
+              companyId={coSel}
+              companies={coCompanies.map((c) => ({
+                id: c.id,
+                display_name: c.display_name,
+                issue_key_prefix: c.issue_key_prefix,
+              }))}
+              layout={commandDashboardLayout}
+              onOpenOnboarding={() => setView("onboard")}
+              onDrillDown={handleDashboardDrill}
+            />
+          </div>
+        )}
+        {view === "quality" && <AntiSycophancyPanel api={api} setErr={setErr} />}
         {view === "onboard" && (
           <OnboardingWizard
             api={api}
@@ -519,48 +830,89 @@ export default function ConsolePage() {
         )}
         {view === "company" && (
           <>
-            <h1 className="mb-2 text-lg font-medium text-white">Company OS</h1>
-            <p className="mb-4 max-w-3xl text-sm text-gray-500">
-              Portfolio, goals, and tasks backed by PostgreSQL. Set{" "}
-              <code className="rounded bg-white/5 px-1 font-mono text-[11px]">HSM_COMPANY_OS_DATABASE_URL</code>{" "}
-              and restart <code className="font-mono text-[11px]">hsm_console</code>. Migrations live in{" "}
-              <code className="font-mono text-[11px]">migrations/</code>.
-            </p>
+            <header className="mb-6 border-b border-[#30363D] pb-5">
+              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">Inbox</p>
+              <h1 className="mt-1 text-lg font-medium tracking-tight text-white">Tasks &amp; queue</h1>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                Triage, approvals, and the full task list—same layout language as Command dashboard.
+              </p>
+            </header>
+            {coSel ? (
+              <div className="mb-4 max-w-3xl">
+                <div className="inline-flex flex-wrap rounded-full border border-line bg-black/40 p-0.5">
+                  {(
+                    [
+                      ["work", "Tasks & queue"],
+                      ["team", "Team & roles"],
+                      ["advanced", "Advanced"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setCoWorkspaceTab(id)}
+                      className={
+                        coWorkspaceTab === id
+                          ? "rounded-full bg-white px-3 py-1.5 text-sm font-medium text-black"
+                          : "rounded-full px-3 py-1.5 text-sm text-gray-400 transition-colors hover:text-white"
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-gray-600">
+                  <strong className="font-medium text-gray-500">Tasks &amp; queue</strong> — create work, run the inbox,
+                  assign and close tasks.{" "}
+                  <strong className="font-medium text-gray-500">Team &amp; roles</strong> — who does what (personas,
+                  briefings). <strong className="font-medium text-gray-500">Advanced</strong> — backup, spend, goals,
+                  orchestration.
+                </p>
+              </div>
+            ) : null}
+            <details className="mb-4 max-w-2xl text-sm text-gray-500">
+              <summary className="cursor-pointer select-none text-gray-500 hover:text-gray-400">
+                Technical setup (database)
+              </summary>
+              <p className="mt-2 leading-relaxed">
+                Company data lives in PostgreSQL. Set{" "}
+                <code className="rounded bg-white/5 px-1 font-mono text-[11px]">HSM_COMPANY_OS_DATABASE_URL</code>{" "}
+                and restart <code className="font-mono text-[11px]">hsm_console</code>. Migrations:{" "}
+                <code className="font-mono text-[11px]">migrations/</code>.
+              </p>
+            </details>
             {coErr && (
               <div className="mb-4 rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
                 {coErr}
               </div>
             )}
-            {coHealth && (
-              <div className="mb-4 text-sm text-gray-400">
-                Postgres:{" "}
-                <span className={coHealth.postgres_ok ? "text-emerald-400" : "text-amber-400"}>
-                  {coHealth.postgres_configured
-                    ? coHealth.postgres_ok
-                      ? "connected"
-                      : "unreachable"
-                    : "not configured"}
-                </span>
+            {coHealth && !coHealth.postgres_configured && (
+              <div className="mb-4 text-sm text-amber-300/90">
+                Database not connected—add a workspace once Postgres is configured (see Technical setup above).
               </div>
             )}
-            <div className="mb-6 flex flex-wrap gap-4">
-              <div className="min-w-[200px] rounded border border-line bg-panel p-3">
-                <div className="mb-2 text-xs uppercase text-gray-500">New company</div>
+            {coHealth?.postgres_configured && !coHealth.postgres_ok && (
+              <div className="mb-4 text-sm text-amber-300/90">Database unreachable—check your server.</div>
+            )}
+            {coHealth?.postgres_configured && coCompanies.length === 0 && (
+              <div className="mb-6 rounded-xl border border-line bg-panel p-4">
+                <div className="mb-1 text-sm font-medium text-white">Create your first workspace</div>
+                <p className="mb-3 text-sm text-gray-500">One workspace per business or brand you run.</p>
                 <input
-                  className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                  placeholder="slug"
+                  className="mb-2 w-full max-w-md rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                  placeholder="Short ID (e.g. velora)"
                   value={coNewSlug}
                   onChange={(e) => setCoNewSlug(e.target.value)}
                 />
                 <input
-                  className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                  placeholder="display name"
+                  className="mb-3 w-full max-w-md rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                  placeholder="Name people see (e.g. Gestion Velora)"
                   value={coNewName}
                   onChange={(e) => setCoNewName(e.target.value)}
                 />
                 <button
                   type="button"
-                  className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+                  className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black hover:bg-gray-200"
                   onClick={async () => {
                     setCoErr(null);
                     try {
@@ -579,270 +931,452 @@ export default function ConsolePage() {
                     }
                   }}
                 >
-                  Create
+                  Create workspace
                 </button>
               </div>
-            </div>
-            <div className="mb-4">
-              <div className="mb-2 text-xs uppercase text-gray-500">Companies</div>
-              <div className="flex flex-wrap gap-2">
-                {coCompanies.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => setCoSel(c.id)}
-                    className={`rounded border px-3 py-1 text-sm ${
-                      coSel === c.id ? "border-accent bg-accent/10 text-accent" : "border-line text-gray-300"
-                    }`}
-                  >
-                    {c.display_name}
-                  </button>
-                ))}
-                {!coCompanies.length && coHealth?.postgres_configured && (
-                  <span className="text-sm text-gray-600">No companies yet.</span>
-                )}
-              </div>
-            </div>
-            {coSel && (
-              <>
-                <div className="mb-4 flex flex-wrap items-center gap-3">
-                  <span className="text-xs uppercase text-gray-500">Bundle</span>
-                  <button
-                    type="button"
-                    className="rounded border border-line bg-panel px-3 py-1 text-sm text-gray-200 hover:bg-white/5"
-                    onClick={async () => {
-                      setCoErr(null);
-                      try {
-                        const r = await fetch(`${api}/api/company/companies/${coSel}/export`);
-                        const j = await r.json();
-                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                        downloadJson(`company-export-${coSel.slice(0, 8)}.json`, j);
-                      } catch (e) {
-                        setCoErr(e instanceof Error ? e.message : String(e));
-                      }
-                    }}
-                  >
-                    Export JSON
-                  </button>
-                  <input
-                    ref={coImportRef}
-                    type="file"
-                    accept="application/json,.json"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      e.target.value = "";
-                      if (!file) return;
-                      setCoErr(null);
-                      try {
-                        const text = await file.text();
-                        const bundle = JSON.parse(text) as Record<string, unknown>;
-                        const r = await fetch(`${api}/api/company/import`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            ...bundle,
-                            slug_suffix_if_exists: coImpSuffix,
-                          }),
-                        });
-                        const j = await r.json();
-                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                        const nid = (j as { company_id?: string }).company_id;
-                        if (nid) {
-                          setCoSel(nid);
-                          await loadCompanyOs(nid);
-                        } else {
-                          await loadCompanyOs();
-                        }
-                      } catch (e) {
-                        setCoErr(e instanceof Error ? e.message : String(e));
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="rounded border border-line bg-panel px-3 py-1 text-sm text-gray-200 hover:bg-white/5"
-                    onClick={() => coImportRef.current?.click()}
-                  >
-                    Import JSON…
-                  </button>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500">
-                    <input
-                      type="checkbox"
-                      checked={coImpSuffix}
-                      onChange={(e) => setCoImpSuffix(e.target.checked)}
-                      className="rounded border-line"
-                    />
-                    Suffix slug if taken (-import)
-                  </label>
-                </div>
-
-                {coSpend && (
-                  <div className="mb-4 rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">Spend (LLM + other)</div>
-                    <div className="text-sm text-gray-300">
-                      Total USD:{" "}
-                      <span className="font-mono text-accent">{coSpend.total_usd.toFixed(4)}</span>
-                    </div>
-                    <ul className="mt-2 text-xs text-gray-500">
-                      {(coSpend.by_kind ?? []).map((row) => (
-                        <li key={row.kind}>
-                          {row.kind}: {row.amount_usd.toFixed(4)}
-                        </li>
+            )}
+            {coCompanies.length > 0 && (
+              <div className="mb-6">
+                <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-gray-300">Workspace</div>
+                    <div className="flex flex-wrap gap-2">
+                      {coCompanies.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setCoSel(c.id)}
+                          className={`rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                            coSel === c.id
+                              ? "border-white bg-white text-black"
+                              : "border-line text-gray-300 hover:border-gray-500"
+                          }`}
+                        >
+                          {c.display_name}
+                        </button>
                       ))}
-                    </ul>
+                    </div>
                   </div>
-                )}
-
-                <div className="mb-4 rounded border border-line bg-panel p-3">
-                  <div className="mb-2 text-xs uppercase text-gray-500">Agent checkout</div>
                   <div className="flex flex-wrap items-center gap-2">
+                    <label className="text-xs text-gray-500" htmlFor="co-checkout-agent">
+                      Sign approvals as
+                    </label>
                     <input
-                      className="w-40 rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="agent_ref"
+                      id="co-checkout-agent"
+                      className="w-44 rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                      placeholder="e.g. your name"
                       value={coCheckoutAgent}
                       onChange={(e) => setCoCheckoutAgent(e.target.value)}
                     />
-                    <span className="text-xs text-gray-600">Used for task checkout / release actor default</span>
                   </div>
                 </div>
-
-                <PolicyQueuePanel
-                  api={api}
-                  coSel={coSel}
-                  coPolicyAction={coPolicyAction}
-                  setCoPolicyAction={setCoPolicyAction}
-                  coPolicyRisk={coPolicyRisk}
-                  setCoPolicyRisk={setCoPolicyRisk}
-                  coPolicyAmtMin={coPolicyAmtMin}
-                  setCoPolicyAmtMin={setCoPolicyAmtMin}
-                  coPolicyAmtMax={coPolicyAmtMax}
-                  setCoPolicyAmtMax={setCoPolicyAmtMax}
-                  coPolicyDecision={coPolicyDecision}
-                  setCoPolicyDecision={setCoPolicyDecision}
-                  coEvalAmount={coEvalAmount}
-                  setCoEvalAmount={setCoEvalAmount}
-                  coPolicyEvalRes={coPolicyEvalRes}
-                  setCoPolicyEvalRes={setCoPolicyEvalRes}
-                  coPolicyRules={coPolicyRules}
-                  coQueueView={coQueueView}
-                  setCoQueueView={setCoQueueView}
-                  coQueueTasks={coQueueTasks}
-                  coDecisionReason={coDecisionReason}
-                  setCoDecisionReason={setCoDecisionReason}
-                  coCheckoutAgent={coCheckoutAgent}
-                  setCoErr={setCoErr}
-                  loadCompanyOs={async () => {
-                    await loadCompanyOs();
-                  }}
-                  loadQueueView={loadQueueView}
-                />
-
-                <GoalGovernancePanel
-                  api={api}
-                  coSel={coSel}
-                  coErrSetter={setCoErr}
-                  loadCompanyOs={async () => {
-                    await loadCompanyOs();
-                  }}
-                  coNewGoalTitle={coNewGoalTitle}
-                  setCoNewGoalTitle={setCoNewGoalTitle}
-                  coNewGoalParent={coNewGoalParent}
-                  setCoNewGoalParent={setCoNewGoalParent}
-                  coGovActor={coGovActor}
-                  setCoGovActor={setCoGovActor}
-                  coGovAction={coGovAction}
-                  setCoGovAction={setCoGovAction}
-                  coGovSubjT={coGovSubjT}
-                  setCoGovSubjT={setCoGovSubjT}
-                  coGovSubjId={coGovSubjId}
-                  setCoGovSubjId={setCoGovSubjId}
-                  coGoalsSorted={coGoalsSorted}
-                  coGoalDepth={coGoalDepth}
-                  coEditGoal={coEditGoal}
-                  setCoEditGoal={setCoEditGoal}
-                  coEditGoalTitle={coEditGoalTitle}
-                  setCoEditGoalTitle={setCoEditGoalTitle}
-                  coEditGoalStatus={coEditGoalStatus}
-                  setCoEditGoalStatus={setCoEditGoalStatus}
-                  coEditGoalParent={coEditGoalParent}
-                  setCoEditGoalParent={setCoEditGoalParent}
-                  coGovernance={coGovernance}
-                />
-
-                <div className="mb-4 flex flex-wrap gap-4">
-                  <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">New task</div>
+                <details className="rounded-lg border border-dashed border-line/80 bg-black/20">
+                  <summary className="cursor-pointer px-3 py-2 text-xs text-gray-500 hover:text-gray-400">
+                    Add another workspace
+                  </summary>
+                  <div className="border-t border-line/60 px-3 py-3">
                     <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="title"
-                      value={coNewTaskTitle}
-                      onChange={(e) => setCoNewTaskTitle(e.target.value)}
+                      className="mb-2 mr-2 w-40 rounded border border-line bg-ink px-2 py-1 text-sm"
+                      placeholder="Short ID"
+                      value={coNewSlug}
+                      onChange={(e) => setCoNewSlug(e.target.value)}
                     />
-                    <textarea
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="specification / acceptance (optional)"
-                      rows={3}
-                      value={coNewTaskSpec}
-                      onChange={(e) => setCoNewTaskSpec(e.target.value)}
+                    <input
+                      className="mb-2 mr-2 w-48 rounded border border-line bg-ink px-2 py-1 text-sm"
+                      placeholder="Display name"
+                      value={coNewName}
+                      onChange={(e) => setCoNewName(e.target.value)}
                     />
                     <button
                       type="button"
-                      className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+                      className="rounded-full bg-accent/20 px-3 py-1 text-sm text-accent"
                       onClick={async () => {
                         setCoErr(null);
                         try {
-                          const r = await fetch(`${api}/api/company/companies/${coSel}/tasks`, {
+                          const r = await fetch(`${api}/api/company/companies`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              title: coNewTaskTitle.trim(),
-                              specification: coNewTaskSpec.trim() || undefined,
-                            }),
+                            body: JSON.stringify({ slug: coNewSlug.trim(), display_name: coNewName.trim() }),
                           });
                           const j = await r.json();
                           if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                          setCoNewTaskTitle("");
-                          setCoNewTaskSpec("");
+                          setCoNewSlug("");
+                          setCoNewName("");
                           await loadCompanyOs();
                         } catch (e) {
                           setCoErr(e instanceof Error ? e.message : String(e));
                         }
                       }}
                     >
-                      Add task
+                      Add
                     </button>
                   </div>
-                </div>
-                <TaskListPanel
-                  api={api}
-                  coTasks={coTasks}
-                  coCheckoutAgent={coCheckoutAgent}
-                  coLatestTaskDecision={coLatestTaskDecision}
-                  coSlaDueAt={coSlaDueAt}
-                  setCoSlaDueAt={setCoSlaDueAt}
-                  coSlaEscAt={coSlaEscAt}
-                  setCoSlaEscAt={setCoSlaEscAt}
-                  coSlaPol={coSlaPol}
-                  setCoSlaPol={setCoSlaPol}
-                  coSlaPrio={coSlaPrio}
-                  setCoSlaPrio={setCoSlaPrio}
-                  coSlaReason={coSlaReason}
-                  setCoSlaReason={setCoSlaReason}
-                  setCoErr={setCoErr}
-                  loadCompanyOs={async () => {
-                    await loadCompanyOs();
-                  }}
-                />
-                <OrchestrationPanels
-                  api={api}
-                  companyId={coSel}
-                  tasks={coTasks}
-                  setCoErr={setCoErr}
-                  loadCompanyOs={async () => {
-                    await loadCompanyOs();
-                  }}
-                />
+                </details>
+              </div>
+            )}
+            {coSel && (
+              <>
+                {coWorkspaceTab === "advanced" ? (
+                  <>
+                    <details className="mb-4 rounded-lg border border-dashed border-line/80 bg-black/20">
+                      <summary className="cursor-pointer px-3 py-2 text-xs text-gray-500 hover:text-gray-400">
+                        Backup, import &amp; export
+                      </summary>
+                      <div className="flex flex-wrap items-center gap-3 border-t border-line/60 px-3 py-3">
+                        <button
+                          type="button"
+                          className="rounded-full border border-line bg-panel px-3 py-1.5 text-sm text-gray-200 hover:bg-white/5"
+                          onClick={async () => {
+                            setCoErr(null);
+                            try {
+                              const r = await fetch(`${api}/api/company/companies/${coSel}/export`);
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              downloadJson(`company-export-${coSel.slice(0, 8)}.json`, j);
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          Export JSON
+                        </button>
+                        <input
+                          ref={coImportRef}
+                          type="file"
+                          accept="application/json,.json"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = "";
+                            if (!file) return;
+                            setCoErr(null);
+                            try {
+                              const text = await file.text();
+                              const bundle = JSON.parse(text) as Record<string, unknown>;
+                              const r = await fetch(`${api}/api/company/import`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  ...bundle,
+                                  slug_suffix_if_exists: coImpSuffix,
+                                }),
+                              });
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              const nid = (j as { company_id?: string }).company_id;
+                              if (nid) {
+                                setCoSel(nid);
+                                await loadCompanyOs(nid);
+                              } else {
+                                await loadCompanyOs();
+                              }
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="rounded-full border border-line bg-panel px-3 py-1.5 text-sm text-gray-200 hover:bg-white/5"
+                          onClick={() => coImportRef.current?.click()}
+                        >
+                          Import JSON…
+                        </button>
+                        <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500">
+                          <input
+                            type="checkbox"
+                            checked={coImpSuffix}
+                            onChange={(e) => setCoImpSuffix(e.target.checked)}
+                            className="rounded border-line"
+                          />
+                          Suffix slug if taken (-import)
+                        </label>
+                      </div>
+                    </details>
+
+                    {coSpend ? (
+                      <details
+                        className="mb-4 rounded-lg border border-dashed border-line/80 bg-black/20"
+                        open={coSpendOpen}
+                        onToggle={(e) => setCoSpendOpen(e.currentTarget.open)}
+                      >
+                        <summary className="cursor-pointer px-3 py-2 text-xs text-gray-500 hover:text-gray-400">
+                          AI usage &amp; spend
+                        </summary>
+                        <div className="border-t border-line/60 px-3 py-3">
+                          <div className="text-sm text-gray-300">
+                            Total USD:{" "}
+                            <span className="font-mono text-accent">{coSpend.total_usd.toFixed(4)}</span>
+                          </div>
+                          <ul className="mt-2 text-xs text-gray-500">
+                            {(coSpend.by_kind ?? []).map((row) => (
+                              <li key={row.kind}>
+                                {row.kind}: {row.amount_usd.toFixed(4)}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </details>
+                    ) : null}
+
+                    <details className="mb-6 rounded-lg border border-line bg-panel">
+                      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
+                        <span className="text-gray-400">▸</span> Goals &amp; governance log{" "}
+                        <span className="font-normal text-gray-500">(optional)</span>
+                      </summary>
+                      <div className="border-t border-line px-2 pb-4 pt-2">
+                        <GoalGovernancePanel
+                          api={api}
+                          coSel={coSel}
+                          coErrSetter={setCoErr}
+                          loadCompanyOs={async () => {
+                            await loadCompanyOs();
+                          }}
+                          coNewGoalTitle={coNewGoalTitle}
+                          setCoNewGoalTitle={setCoNewGoalTitle}
+                          coNewGoalParent={coNewGoalParent}
+                          setCoNewGoalParent={setCoNewGoalParent}
+                          coGovActor={coGovActor}
+                          setCoGovActor={setCoGovActor}
+                          coGovAction={coGovAction}
+                          setCoGovAction={setCoGovAction}
+                          coGovSubjT={coGovSubjT}
+                          setCoGovSubjT={setCoGovSubjT}
+                          coGovSubjId={coGovSubjId}
+                          setCoGovSubjId={setCoGovSubjId}
+                          coGoalsSorted={coGoalsSorted}
+                          coGoalDepth={coGoalDepth}
+                          coEditGoal={coEditGoal}
+                          setCoEditGoal={setCoEditGoal}
+                          coEditGoalTitle={coEditGoalTitle}
+                          setCoEditGoalTitle={setCoEditGoalTitle}
+                          coEditGoalStatus={coEditGoalStatus}
+                          setCoEditGoalStatus={setCoEditGoalStatus}
+                          coEditGoalParent={coEditGoalParent}
+                          setCoEditGoalParent={setCoEditGoalParent}
+                          coGovernance={coGovernance}
+                        />
+                      </div>
+                    </details>
+
+                    <details className="mb-6 rounded-lg border border-line bg-panel">
+                      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
+                        <span className="text-gray-400">▸</span> Orchestration &amp; scale tools{" "}
+                        <span className="font-normal text-gray-500">(spawn rules, handoffs, contracts…)</span>
+                      </summary>
+                      <div className="border-t border-line px-2 pb-4 pt-2">
+                        <OrchestrationPanels
+                          api={api}
+                          companyId={coSel}
+                          tasks={coTasks}
+                          setCoErr={setCoErr}
+                          loadCompanyOs={async () => {
+                            await loadCompanyOs();
+                          }}
+                        />
+                      </div>
+                    </details>
+                  </>
+                ) : null}
+
+                {coWorkspaceTab === "team" ? (
+                  <CompanyAgentsPanel
+                    api={api}
+                    companyId={coSel}
+                    agents={coAgents}
+                    suggestedAgentIds={coAgentIdSuggestions}
+                    setCoErr={setCoErr}
+                    loadCompanyOs={async () => {
+                      await loadCompanyOs();
+                    }}
+                  />
+                ) : null}
+
+                {coWorkspaceTab === "work" ? (
+                  <>
+                    <div className="mb-4 flex flex-wrap gap-4">
+                      <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-4">
+                        <div className="mb-1 text-sm font-semibold text-white">New task</div>
+                        <p className="mb-3 text-xs text-gray-500">
+                          A single thing someone should do—or that you want help with.
+                        </p>
+                        <input
+                          className="mb-2 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                          placeholder="What needs to happen?"
+                          value={coNewTaskTitle}
+                          onChange={(e) => setCoNewTaskTitle(e.target.value)}
+                        />
+                        <textarea
+                          className="mb-3 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                          placeholder="Details or acceptance criteria (optional)"
+                          rows={3}
+                          value={coNewTaskSpec}
+                          onChange={(e) => setCoNewTaskSpec(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black hover:bg-gray-200"
+                          onClick={async () => {
+                            setCoErr(null);
+                            try {
+                              const r = await fetch(`${api}/api/company/companies/${coSel}/tasks`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  title: coNewTaskTitle.trim(),
+                                  specification: coNewTaskSpec.trim() || undefined,
+                                }),
+                              });
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              setCoNewTaskTitle("");
+                              setCoNewTaskSpec("");
+                              await loadCompanyOs();
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          Add to list
+                        </button>
+                      </div>
+                    </div>
+
+                    {focusAgentMeta ? (
+                      <div className="mb-4 rounded-2xl border border-[#30363D] bg-[#0d1117] px-4 py-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                              Filtered inbox
+                            </p>
+                            <h2 className="mt-1 break-all font-mono text-base font-semibold text-[#58a6ff]">
+                              {focusAgentMeta.id}
+                            </h2>
+                            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                              This is the <strong className="font-medium text-[#c9d1d9]">persona id</strong> stored on
+                              tasks as <strong className="font-medium text-[#c9d1d9]">owner</strong> or{" "}
+                              <strong className="font-medium text-[#c9d1d9]">checked out by</strong>. The queue and task
+                              list below only show work tied to this id. You applied the filter by clicking this agent
+                              in the left sidebar.
+                            </p>
+                            {focusAgentMeta.inRegistry ? (
+                              <p className="mt-2 text-xs text-[#484f58]">
+                                Workforce registry:{" "}
+                                {focusAgentMeta.role ? (
+                                  <span className="text-[#8B949E]">role “{focusAgentMeta.role}”</span>
+                                ) : (
+                                  <span className="text-[#8B949E]">(no role text)</span>
+                                )}
+                                {focusAgentMeta.title ? (
+                                  <>
+                                    {" "}
+                                    · <span className="text-[#8B949E]">{focusAgentMeta.title}</span>
+                                  </>
+                                ) : null}
+                              </p>
+                            ) : (
+                              <p className="mt-2 text-xs text-[#484f58]">
+                                Not in <strong className="text-[#6e7681]">Team &amp; roles</strong> yet—only appearing
+                                because it is on tasks. Add a matching row there if you want a proper profile.
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded-md border border-[#30363D] px-3 py-2 font-mono text-[11px] font-medium uppercase tracking-wide text-[#c9d1d9] hover:border-[#484f58] hover:bg-[#161b22]"
+                            onClick={() => setFocusAgentPersona(null)}
+                          >
+                            Show all tasks
+                          </button>
+                        </div>
+                        <div className="mt-4 border-t border-[#30363D] pt-4">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                            Governance log · actor = this id
+                          </p>
+                          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[#484f58]">
+                            Only events where the <strong className="text-[#6e7681]">Actor</strong> field equals{" "}
+                            <span className="font-mono text-[#8B949E]">{focusAgentMeta.id}</span> (e.g. checkout as that
+                            identity). That is separate from “tasks they own,” so this section is often empty until
+                            someone acts under this id.
+                          </p>
+                          {focusAgentGovernance.length > 0 ? (
+                            <ul className="mt-3 max-h-40 space-y-1.5 overflow-auto font-mono text-[11px] text-[#8B949E]">
+                              {focusAgentGovernance.map((ev) => (
+                                <li key={ev.id} className="flex flex-wrap gap-x-2">
+                                  <span className="text-[#484f58]">{ev.created_at}</span>
+                                  <span className="text-[#c9d1d9]">{ev.action}</span>
+                                  <span className="text-[#484f58]">
+                                    {ev.subject_type} {ev.subject_id?.slice(0, 8)}…
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-3 text-xs text-[#484f58]">None yet for this actor string.</p>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <PolicyQueuePanel
+                      api={api}
+                      coSel={coSel}
+                      coPolicyAction={coPolicyAction}
+                      setCoPolicyAction={setCoPolicyAction}
+                      coPolicyRisk={coPolicyRisk}
+                      setCoPolicyRisk={setCoPolicyRisk}
+                      coPolicyAmtMin={coPolicyAmtMin}
+                      setCoPolicyAmtMin={setCoPolicyAmtMin}
+                      coPolicyAmtMax={coPolicyAmtMax}
+                      setCoPolicyAmtMax={setCoPolicyAmtMax}
+                      coPolicyDecision={coPolicyDecision}
+                      setCoPolicyDecision={setCoPolicyDecision}
+                      coEvalAmount={coEvalAmount}
+                      setCoEvalAmount={setCoEvalAmount}
+                      coPolicyEvalRes={coPolicyEvalRes}
+                      setCoPolicyEvalRes={setCoPolicyEvalRes}
+                      coPolicyRules={coPolicyRules}
+                      coQueueView={coQueueView}
+                      setCoQueueView={setCoQueueView}
+                      coQueueTasks={coQueueTasks}
+                      coDecisionReason={coDecisionReason}
+                      setCoDecisionReason={setCoDecisionReason}
+                      coCheckoutAgent={coCheckoutAgent}
+                      setCoErr={setCoErr}
+                      loadCompanyOs={async () => {
+                        await loadCompanyOs();
+                      }}
+                      loadQueueView={loadQueueView}
+                    />
+
+                    <TaskListPanel
+                      api={api}
+                      coTasks={coTasks}
+                      coCheckoutAgent={coCheckoutAgent}
+                      coLatestTaskDecision={coLatestTaskDecision}
+                      coSlaDueAt={coSlaDueAt}
+                      setCoSlaDueAt={setCoSlaDueAt}
+                      coSlaEscAt={coSlaEscAt}
+                      setCoSlaEscAt={setCoSlaEscAt}
+                      coSlaPol={coSlaPol}
+                      setCoSlaPol={setCoSlaPol}
+                      coSlaPrio={coSlaPrio}
+                      setCoSlaPrio={setCoSlaPrio}
+                      coSlaReason={coSlaReason}
+                      setCoSlaReason={setCoSlaReason}
+                      setCoErr={setCoErr}
+                      loadCompanyOs={async () => {
+                        await loadCompanyOs();
+                      }}
+                      filterPersona={focusAgentPersona}
+                      onClearPersonaFilter={() => setFocusAgentPersona(null)}
+                      dashboardFilter={taskDashboardFilter}
+                      onClearDashboardFilter={() => setTaskDashboardFilter(null)}
+                      scrollToTaskId={dashScrollTaskId}
+                      onScrollToTaskDone={clearDashScrollTask}
+                    />
+                  </>
+                ) : null}
               </>
             )}
           </>
@@ -1018,27 +1552,6 @@ export default function ConsolePage() {
           </>
         )}
       </main>
-
-      <aside className="bg-panel px-4 py-5">
-        <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Help</div>
-        <div className="space-y-3 text-sm text-gray-400">
-          <p>
-            Polls <code className="rounded bg-white/5 px-1 font-mono text-accent">/api/console/*</code> every 5s.
-          </p>
-          <p className="text-xs leading-relaxed">
-            Email draft tab → <code className="font-mono text-gray-300">POST /api/console/email-draft</code>{" "}
-            (needs Ollama).
-          </p>
-          <p className="text-xs leading-relaxed">
-            Personal agent: <code className="font-mono text-gray-300">AGENTS.md</code>,{" "}
-            <code className="font-mono text-gray-300">prompt.template.md</code>, MCP plugins,{" "}
-            <code className="font-mono text-gray-300">HSM_AUTODREAM=1</code>.
-          </p>
-          <code className="mt-2 block whitespace-pre-wrap break-all rounded bg-black/40 p-2 font-mono text-[10px] text-gray-300">
-            cargo run -p hyper-stigmergy --bin hsm_console -- --port 3847
-          </code>
-        </div>
-      </aside>
     </div>
   );
 }

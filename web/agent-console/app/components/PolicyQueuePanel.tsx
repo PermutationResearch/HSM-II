@@ -1,10 +1,26 @@
 "use client";
 
 import { Dispatch, SetStateAction } from "react";
-import { Panel } from "./Panel";
-import { StatusChip } from "./StatusChip";
+import {
+  friendlyPolicyDecision,
+  friendlyRisk,
+  friendlyTaskState,
+  queueTabMeta,
+  type QueueView,
+} from "../lib/inboxPlainLanguage";
 
-export type QueueView = "all" | "overdue" | "atrisk" | "waiting_admin" | "pending_approvals" | "blocked";
+function riskOptions(): { value: string; label: string }[] {
+  return [
+    { value: "low", label: friendlyRisk("low") },
+    { value: "medium", label: friendlyRisk("medium") },
+    { value: "high", label: friendlyRisk("high") },
+    { value: "critical", label: friendlyRisk("critical") },
+  ];
+}
+import { Panel } from "./Panel";
+import { StatusChip, type ChipTone } from "./StatusChip";
+
+export type { QueueView } from "../lib/inboxPlainLanguage";
 
 type PolicyRule = {
   id: string;
@@ -83,13 +99,153 @@ export function PolicyQueuePanel(props: Props) {
     loadQueueView,
   } = props;
 
+  const queueTabs: QueueView[] = ["all", "overdue", "atrisk", "waiting_admin", "pending_approvals", "blocked"];
+
+  function queueItemTone(t: TaskRow, rawDecision: string): ChipTone {
+    const dm = rawDecision.toLowerCase();
+    if (t.state === "blocked" || dm === "blocked") return "red";
+    if (t.state === "waiting_admin" || dm === "admin_required") return "amber";
+    if (dm === "auto" || dm === "") return "green";
+    return "gray";
+  }
+
   return (
-    <div className="mb-4 grid gap-4 md:grid-cols-2">
-      <Panel title="Policy rules">
-        <div className="mb-2 grid grid-cols-2 gap-2">
+    <div className="mb-6 space-y-4">
+      <Panel title="Queue" variant="console">
+        <p className="mb-3 text-sm leading-relaxed text-[#8B949E]">
+          Filters for what needs a human—same triage pattern as a dense ops console.
+        </p>
+        <div className="mb-2 flex flex-wrap gap-2">
+          {queueTabs.map((v) => {
+            const { label, hint } = queueTabMeta(v);
+            return (
+              <button
+                key={v}
+                type="button"
+                title={hint}
+                className={`rounded-md border px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                  coQueueView === v
+                    ? "border-[#58a6ff]/50 bg-[#388bfd]/15 text-[#58a6ff]"
+                    : "border-[#30363D] text-[#8B949E] hover:border-[#484f58] hover:text-[#c9d1d9]"
+                }`}
+                onClick={async () => {
+                  setCoQueueView(v);
+                  try {
+                    await loadQueueView(v);
+                  } catch (e) {
+                    setCoErr(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <ul className="max-h-[min(40vh,280px)] space-y-2 overflow-auto text-xs text-[#8B949E]">
+          {coQueueTasks.map((t) => (
+            <li key={t.id} className="rounded-lg border border-[#30363D] bg-[#010409] px-3 py-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-[#c9d1d9]">
+                  <span className="font-medium text-white">{t.title}</span>
+                  {" · "}
+                  {friendlyTaskState(t.state)}
+                  {t.priority !== undefined ? ` · priority ${t.priority}` : ""}
+                  {t.due_at ? ` · due ${t.due_at}` : ""}
+                </span>
+                <StatusChip
+                  label={friendlyPolicyDecision(
+                    t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")
+                  )}
+                  tone={queueItemTone(
+                    t,
+                    t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")
+                  )}
+                />
+              </div>
+              {(coQueueView === "pending_approvals" || t.state === "waiting_admin") && (
+                <div className="flex items-center gap-2">
+                  <input
+                    className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-[11px]"
+                    placeholder="Note for the record (optional)"
+                    value={coDecisionReason[t.id] ?? ""}
+                    onChange={(e) => setCoDecisionReason((m) => ({ ...m, [t.id]: e.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    title="Let this task continue automatically"
+                    className="rounded border border-emerald-700 px-2 py-1 text-[11px] text-emerald-300"
+                    onClick={async () => {
+                      setCoErr(null);
+                      try {
+                        const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            decision_mode: "auto",
+                            actor: coCheckoutAgent.trim() || "admin",
+                            reason: coDecisionReason[t.id] ?? "",
+                          }),
+                        });
+                        const j = await r.json();
+                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                        await loadCompanyOs();
+                      } catch (e) {
+                        setCoErr(e instanceof Error ? e.message : String(e));
+                      }
+                    }}
+                  >
+                    Allow
+                  </button>
+                  <button
+                    type="button"
+                    title="Stop this from proceeding automatically"
+                    className="rounded border border-red-800 px-2 py-1 text-[11px] text-red-300"
+                    onClick={async () => {
+                      setCoErr(null);
+                      try {
+                        const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            decision_mode: "blocked",
+                            actor: coCheckoutAgent.trim() || "admin",
+                            reason: coDecisionReason[t.id] ?? "",
+                          }),
+                        });
+                        const j = await r.json();
+                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                        await loadCompanyOs();
+                      } catch (e) {
+                        setCoErr(e instanceof Error ? e.message : String(e));
+                      }
+                    }}
+                  >
+                    Don&apos;t allow
+                  </button>
+                </div>
+              )}
+            </li>
+          ))}
+          {!coQueueTasks.length && (
+            <li className="text-[#484f58]">Nothing in this view—try another tab or add a task above.</li>
+          )}
+        </ul>
+      </Panel>
+
+      <details className="rounded-lg border border-line bg-panel">
+        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
+          <span className="text-gray-400">▸</span> Automation rules{" "}
+          <span className="font-normal text-gray-500">(optional — for people tuning AI behavior)</span>
+        </summary>
+        <div className="border-t border-line px-4 py-4">
+        <p className="mb-3 text-sm leading-relaxed text-gray-400">
+          Tell the system what AI may do alone, what must wait for you, and what is never automatic.
+        </p>
+        <div className="mb-2 grid max-w-3xl grid-cols-2 gap-2 sm:grid-cols-3">
           <input
             className="rounded border border-line bg-ink px-2 py-1 text-sm"
-            placeholder="action_type"
+            placeholder="Type of action (e.g. send_message)"
             value={coPolicyAction}
             onChange={(e) => setCoPolicyAction(e.target.value)}
           />
@@ -98,20 +254,21 @@ export function PolicyQueuePanel(props: Props) {
             value={coPolicyRisk}
             onChange={(e) => setCoPolicyRisk(e.target.value)}
           >
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="critical">critical</option>
+            {riskOptions().map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
           <input
             className="rounded border border-line bg-ink px-2 py-1 text-sm"
-            placeholder="amount_min (optional)"
+            placeholder="Min $ (optional)"
             value={coPolicyAmtMin}
             onChange={(e) => setCoPolicyAmtMin(e.target.value)}
           />
           <input
             className="rounded border border-line bg-ink px-2 py-1 text-sm"
-            placeholder="amount_max (optional)"
+            placeholder="Max $ (optional)"
             value={coPolicyAmtMax}
             onChange={(e) => setCoPolicyAmtMax(e.target.value)}
           />
@@ -120,9 +277,9 @@ export function PolicyQueuePanel(props: Props) {
             value={coPolicyDecision}
             onChange={(e) => setCoPolicyDecision(e.target.value)}
           >
-            <option value="auto">auto</option>
-            <option value="admin_required">admin_required</option>
-            <option value="blocked">blocked</option>
+            <option value="auto">Runs on its own</option>
+            <option value="admin_required">Ask me first</option>
+            <option value="blocked">Never automatic</option>
           </select>
           <button
             type="button"
@@ -161,7 +318,7 @@ export function PolicyQueuePanel(props: Props) {
         <div className="mb-2 flex flex-wrap gap-2">
           <input
             className="rounded border border-line bg-ink px-2 py-1 text-sm"
-            placeholder="evaluate amount (optional)"
+            placeholder="Test with a dollar amount (optional)"
             value={coEvalAmount}
             onChange={(e) => setCoEvalAmount(e.target.value)}
           />
@@ -191,7 +348,7 @@ export function PolicyQueuePanel(props: Props) {
               }
             }}
           >
-            Evaluate
+            Try it
           </button>
         </div>
         {coPolicyEvalRes && (
@@ -201,117 +358,19 @@ export function PolicyQueuePanel(props: Props) {
         )}
         <ul className="max-h-[180px] space-y-1 overflow-auto text-xs text-gray-400">
           {coPolicyRules.map((r) => (
-            <li key={r.id} className="rounded border border-line bg-ink/50 px-2 py-1">
-              {r.action_type} · {r.risk_level} · {r.decision_mode}
+            <li key={r.id} className="rounded border border-line bg-ink/50 px-2 py-1 text-gray-300">
+              <span className="font-medium text-gray-200">{r.action_type}</span>
+              {" · "}
+              {friendlyRisk(r.risk_level)} · {friendlyPolicyDecision(r.decision_mode)}
               {(r.amount_min ?? r.amount_max) !== undefined
-                ? ` · [${r.amount_min ?? "-inf"} .. ${r.amount_max ?? "+inf"}]`
+                ? ` · if between $${r.amount_min ?? "—"} and $${r.amount_max ?? "—"}`
                 : ""}
             </li>
           ))}
-          {!coPolicyRules.length && <li className="text-gray-600">No policy rules yet.</li>}
+          {!coPolicyRules.length && <li className="text-gray-600">No rules yet—everything uses defaults.</li>}
         </ul>
-      </Panel>
-
-      <Panel title="Queue views">
-        <div className="mb-2 flex flex-wrap gap-2">
-          {(["all", "overdue", "atrisk", "pending_approvals", "blocked"] as QueueView[]).map((v) => (
-            <button
-              key={v}
-              type="button"
-              className={`rounded border px-2 py-1 text-xs ${
-                coQueueView === v ? "border-accent bg-accent/10 text-accent" : "border-line text-gray-400"
-              }`}
-              onClick={async () => {
-                setCoQueueView(v);
-                try {
-                  await loadQueueView(v);
-                } catch (e) {
-                  setCoErr(e instanceof Error ? e.message : String(e));
-                }
-              }}
-            >
-              {v}
-            </button>
-          ))}
         </div>
-        <ul className="max-h-[220px] space-y-1 overflow-auto text-xs text-gray-400">
-          {coQueueTasks.map((t) => (
-            <li key={t.id} className="rounded border border-line bg-ink/50 px-2 py-1">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <span>
-                  {t.title} · {t.state}
-                  {t.priority !== undefined ? ` · p${t.priority}` : ""}
-                  {t.due_at ? ` · due ${t.due_at}` : ""}
-                </span>
-                <StatusChip
-                  label={(t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")).toUpperCase()}
-                />
-              </div>
-              {(coQueueView === "pending_approvals" || t.state === "waiting_admin") && (
-                <div className="flex items-center gap-2">
-                  <input
-                    className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-[11px]"
-                    placeholder="reason (optional)"
-                    value={coDecisionReason[t.id] ?? ""}
-                    onChange={(e) => setCoDecisionReason((m) => ({ ...m, [t.id]: e.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    className="rounded border border-emerald-700 px-2 py-1 text-[11px] text-emerald-300"
-                    onClick={async () => {
-                      setCoErr(null);
-                      try {
-                        const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            decision_mode: "auto",
-                            actor: coCheckoutAgent.trim() || "admin",
-                            reason: coDecisionReason[t.id] ?? "",
-                          }),
-                        });
-                        const j = await r.json();
-                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                        await loadCompanyOs();
-                      } catch (e) {
-                        setCoErr(e instanceof Error ? e.message : String(e));
-                      }
-                    }}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded border border-red-800 px-2 py-1 text-[11px] text-red-300"
-                    onClick={async () => {
-                      setCoErr(null);
-                      try {
-                        const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            decision_mode: "blocked",
-                            actor: coCheckoutAgent.trim() || "admin",
-                            reason: coDecisionReason[t.id] ?? "",
-                          }),
-                        });
-                        const j = await r.json();
-                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                        await loadCompanyOs();
-                      } catch (e) {
-                        setCoErr(e instanceof Error ? e.message : String(e));
-                      }
-                    }}
-                  >
-                    Block
-                  </button>
-                </div>
-              )}
-            </li>
-          ))}
-          {!coQueueTasks.length && <li className="text-gray-600">No queue tasks in this view.</li>}
-        </ul>
-      </Panel>
+      </details>
     </div>
   );
 }

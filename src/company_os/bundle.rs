@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::types::Json as SqlxJson;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -12,6 +13,8 @@ pub struct CompanyExport {
     pub slug: String,
     pub display_name: String,
     pub hsmii_home: Option<String>,
+    #[serde(default)]
+    pub issue_key_prefix: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,11 +37,29 @@ pub struct TaskExport {
     pub priority: i32,
 }
 
+/// Workforce agent (Paperclip-style); `reports_to_id` is the UUID from the export bundle.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentExport {
+    pub id: Uuid,
+    pub name: String,
+    pub role: String,
+    pub title: Option<String>,
+    pub capabilities: Option<String>,
+    pub reports_to_id: Option<Uuid>,
+    pub adapter_type: Option<String>,
+    pub adapter_config: Value,
+    pub budget_monthly_cents: Option<i32>,
+    pub briefing: Option<String>,
+    pub status: String,
+    pub sort_order: i32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CompanyBundle {
     pub schema_version: u32,
     pub company: CompanyExport,
     pub goals: Vec<GoalExport>,
+    pub agents: Vec<AgentExport>,
     pub tasks: Vec<TaskExport>,
 }
 
@@ -49,12 +70,14 @@ pub struct ImportRequest {
     pub slug_suffix_if_exists: bool,
     pub company: CompanyExport,
     pub goals: Vec<GoalExport>,
+    #[serde(default)]
+    pub agents: Vec<AgentExport>,
     pub tasks: Vec<TaskExport>,
 }
 
 pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBundle> {
-    let row: (Uuid, String, String, Option<String>) = sqlx::query_as(
-        "SELECT id, slug, display_name, hsmii_home FROM companies WHERE id = $1",
+    let row: (Uuid, String, String, Option<String>, String) = sqlx::query_as(
+        "SELECT id, slug, display_name, hsmii_home, issue_key_prefix FROM companies WHERE id = $1",
     )
     .bind(company_id)
     .fetch_optional(pool)
@@ -78,13 +101,71 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
         .fetch_all(pool)
         .await?;
 
+    let agents_rows: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+        SqlxJson<Value>,
+        Option<i32>,
+        Option<String>,
+        String,
+        i32,
+    )> = sqlx::query_as(
+        r#"SELECT id, name, role, title, capabilities, reports_to, adapter_type, adapter_config,
+                  budget_monthly_cents, briefing, status, sort_order
+           FROM company_agents WHERE company_id = $1 ORDER BY sort_order, name"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await?;
+
+    let agents: Vec<AgentExport> = agents_rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                name,
+                role,
+                title,
+                capabilities,
+                reports_to,
+                adapter_type,
+                adapter_config,
+                budget_monthly_cents,
+                briefing,
+                status,
+                sort_order,
+            )| AgentExport {
+                id,
+                name,
+                role,
+                title,
+                capabilities,
+                reports_to_id: reports_to,
+                adapter_type,
+                adapter_config: adapter_config.0,
+                budget_monthly_cents,
+                briefing,
+                status,
+                sort_order,
+            },
+        )
+        .collect();
+
+    let schema_version = if agents.is_empty() { 1u32 } else { 2u32 };
+
     Ok(CompanyBundle {
-        schema_version: 1,
+        schema_version,
         company: CompanyExport {
             id: row.0,
             slug: row.1,
             display_name: row.2,
             hsmii_home: row.3,
+            issue_key_prefix: Some(row.4),
         },
         goals: goals
             .into_iter()
@@ -99,6 +180,7 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
                 },
             )
             .collect(),
+        agents,
         tasks: tasks
             .into_iter()
             .map(
@@ -135,13 +217,22 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
 
     let mut tx = pool.begin().await?;
 
+    let prefix = req
+        .company
+        .issue_key_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| super::derive_issue_key_prefix(&slug));
     let company_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO companies (slug, display_name, hsmii_home)
-           VALUES ($1, $2, $3) RETURNING id"#,
+        r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix)
+           VALUES ($1, $2, $3, $4) RETURNING id"#,
     )
     .bind(&slug)
     .bind(req.company.display_name.trim())
     .bind(&req.company.hsmii_home)
+    .bind(&prefix)
     .fetch_one(&mut *tx)
     .await
     .context("insert company")?;
@@ -191,6 +282,60 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         pending = next_round;
     }
 
+    let mut agent_id_map: std::collections::HashMap<Uuid, Uuid> =
+        std::collections::HashMap::with_capacity(req.agents.len());
+
+    let mut pending_agents: Vec<&AgentExport> = req.agents.iter().collect();
+    let guard_agents = pending_agents.len().saturating_mul(3).max(1);
+    let mut iter_agents = 0usize;
+    while !pending_agents.is_empty() {
+        iter_agents += 1;
+        if iter_agents > guard_agents {
+            return Err(anyhow!("agent org chart cycle or missing manager in import"));
+        }
+        let mut next_agents: Vec<&AgentExport> = Vec::new();
+        let mut inserted_agent = false;
+        for a in pending_agents {
+            let ready = a
+                .reports_to_id
+                .map(|p| agent_id_map.contains_key(&p))
+                .unwrap_or(true);
+            if !ready {
+                next_agents.push(a);
+                continue;
+            }
+            let new_mgr = a.reports_to_id.and_then(|p| agent_id_map.get(&p).copied());
+            let new_id: Uuid = sqlx::query_scalar(
+                r#"INSERT INTO company_agents (
+                    company_id, name, role, title, capabilities, reports_to,
+                    adapter_type, adapter_config, budget_monthly_cents, briefing, status, sort_order
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)
+                RETURNING id"#,
+            )
+            .bind(company_id)
+            .bind(&a.name)
+            .bind(&a.role)
+            .bind(&a.title)
+            .bind(&a.capabilities)
+            .bind(new_mgr)
+            .bind(&a.adapter_type)
+            .bind(SqlxJson(a.adapter_config.clone()))
+            .bind(&a.budget_monthly_cents)
+            .bind(&a.briefing)
+            .bind(&a.status)
+            .bind(a.sort_order)
+            .fetch_one(&mut *tx)
+            .await
+            .context("insert company_agent")?;
+            agent_id_map.insert(a.id, new_id);
+            inserted_agent = true;
+        }
+        if !inserted_agent {
+            return Err(anyhow!("agent org chart cycle or missing manager in import"));
+        }
+        pending_agents = next_agents;
+    }
+
     for t in &req.tasks {
         let goal_uuid = t
             .primary_goal_old_id
@@ -203,9 +348,12 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         } else {
             json!([])
         };
+        let display_n = super::next_task_display_number_tx(&mut tx, company_id)
+            .await
+            .context("next task display number")?;
         sqlx::query(
-            r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, priority)
-               VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8)"#,
+            r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, priority, display_number)
+               VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)"#,
         )
         .bind(company_id)
         .bind(goal_uuid)
@@ -215,6 +363,7 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         .bind(&t.state)
         .bind(&t.owner_persona)
         .bind(t.priority)
+        .bind(display_n)
         .execute(&mut *tx)
         .await
         .context("insert task")?;

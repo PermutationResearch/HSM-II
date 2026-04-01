@@ -16,12 +16,15 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
+use crate::harness::{run_anti_sycophancy_loop, AntiSycophancyConfig};
+use crate::llm::client::LlmClient;
 use crate::personal::agent_memory_pipeline::list_memory_markdown_files;
 use crate::personal::autodream;
 use crate::personal::EnhancedPersonalAgent;
 use sqlx::PgPool;
 
 const EMAIL_DRAFT_MAX_BYTES: usize = 256 * 1024;
+const ANTI_SYC_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Clone)]
 pub struct ConsoleState {
@@ -76,6 +79,18 @@ fn default_email_simple() -> bool {
     true
 }
 
+#[derive(Deserialize)]
+struct AntiSycophancyBody {
+    user_message: String,
+    draft_response: String,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    seed_directives: Vec<String>,
+    #[serde(default)]
+    max_rounds: Option<u32>,
+}
+
 pub fn console_router(state: ConsoleState) -> Router {
     Router::new()
         .route("/", get(root_landing))
@@ -90,6 +105,10 @@ pub fn console_router(state: ConsoleState) -> Router {
         .route(
             "/api/console/email-draft",
             post(post_email_draft).layer(DefaultBodyLimit::max(EMAIL_DRAFT_MAX_BYTES)),
+        )
+        .route(
+            "/api/console/anti-sycophancy",
+            post(post_anti_sycophancy).layer(DefaultBodyLimit::max(ANTI_SYC_MAX_BYTES)),
         )
         .merge(crate::company_os::router())
         .layer(CorsLayer::permissive())
@@ -408,4 +427,62 @@ async fn post_email_draft(
             "error": e.to_string(),
         }))),
     }
+}
+
+async fn post_anti_sycophancy(
+    Json(body): Json<AntiSycophancyBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let um = body.user_message.trim();
+    let dr = body.draft_response.trim();
+    if um.is_empty() || dr.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "user_message and draft_response are required",
+            })),
+        ));
+    }
+    if body.draft_response.len() > ANTI_SYC_MAX_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "ok": false, "error": "draft_response too large" })),
+        ));
+    }
+
+    let llm = LlmClient::new().map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "error": format!("LLM unavailable: {e}"),
+            })),
+        )
+    })?;
+
+    let mut cfg = AntiSycophancyConfig::default();
+    if let Some(m) = body.max_rounds {
+        cfg.max_rounds = m.clamp(1, 6);
+    }
+
+    let run = run_anti_sycophancy_loop(
+        Arc::new(llm),
+        cfg,
+        um,
+        body.context.as_deref(),
+        dr,
+        &body.seed_directives,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "result": run,
+    })))
 }

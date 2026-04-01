@@ -2,6 +2,7 @@
 //!
 //! Enable with `HSM_COMPANY_OS_DATABASE_URL=postgres://...`. Migrations in `migrations/` run on startup.
 
+mod agents;
 mod bundle;
 pub mod onboarding_contracts;
 mod spend;
@@ -19,7 +20,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json as SqlxJson;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::console::ConsoleState;
@@ -46,6 +47,7 @@ pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
 
 pub fn router() -> Router<ConsoleState> {
     Router::new()
+        .merge(agents::router())
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
         .route("/api/company/onboarding/contracts", get(list_onboarding_pack_contracts))
@@ -144,6 +146,10 @@ pub fn router() -> Router<ConsoleState> {
         .route("/api/company/tasks/:task_id/decision", post(post_task_decision))
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
+        .route(
+            "/api/company/tasks/:task_id/run-telemetry",
+            post(post_task_run_telemetry),
+        )
 }
 
 fn hash_idem_payload(v: &Value) -> String {
@@ -442,7 +448,7 @@ async fn list_companies(
         return Err(no_db());
     };
     let rows = sqlx::query_as::<_, CompanyRow>(
-        r#"SELECT id, slug, display_name, hsmii_home, created_at::text
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix, created_at::text
            FROM companies ORDER BY display_name"#,
     )
     .fetch_all(pool)
@@ -462,6 +468,7 @@ struct CompanyRow {
     slug: String,
     display_name: String,
     hsmii_home: Option<String>,
+    issue_key_prefix: String,
     created_at: String,
 }
 
@@ -488,14 +495,16 @@ async fn create_company(
             Json(json!({ "error": "slug and display_name required" })),
         ));
     }
+    let prefix = derive_issue_key_prefix(&slug);
     let row: Result<CompanyRow, sqlx::Error> = sqlx::query_as::<_, CompanyRow>(
-        r#"INSERT INTO companies (slug, display_name, hsmii_home)
-           VALUES ($1, $2, $3)
-           RETURNING id, slug, display_name, hsmii_home, created_at::text"#,
+        r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, slug, display_name, hsmii_home, issue_key_prefix, created_at::text"#,
     )
     .bind(&slug)
     .bind(&display_name)
     .bind(&body.hsmii_home)
+    .bind(&prefix)
     .fetch_one(pool)
     .await;
     match row {
@@ -610,6 +619,42 @@ async fn create_goal(
     Ok((StatusCode::CREATED, Json(json!({ "goal": row }))))
 }
 
+fn company_advisory_lock_key(company_id: Uuid) -> i64 {
+    let b = company_id.as_bytes();
+    i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
+pub(super) fn derive_issue_key_prefix(slug: &str) -> String {
+    let s: String = slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(4)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if s.len() >= 2 {
+        s
+    } else {
+        "TSK".to_string()
+    }
+}
+
+pub(super) async fn next_task_display_number_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    company_id: Uuid,
+) -> Result<i32, sqlx::Error> {
+    let key = company_advisory_lock_key(company_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(display_number), 0) + 1 FROM tasks WHERE company_id = $1",
+    )
+    .bind(company_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 #[derive(sqlx::FromRow, Serialize)]
 struct TaskRow {
     id: Uuid,
@@ -625,7 +670,207 @@ struct TaskRow {
     checked_out_by: Option<String>,
     checked_out_until: Option<chrono::DateTime<chrono::Utc>>,
     priority: i32,
+    display_number: i32,
     created_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct TaskRunSnapRow {
+    task_id: Uuid,
+    run_status: String,
+    tool_calls: i32,
+    log_tail: String,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn upsert_run_snapshot_running(pool: &PgPool, company_id: Uuid, task_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO task_run_snapshots (task_id, company_id, run_status, tool_calls, log_tail, finished_at)
+           VALUES ($1, $2, 'running', 0, '', NULL)
+           ON CONFLICT (task_id) DO UPDATE SET
+             run_status = 'running',
+             tool_calls = 0,
+             log_tail = '',
+             finished_at = NULL,
+             updated_at = NOW()"#,
+    )
+    .bind(task_id)
+    .bind(company_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// On checkout release: mark a still-`running` snapshot as success without clobbering `error` / `idle`.
+async fn finalize_run_snapshot_on_release(pool: &PgPool, task_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE task_run_snapshots
+           SET run_status = CASE WHEN run_status = 'running' THEN 'success' ELSE run_status END,
+               finished_at = CASE
+                   WHEN run_status = 'running' AND finished_at IS NULL THEN NOW()
+                   ELSE finished_at
+               END,
+               updated_at = NOW()
+           WHERE task_id = $1"#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+const RUN_LOG_TAIL_MAX_CHARS: usize = 6000;
+
+fn append_truncated_log_tail(existing: &str, chunk: &str) -> String {
+    let s = format!("{existing}{chunk}");
+    let n = s.chars().count();
+    if n <= RUN_LOG_TAIL_MAX_CHARS {
+        return s;
+    }
+    let drop = n - RUN_LOG_TAIL_MAX_CHARS;
+    s.chars().skip(drop).collect()
+}
+
+async fn ensure_task_run_snapshot_row(pool: &PgPool, company_id: Uuid, task_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO task_run_snapshots (task_id, company_id) VALUES ($1, $2)
+           ON CONFLICT (task_id) DO NOTHING"#,
+    )
+    .bind(task_id)
+    .bind(company_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PostRunTelemetryBody {
+    #[serde(default)]
+    run_status: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<i32>,
+    #[serde(default)]
+    log_append: Option<String>,
+    #[serde(default)]
+    clear_log: Option<bool>,
+}
+
+async fn post_task_run_telemetry(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PostRunTelemetryBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let cid: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    let Some(company_id) = cid else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+    };
+
+    if let Some(ref st) = body.run_status {
+        if !matches!(st.as_str(), "idle" | "running" | "success" | "error") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "run_status must be idle|running|success|error" })),
+            ));
+        }
+    }
+
+    ensure_task_run_snapshot_row(pool, company_id, task_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let mut snap = sqlx::query_as::<_, TaskRunSnapRow>(
+        r#"SELECT task_id, run_status, tool_calls, log_tail, finished_at, updated_at
+           FROM task_run_snapshots WHERE task_id = $1"#,
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if body.clear_log == Some(true) {
+        snap.log_tail.clear();
+    }
+    if let Some(ref app) = body.log_append {
+        if !app.is_empty() {
+            snap.log_tail = append_truncated_log_tail(&snap.log_tail, app);
+        }
+    }
+    if let Some(tc) = body.tool_calls {
+        if tc >= 0 {
+            snap.tool_calls = tc;
+        }
+    }
+
+    let status = body
+        .run_status
+        .clone()
+        .unwrap_or_else(|| snap.run_status.clone());
+    let finished_at = if body.run_status.is_some() {
+        if status == "success" || status == "error" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        }
+    } else {
+        snap.finished_at
+    };
+
+    let updated = sqlx::query_as::<_, TaskRunSnapRow>(
+        r#"UPDATE task_run_snapshots SET
+             run_status = $2,
+             tool_calls = $3,
+             log_tail = $4,
+             finished_at = $5,
+             updated_at = NOW()
+           WHERE task_id = $1
+           RETURNING task_id, run_status, tool_calls, log_tail, finished_at, updated_at"#,
+    )
+    .bind(task_id)
+    .bind(&status)
+    .bind(snap.tool_calls)
+    .bind(&snap.log_tail)
+    .bind(finished_at)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "run": {
+            "status": updated.run_status,
+            "tool_calls": updated.tool_calls,
+            "log_tail": updated.log_tail,
+            "finished_at": updated.finished_at.map(|d| d.to_rfc3339()),
+            "updated_at": updated.updated_at.to_rfc3339(),
+        }
+    })))
 }
 
 async fn list_tasks(
@@ -637,7 +882,7 @@ async fn list_tasks(
     };
     let rows = sqlx::query_as::<_, TaskRow>(
         r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text
+                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text
            FROM tasks WHERE company_id = $1 ORDER BY priority DESC, created_at"#,
     )
     .bind(company_id)
@@ -649,7 +894,42 @@ async fn list_tasks(
             Json(json!({ "error": e.to_string() })),
         )
     })?;
-    Ok(Json(json!({ "tasks": rows })))
+    let snaps = sqlx::query_as::<_, TaskRunSnapRow>(
+        r#"SELECT task_id, run_status, tool_calls, log_tail, finished_at, updated_at
+           FROM task_run_snapshots WHERE company_id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let smap: std::collections::HashMap<Uuid, TaskRunSnapRow> = snaps.into_iter().map(|s| (s.task_id, s)).collect();
+    let tasks: Vec<Value> = rows
+        .into_iter()
+        .filter_map(|t| {
+            let mut v = serde_json::to_value(&t).ok()?;
+            if let Value::Object(ref mut obj) = v {
+                let run_val = if let Some(s) = smap.get(&t.id) {
+                    json!({
+                        "status": s.run_status,
+                        "tool_calls": s.tool_calls,
+                        "log_tail": s.log_tail,
+                        "finished_at": s.finished_at.map(|d| d.to_rfc3339()),
+                        "updated_at": s.updated_at.to_rfc3339(),
+                    })
+                } else {
+                    Value::Null
+                };
+                obj.insert("run".to_string(), run_val);
+            }
+            Some(v)
+        })
+        .collect();
+    Ok(Json(json!({ "tasks": tasks })))
 }
 
 #[derive(Deserialize)]
@@ -777,11 +1057,28 @@ async fn create_task(
         ancestry_json = serde_json::to_value(&chain).unwrap_or(json!([]));
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    let display_n = next_task_display_number_tx(&mut tx, company_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, owner_persona, parent_task_id, spawned_by_rule_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, owner_persona, parent_task_id, spawned_by_rule_id, display_number)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
     )
     .bind(company_id)
     .bind(&body.primary_goal_id)
@@ -791,9 +1088,16 @@ async fn create_task(
     .bind(&body.owner_persona)
     .bind(&body.parent_task_id)
     .bind(&body.spawned_by_rule_id)
-    .fetch_one(pool)
+    .bind(display_n)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    tx.commit().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -1026,7 +1330,7 @@ async fn post_task_decision(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
     )
     .bind(task_id)
     .bind(next_state)
@@ -1121,7 +1425,7 @@ async fn checkout_task(
            WHERE id = $3
              AND (checked_out_by IS NULL OR checked_out_until < NOW())
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
     )
     .bind(&agent)
     .bind(body.ttl_sec)
@@ -1142,7 +1446,61 @@ async fn checkout_task(
             })),
         ));
     };
-    Ok(Json(json!({ "task": t })))
+
+    let agent_run_profile = agents::resolve_run_profile_for_task(
+        pool,
+        t.company_id,
+        &agent,
+        t.owner_persona.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    tracing::info!(
+        target: "hsm_company_agent_inject",
+        task_id = %task_id,
+        company_id = %t.company_id,
+        endpoint = "task_checkout",
+        checkout_ref = %agent,
+        company_agent_row_found = agent_run_profile.resolved,
+        addon_bytes = agent_run_profile.system_context_addon_bytes,
+        matched_as = ?agent_run_profile.matched_as,
+        agent_id = ?agent_run_profile.agent_id,
+        adapter_type = ?agent_run_profile.adapter_type,
+        adapter_profile_non_null = agent_run_profile.resolved,
+    );
+
+    let gov_payload = json!({
+        "checkout_ref": agent,
+        "resolved": agent_run_profile.resolved,
+        "agent_id": agent_run_profile.agent_id,
+        "matched_as": agent_run_profile.matched_as,
+        "matched_agent_name": agent_run_profile.matched_agent_name,
+        "adapter_type": agent_run_profile.adapter_type,
+        "system_context_addon_bytes": agent_run_profile.system_context_addon_bytes,
+    });
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, $2, 'task_checkout_agent_profile', 'task', $3, $4, 'info')"#,
+    )
+    .bind(t.company_id)
+    .bind(&agent)
+    .bind(task_id.to_string())
+    .bind(SqlxJson(gov_payload))
+    .execute(pool)
+    .await;
+
+    let _ = upsert_run_snapshot_running(pool, t.company_id, task_id).await;
+
+    Ok(Json(json!({
+        "task": t,
+        "agent_run_profile": agent_run_profile,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1166,7 +1524,7 @@ async fn release_task(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -1195,6 +1553,9 @@ async fn release_task(
       .bind(SqlxJson(json!({ "via": "release_task" })))
       .execute(pool)
       .await;
+
+    let _ = finalize_run_snapshot_on_release(pool, task_id).await;
+
     Ok(Json(json!({ "task": t })))
 }
 
@@ -1329,7 +1690,7 @@ async fn spawn_subagent_tasks(
     };
     let parent = sqlx::query_as::<_, TaskRow>(
         r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
-                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text
+                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text
            FROM tasks WHERE id = $1 AND company_id = $2"#,
     )
     .bind(task_id)
@@ -1398,14 +1759,31 @@ async fn spawn_subagent_tasks(
                 continue;
             }
         }
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
         for i in 0..r.max_subtasks {
+            let display_n = next_task_display_number_tx(&mut tx, company_id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                })?;
             let title = format!("{} · {} #{:02}", parent.title, r.subagent_persona, i + 1);
             let row = sqlx::query_as::<_, TaskRow>(
                 r#"INSERT INTO tasks
-                   (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, parent_task_id, spawned_by_rule_id, priority)
-                   VALUES ($1,$2,$3,$4,$5,'open',$6,$7,$8,$9)
+                   (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, parent_task_id, spawned_by_rule_id, priority, display_number)
+                   VALUES ($1,$2,$3,$4,$5,'open',$6,$7,$8,$9,$10)
                    RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
-                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
             )
             .bind(company_id)
             .bind(parent.primary_goal_id)
@@ -1416,11 +1794,18 @@ async fn spawn_subagent_tasks(
             .bind(task_id)
             .bind(r.id)
             .bind(parent.priority)
-            .fetch_one(pool)
+            .bind(display_n)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
             created.push(row);
         }
+        tx.commit().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
     }
     let actor = if body.actor.trim().is_empty() {
         "spawn_engine"
@@ -2764,6 +3149,19 @@ fn template_defaults(vertical: &str) -> (&'static str, Vec<OnboardWorkflowDraft>
                 OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
             ],
         ),
+        "property_management" | "property" => (
+            "property_management",
+            vec![
+                OnboardWorkflowDraft { title: "Tenant request triage".into(), owner_role: "property_admin".into(), priority: "high".into(), sla_target: "same_day".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Maintenance dispatch & follow-up".into(), owner_role: "maintenance_coord".into(), priority: "high".into(), sla_target: "24h".into(), approval: "admin_required".into() },
+                OnboardWorkflowDraft { title: "Owner financial packet review".into(), owner_role: "owner".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "admin_required".into() },
+            ],
+            vec![
+                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "low".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "property_admin".into() },
+                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(0.0), amount_max: None, approver_role: "owner".into() },
+                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+            ],
+        ),
         _ => (
             "generic_smb",
             vec![
@@ -2948,12 +3346,14 @@ async fn apply_onboarding_draft(
         )
     })?;
 
+    let issue_prefix = derive_issue_key_prefix(&slug);
     let company_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO companies (slug, display_name)
-           VALUES ($1, $2) RETURNING id"#,
+        r#"INSERT INTO companies (slug, display_name, issue_key_prefix)
+           VALUES ($1, $2, $3) RETURNING id"#,
     )
     .bind(&slug)
     .bind(display_name)
+    .bind(&issue_prefix)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -3001,9 +3401,17 @@ async fn apply_onboarding_draft(
             "admin_required" => "waiting_admin",
             _ => "open",
         };
+        let display_n = next_task_display_number_tx(&mut tx, company_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
         sqlx::query(
-            r#"INSERT INTO tasks (company_id, title, specification, state, owner_persona, priority)
-               VALUES ($1, $2, $3, $4, $5, $6)"#,
+            r#"INSERT INTO tasks (company_id, title, specification, state, owner_persona, priority, display_number)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
         )
         .bind(company_id)
         .bind(w.title.trim())
@@ -3011,6 +3419,7 @@ async fn apply_onboarding_draft(
         .bind(state)
         .bind(w.owner_role.trim())
         .bind(p)
+        .bind(display_n)
         .execute(&mut *tx)
         .await
         .map_err(|e| {

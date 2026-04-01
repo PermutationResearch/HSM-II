@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod registry;
+pub mod scored_tool_router;
 pub mod tool_permissions;
 pub mod web_search;
 pub mod file_tools;
@@ -63,6 +64,10 @@ pub mod text_tools;
 pub mod email_tools;
 
 pub use registry::ToolRegistry;
+pub use scored_tool_router::{
+    pick_tool_for_prompt, rank_tools_for_prompt, route_prompt_execute, ScoredRouteConfig, ScoredRouteError,
+    ScoredRouteFailReason, ScoredTool,
+};
 pub use tool_permissions::ToolPermissionContext;
 pub use web_search::WebSearchTool;
 pub use file_tools::{ReadTool, WriteTool, EditTool};

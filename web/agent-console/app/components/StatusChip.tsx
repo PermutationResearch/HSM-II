@@ -1,6 +1,7 @@
 "use client";
 
-type Tone = "green" | "amber" | "red" | "gray";
+export type ChipTone = "green" | "amber" | "red" | "gray";
+type Tone = ChipTone;
 
 function toneForStatus(status: string): Tone {
   const s = status.trim().toUpperCase();
@@ -10,7 +11,7 @@ function toneForStatus(status: string): Tone {
   return "gray";
 }
 
-export function StatusChip({ label, tone }: { label: string; tone?: Tone }) {
+export function StatusChip({ label, tone }: { label: string; tone?: ChipTone }) {
   const t = tone ?? toneForStatus(label);
   const cls =
     t === "green"

@@ -2,6 +2,69 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Nothing dark tokens (instrument panel / OLED) — mirrors Tailwind theme */
+:root {
+  --nd-black: #000000;
+  --nd-surface: #111111;
+  --nd-surface-raised: #1a1a1a;
+  --nd-border: #222222;
+  --nd-border-visible: #333333;
+  --nd-text-disabled: #666666;
+  --nd-text-secondary: #999999;
+  --nd-text-primary: #e8e8e8;
+  --nd-text-display: #ffffff;
+  --nd-accent: #d71921;
+  --nd-success: #4a9e5c;
+  --nd-warning: #d4a843;
+  --nd-interactive: #5b9bf6;
+}
+
 body {
-  @apply bg-ink text-gray-200 antialiased;
+  @apply bg-background text-foreground antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* ALL CAPS instrument labels (Nothing components.md) */
+.nd-label {
+  @apply font-mono text-[11px] font-normal uppercase tracking-[0.08em] text-muted-foreground;
+}
+
+@keyframes activity-row-enter {
+  from {
+    background-color: rgba(255, 255, 255, 0.08);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.activity-row-enter {
+  animation: activity-row-enter 0.95s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/**
+ * Dashboard: one ambient layer only (nothing-gradients). Cards/charts stay flat (#111 + borders).
+ */
+.nd-dashboard-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+.nd-dashboard-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+      130% 90% at 50% -35%,
+      oklab(0.21 0.02 -0.04 / 0.42) 0%,
+      oklab(0.05 0 0 / 0) 52%
+    ),
+    #000000;
+}
+
+.nd-dashboard-shell > * {
+  position: relative;
+  z-index: 1;
 }
