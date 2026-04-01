@@ -2,7 +2,7 @@
 //!
 //! This module provides the complete integration of:
 //! - Federation (multi-node knowledge sharing)
-//! - Email Agent (autonomous inbox management with LadybugDB)
+//! - Email Agent (IMAP inbox when configured) + **`/email answer`** to paste an email and get an LLM draft (no IMAP required)
 //! - Coder Assistant (dedicated code editing mode)
 //! - Prolog Logic (symbolic reasoning engine)
 //! - GPU Compute (optional acceleration)
@@ -303,6 +303,8 @@ impl IntegratedPersonalAgent {
     
     /// Main message processing pipeline with all components integrated
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
+        self.core.maybe_run_heartbeat_tick().await;
+
         let start_time = Instant::now();
         let message_id = msg.id.clone();
         
@@ -418,10 +420,56 @@ impl IntegratedPersonalAgent {
         _context: &mut crate::personal::MessageContext,
     ) -> Result<crate::personal::AgentResponse> {
         let args = msg.content.trim_start_matches("/email").trim();
-        
+
+        // LLM reply draft — no IMAP required (same as EnhancedPersonalAgent `/email answer`).
+        if args.starts_with("answer") || args.starts_with("reply") {
+            let after = args
+                .strip_prefix("answer")
+                .or_else(|| args.strip_prefix("reply"))
+                .unwrap_or("")
+                .trim_start();
+            if after.is_empty() {
+                return Ok(crate::personal::AgentResponse {
+                    content: "📧 **Usage:** `/email answer` then paste the inbound email in the same message:\n\n\
+                        `/email answer`\n\
+                        From: …\n\
+                        Subject: …\n\n\
+                        Body…\n\n\
+                        `/email reply` is equivalent. Review the draft before sending."
+                        .to_string(),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 1.0,
+                    skills_used: vec!["email_draft".to_string()],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                });
+            }
+            return match self.core.draft_email_reply(after).await {
+                Ok(draft) => Ok(crate::personal::AgentResponse {
+                    content: format!("📧 **Draft reply** (review before sending)\n\n{draft}"),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 0.85,
+                    skills_used: vec!["email_draft".to_string()],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                }),
+                Err(e) => Ok(crate::personal::AgentResponse {
+                    content: format!("❌ Could not draft reply: {e}"),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 0.0,
+                    skills_used: vec![],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                }),
+            };
+        }
+
         if let Some(email_agent) = &self.components.email {
             let email = email_agent.read().await;
-            
+
             let content = if args.is_empty() || args == "status" {
                 let stats = email.stats();
                 format!("📧 **Email Agent Status**\n\nProcessed: {} emails", stats.total_processed)
@@ -436,12 +484,16 @@ impl IntegratedPersonalAgent {
                         }
                         output
                     }
-                    Err(e) => format!("❌ Email processing failed: {}", e)
+                    Err(e) => format!("❌ Email processing failed: {}", e),
                 }
             } else {
-                "📧 **Email Commands**\n- `/email status` - Show email stats\n- `/email inbox` - Process inbox\n".to_string()
+                "📧 **Email commands**\n\
+                - `/email answer` — paste inbound email; LLM drafts a reply (no IMAP needed)\n\
+                - `/email status` — stats (requires email agent)\n\
+                - `/email inbox` — process inbox (requires email agent)\n"
+                    .to_string()
             };
-            
+
             Ok(crate::personal::AgentResponse {
                 content,
                 primary_agent: 0,
@@ -453,7 +505,10 @@ impl IntegratedPersonalAgent {
             })
         } else {
             Ok(crate::personal::AgentResponse {
-                content: "📧 Email agent not enabled. Set enable_email=true in config.".to_string(),
+                content: "📧 **IMAP email agent** is not enabled (`enable_email` + `email_config`).\n\n\
+                You can still draft replies with **`/email answer`** (paste the message in the same chat).\n\
+                Enable the email agent for `/email inbox` / `status`."
+                    .to_string(),
                 primary_agent: 0,
                 council_used: false,
                 confidence: 0.0,

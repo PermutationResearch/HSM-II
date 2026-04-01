@@ -114,6 +114,29 @@ pub fn rubric_turn_pass_with_llm(extras: &RubricExtras) -> bool {
 }
 
 /// Overlap of content words from injected context found in response (recall / grounding).
+/// Strip structured list markers so grounding measures overlap with **memory payload**, not `[belief score=…]` scaffolding (which models rarely echo verbatim).
+pub fn injected_text_for_grounding_overlap(injected_memory_context: &str) -> String {
+    let mut parts = Vec::new();
+    for line in injected_memory_context.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let body = if let Some(idx) = line.find("] ") {
+            line[idx + 2..].trim()
+        } else if let Some(idx) = line.rfind(']') {
+            // e.g. `]foo` without space — take after `]`
+            line[idx + 1..].trim()
+        } else {
+            line
+        };
+        if !body.is_empty() {
+            parts.push(body);
+        }
+    }
+    parts.join("\n")
+}
+
 pub fn grounding_metrics(
     requires_recall: bool,
     injected_memory_context: &str,
@@ -122,7 +145,11 @@ pub fn grounding_metrics(
     if !requires_recall || injected_memory_context.trim().is_empty() {
         return (false, 1.0, true);
     }
-    let ctx_words = tokenize_for_overlap(injected_memory_context);
+    let for_overlap = injected_text_for_grounding_overlap(injected_memory_context);
+    let mut ctx_words = tokenize_for_overlap(&for_overlap);
+    if ctx_words.is_empty() {
+        ctx_words = tokenize_for_overlap(injected_memory_context);
+    }
     if ctx_words.is_empty() {
         return (true, 1.0, true);
     }
@@ -248,4 +275,20 @@ fn parse_judge_json(text: &str) -> Option<(bool, String)> {
         .unwrap_or("")
         .to_string();
     Some((pass, reason))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grounding_strip_keeps_payload_words() {
+        let injected = "- [belief score=0.40 task=se-01] openapi webhook pagination\n- [session=2 score=0.10] discussed rate limits";
+        let s = injected_text_for_grounding_overlap(injected);
+        assert!(s.contains("openapi"));
+        assert!(s.contains("pagination"));
+        assert!(!s.contains("[belief"));
+        let (_, score, _) = grounding_metrics(true, injected, "We use OpenAPI with webhooks and pagination.");
+        assert!(score > 0.2);
+    }
 }

@@ -1,0 +1,11 @@
+# Copy to <HSMII_HOME>/config/prompt_routes.yaml
+# First matching keyword wins (substring, case-insensitive).
+routes:
+  - keywords: [finance, invoice, tax, payroll]
+    persona_key: accounting
+    system_template: |
+      Prefer concise, audit-friendly answers. Cite numbers only when given by the user.
+  - keywords: [legal, contract, compliance, liability]
+    persona_key: legal
+    system_template: |
+      Flag uncertainty explicitly; avoid binding legal conclusions without policy text.

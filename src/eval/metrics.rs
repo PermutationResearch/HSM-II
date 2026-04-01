@@ -432,8 +432,18 @@ pub fn print_report(report: &ComparisonReport) {
     println!("\n--- Improvements (positive = HSM-II better) ---");
     println!("{:<40} {:>+10.1}% (delta: {:>+.3})", "Keyword quality", report.improvement.keyword_score_pct, report.improvement.keyword_score_delta);
     println!("{:<40} {:>+10.1}% (delta: {:>+.3})", "Cross-session recall", report.improvement.recall_score_pct, report.improvement.recall_score_delta);
-    println!("{:<40} {:>+10.1}% ({:.0} tokens saved)", "Token reduction", report.improvement.token_reduction_pct, report.improvement.token_reduction);
-    println!("{:<40} {:>+10.1}% ({:.0} tokens saved)", "Prompt token reduction", report.improvement.prompt_token_reduction_pct, report.improvement.prompt_token_reduction);
+    println!(
+        "{:<40} {:>+10.1}% ({:+} total tok vs baseline; + = HSM lower)",
+        "Total tokens (Δ)",
+        report.improvement.token_reduction_pct,
+        report.improvement.token_reduction as i64,
+    );
+    println!(
+        "{:<40} {:>+10.1}% ({:+} prompt tok vs baseline; + = HSM lower)",
+        "Prompt tokens (Δ)",
+        report.improvement.prompt_token_reduction_pct,
+        report.improvement.prompt_token_reduction as i64,
+    );
     println!("{:<40} {:>+10.1}% ({:.0} calls saved)", "LLM call reduction", report.improvement.llm_call_reduction_pct, report.improvement.llm_call_reduction);
     println!("{:<40} {:>+10.1}% ({:>+.0}ms)", "Latency", report.improvement.latency_delta_pct, report.improvement.latency_delta_ms);
     println!("{:<40} {:>+10.3} (Δ pass rate {:>+.3})", "Rubric composite", report.improvement.rubric_composite_delta, report.improvement.rubric_pass_rate_delta);

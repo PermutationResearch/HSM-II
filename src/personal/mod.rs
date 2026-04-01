@@ -13,6 +13,9 @@ use crate::ollama_client::{OllamaClient, OllamaConfig};
 use crate::tools::ToolRegistry;
 use tokio::sync::{mpsc, oneshot};
 
+pub mod agent_memory_pipeline;
+pub mod autodream;
+pub mod business_pack;
 pub mod enhanced_agent;
 pub mod integrated_agent;
 pub mod prompt_defaults;
@@ -20,7 +23,11 @@ pub mod gateway;
 pub mod heartbeat;
 pub mod hypergraph_client;
 pub mod memory;
+pub mod outbound;
+pub mod ops_config;
+pub mod path_attachments;
 pub mod persona;
+pub mod task_trail;
 
 pub use enhanced_agent::{
     EnhancedPersonalAgent, EnhancedAgentConfig, AgentResponse, WorldStats,
@@ -32,10 +39,19 @@ pub use integrated_agent::{
 
 /// Full-stack agent: same as [`IntegratedPersonalAgent`] (shared `EnhancedPersonalAgent` core + integration layer).
 pub type UnifiedPersonalAgent = IntegratedPersonalAgent;
+pub use business_pack::{
+    validate_pack_yaml_file, BusinessPack, BusinessPersona, CompanyProfile, PackValidationReport,
+    MAX_KNOWLEDGE_FILE_BYTES, MAX_POLICY_FILE_BYTES, MAX_TOTAL_INJECTED_BYTES,
+    SUPPORTED_SCHEMA_VERSION,
+};
 pub use heartbeat::{CronJob, Heartbeat, Routine, RoutineAction, RoutineTrigger};
 pub use hypergraph_client::HypergraphClient;
 pub use memory::{MemoryFact, MemoryMd, PersonalMemory, Project, UserMd};
 pub use persona::{Capability, Persona, Voice};
+pub use task_trail::TaskTrail;
+pub use ops_config::{
+    load_ops_config, resolve_ops_config_path, OperationsConfig, OPS_SCHEMA_VERSION,
+};
 
 /// HSM-II Personal Agent - The unified interface
 pub struct PersonalAgent {

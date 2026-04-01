@@ -18,7 +18,72 @@ pub use ladybug_storage::{
     EmailClassification, LadybugEmailStorage, StoredEmail, StorageStats, SuggestedAction,
     VacuumResult,
 };
-pub use client::{EmailClient, EmailProvider, ImapConfig, SmtpConfig};
+pub use client::{EmailClient, EmailProvider, ImapConfig, ImapFetchedMessage, SmtpConfig};
+
+/// Load [`EmailConfig`] from `HSM_IMAP_*` for CLI/cron (Outlook often: `outlook.office365.com`, port `993`).
+///
+/// Returns `Ok(None)` if `HSM_IMAP_SERVER` / `HSM_IMAP_HOST` is unset (mock IMAP in tests).
+pub fn email_config_from_env() -> anyhow::Result<Option<EmailConfig>> {
+    let server = std::env::var("HSM_IMAP_SERVER")
+        .or_else(|_| std::env::var("HSM_IMAP_HOST"))
+        .unwrap_or_default();
+    if server.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let username = std::env::var("HSM_IMAP_USER").or_else(|_| std::env::var("HSM_IMAP_USERNAME")).map_err(|_| {
+        anyhow::anyhow!("set HSM_IMAP_USER when HSM_IMAP_SERVER is set")
+    })?;
+
+    let password = std::env::var("HSM_IMAP_PASSWORD")
+        .or_else(|_| std::env::var("HSM_IMAP_PASS"))
+        .map_err(|_| anyhow::anyhow!("set HSM_IMAP_PASSWORD when HSM_IMAP_SERVER is set"))?;
+
+    let port: u16 = std::env::var("HSM_IMAP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(993);
+
+    let use_tls = std::env::var("HSM_IMAP_TLS")
+        .map(|v| {
+            let s = v.trim();
+            !(s == "0" || s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("no"))
+        })
+        .unwrap_or(true);
+
+    let provider = match std::env::var("HSM_IMAP_PROVIDER")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "gmail" => EmailProvider::Gmail,
+        "outlook" | "office365" | "m365" | "365" => EmailProvider::Outlook,
+        "yahoo" => EmailProvider::Yahoo,
+        x if !x.is_empty() => EmailProvider::Custom(x.to_string()),
+        _ => EmailProvider::Custom(server.clone()),
+    };
+
+    Ok(Some(EmailConfig {
+        provider,
+        imap: ImapConfig {
+            server,
+            port,
+            username: username.clone(),
+            password,
+            use_tls,
+        },
+        smtp: SmtpConfig {
+            server: String::new(),
+            port: 587,
+            username,
+            password: String::new(),
+            use_tls: true,
+        },
+        auto_reply: false,
+        digest_mode: false,
+    }))
+}
+
 pub use memory::{ConversationThread, EmailMemory};
 pub use responder::{ResponseGenerator, ResponseTemplate, Tone};
 

@@ -7,6 +7,7 @@ use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::{Tool, ToolCall, ToolCallResult, ToolOutput};
+use super::tool_permissions::ToolPermissionContext;
 
 /// Registry of all available tools
 pub struct ToolRegistry {
@@ -15,6 +16,10 @@ pub struct ToolRegistry {
     timeout: Duration,
     /// Track tool usage statistics
     stats: HashMap<String, ToolStats>,
+    /// ECC-style allowlist / prefix blocklist
+    permissions: ToolPermissionContext,
+    /// When set, firewall denials append `tool_denied` rows here
+    audit_trail: Option<crate::personal::task_trail::TaskTrail>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -28,11 +33,30 @@ pub struct ToolStats {
 impl ToolRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
+        Self::new_with_permissions(ToolPermissionContext::from_env())
+    }
+
+    pub fn new_with_permissions(permissions: ToolPermissionContext) -> Self {
         Self {
             tools: HashMap::new(),
             timeout: Duration::from_secs(60),
             stats: HashMap::new(),
+            permissions,
+            audit_trail: None,
         }
+    }
+
+    /// Share the same [`TaskTrail`] as [`crate::personal::EnhancedPersonalAgent`] for unified JSONL audit.
+    pub fn set_audit_trail(&mut self, trail: Option<crate::personal::task_trail::TaskTrail>) {
+        self.audit_trail = trail;
+    }
+
+    pub fn permissions(&self) -> &ToolPermissionContext {
+        &self.permissions
+    }
+
+    pub fn set_permissions(&mut self, permissions: ToolPermissionContext) {
+        self.permissions = permissions;
     }
     
     /// Create registry with default HSM-II tools
@@ -100,6 +124,21 @@ impl ToolRegistry {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
 
+        if let Err(reason) = self.permissions.check(&call.name) {
+            warn!(target: "hsm_tool_firewall", tool = %call.name, %reason, "blocked");
+            if let Some(ref trail) = self.audit_trail {
+                if let Err(e) = trail.append_tool_denied(&call.name, &reason).await {
+                    warn!("task trail append tool_denied failed: {}", e);
+                }
+            }
+            return ToolCallResult {
+                call,
+                output: ToolOutput::error(format!("Tool blocked by policy: {reason}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+                timestamp,
+            };
+        }
+
         let output = if let Some(tool) = self.tools.get(&call.name) {
             debug!("Executing tool: {} with params: {:?}", call.name, call.parameters);
 
@@ -164,6 +203,7 @@ impl Default for ToolRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_permissions::ToolPermissionContext;
     use super::*;
     use serde_json::json;
 
@@ -197,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         registry.register(Arc::new(TestTool));
 
         assert!(registry.has("test_tool"));
@@ -215,8 +255,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_firewall_blocks_prefix() {
+        let mut registry =
+            ToolRegistry::new_with_permissions(ToolPermissionContext::with_blocked_prefixes([
+                "bash",
+            ]));
+        registry.register(Arc::new(crate::tools::BashTool::new()));
+
+        let call = ToolCall {
+            name: "bash".to_string(),
+            parameters: json!({"command": "echo hi"}),
+            call_id: "1".to_string(),
+        };
+        let result = registry.execute(call).await;
+        assert!(!result.output.success);
+        assert!(
+            result.output.error.as_deref().unwrap_or("").contains("blocked"),
+            "{:?}",
+            result.output.error
+        );
+    }
+
+    #[tokio::test]
     async fn test_register_all_tools() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         // Should have 60+ tools registered
@@ -237,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_read_file() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         // Execute read_file on Cargo.toml (should exist)
@@ -255,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_calculator() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         let call = ToolCall {
@@ -271,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_system_info() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         let call = ToolCall {
@@ -287,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_grep() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         let call = ToolCall {
@@ -304,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_list_directory() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         let call = ToolCall {
@@ -320,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_tool_execution_git_status() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::new_with_permissions(ToolPermissionContext::permissive());
         super::super::register_all_tools(&mut registry);
 
         let call = ToolCall {

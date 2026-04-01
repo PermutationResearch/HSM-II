@@ -4,12 +4,18 @@
 //! - HyperStigmergicMorphogenesis (multi-agent world)
 //! - LadybugDB persistence (vector + graph storage)
 //! - CASS (skill learning)
-//! - Council (deliberation for complex decisions)
+//! - Council (deliberation for complex decisions) — sub-agent style deliberation
 //! - Ralph Loop (iterative coding with worker-reviewer)
 //! - RLM (Recursive Language Model for large documents)
 //! - DKS (distributed knowledge)
 //! - JouleWork (thermodynamic compensation)
-//! - Tool Execution (60+ tools)
+//! - Tool Execution (60+ tools: files, shell, browser automation, HTTP, web search, etc. — see `crate::tools`)
+//! - AutoContext: persisted playbooks/hints under `<home>/autocontext/` (session-to-session learning)
+//! - Hermes-style **MEMORY.md** / **USER.md** / **AGENTS.md** / **prompt.template.md** excerpts injected when present
+//! - **MCP tools** on the personal path: same plugin manifests as the coder assistant (`tools/call`, optional `tools/list` via `HSM_PERSONAL_MCP_DISCOVER`)
+//! - **autoDream** consolidation (`HSM_AUTODREAM=1`): scheduled rollups under `memory/consolidated/`
+//! - Optional **BusinessPack** (`business/pack.yaml`) for domain packs (e.g. building management)
+//! - **Phased ops:** message-driven `HEARTBEAT.md` ticks (`HSM_HEARTBEAT_INTERVAL_SECS` / `heartbeat_interval_secs` in config), optional turn journal (`HSM_MEMORY_JOURNAL` / `memory_journal`), optional outbound JSON webhook (`HSM_OUTBOUND_WEBHOOK_URL`) for Zapier/Make/Monday-style inbound hooks
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +44,16 @@ use crate::{
     autocontext::{AutoContextLoop, AutoContextStore, LoopConfig},
 };
 use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource, Experience, ExperienceOutcome};
+use super::business_pack::BusinessPack;
+
+/// Max bytes of `MEMORY.md` injected per turn (keeps room for business pack + tools).
+const MAX_MEMORY_MD_INJECT_BYTES: usize = 12 * 1024;
+/// Max bytes of `USER.md` injected per turn.
+const MAX_USER_MD_INJECT_BYTES: usize = 8 * 1024;
+/// Max bytes of `AGENTS.md` (Hermes-style repo/agent instructions).
+const MAX_AGENTS_MD_INJECT_BYTES: usize = 10 * 1024;
+/// Max bytes of `prompt.template.md` (optional system template).
+const MAX_PROMPT_TEMPLATE_MD_INJECT_BYTES: usize = 10 * 1024;
 
 /// Configuration for the enhanced agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +72,15 @@ pub struct EnhancedAgentConfig {
     pub save_interval_secs: u64,
     /// Enable JouleWork compensation tracking
     pub track_joulework: bool,
+    /// When [`BusinessPack`] is loaded, inject this persona key (e.g. `accounting`). Overridden by `HSM_BUSINESS_PERSONA`.
+    #[serde(default)]
+    pub business_persona: Option<String>,
+    /// Run [`crate::personal::heartbeat::Heartbeat`] at most once per this many seconds while messages are processed (message-driven cron). Override with `HSM_HEARTBEAT_INTERVAL_SECS`.
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<u64>,
+    /// Append each turn to `memory/journal/`. Override with `HSM_MEMORY_JOURNAL=1`.
+    #[serde(default)]
+    pub memory_journal: bool,
 }
 
 impl Default for EnhancedAgentConfig {
@@ -68,6 +93,9 @@ impl Default for EnhancedAgentConfig {
             council_threshold: 0.7,
             save_interval_secs: 60,
             track_joulework: true,
+            business_persona: None,
+            heartbeat_interval_secs: None,
+            memory_journal: false,
         }
     }
 }
@@ -133,6 +161,24 @@ pub struct EnhancedPersonalAgent {
     pub gateway: Option<crate::personal::gateway::Gateway>,
     /// AutoContext closed-loop learning system
     pub autocontext: AutoContextLoop,
+    /// Optional YAML business context (`business/pack.yaml` or `business_pack.yaml`).
+    pub business_pack: Option<BusinessPack>,
+    /// Raw excerpt from `<home>/MEMORY.md` (editable persistent notes; truncated for prompt budget).
+    pub memory_md_excerpt: Option<String>,
+    /// Raw excerpt from `<home>/USER.md` (user profile notes; truncated for prompt budget).
+    pub user_md_excerpt: Option<String>,
+    /// Excerpt from `<home>/AGENTS.md` when present.
+    pub agents_md_excerpt: Option<String>,
+    /// Excerpt from `<home>/prompt.template.md` when present.
+    pub prompt_template_excerpt: Option<String>,
+    /// Last time [`Heartbeat`](crate::personal::heartbeat::Heartbeat) tick ran (message-driven scheduling).
+    last_heartbeat_tick: Instant,
+    /// Last time autoDream consolidation was considered (`HSM_AUTODREAM=1`).
+    last_autodream_tick: Instant,
+    /// Append-only JSONL: turns, `tool_denied`, optional [`Self::record_hyperedge`] (governed by `HSM_TASK_TRAIL`).
+    pub task_trail: super::task_trail::TaskTrail,
+    /// Keyword → persona / system template (`config/prompt_routes.yaml`).
+    prompt_router: Option<super::agent_memory_pipeline::PromptRouter>,
 }
 
 /// Tracks agent contributions for JouleWork compensation
@@ -234,10 +280,18 @@ impl EnhancedPersonalAgent {
         // Initialize runtime services
         let services = Self::initialize_services(&world).await?;
 
+        let task_trail = super::task_trail::TaskTrail::from_home(&base_path);
+
         // Initialize tool registry with ALL tools (60+)
         let mut tool_registry = ToolRegistry::new();
+        tool_registry.set_audit_trail(Some(task_trail.clone()));
         crate::tools::register_all_tools(&mut tool_registry);
-        info!("Loaded {} tools", tool_registry.list_tools().len());
+        crate::tools::mcp_bridge::register_personal_mcp_tools(&mut tool_registry).await;
+        crate::tools::register_personal_ops_tools(&mut tool_registry, &base_path);
+        info!(
+            "Loaded {} tools (native + MCP + operations)",
+            tool_registry.list_tools().len()
+        );
 
         // Initialize council factory with automatic mode selection
         let council_factory = CouncilFactory::new(ModeConfig::default());
@@ -262,6 +316,54 @@ impl EnhancedPersonalAgent {
             autocontext.knowledge_base.hints.len()
         );
 
+        let business_pack = match BusinessPack::try_load(&base_path).await {
+            Ok(Some((pack, _))) => {
+                info!(
+                    target: "hsm_business_pack",
+                    company = %pack.company.name,
+                    industry = %pack.company.industry,
+                    schema_version = pack.schema_version,
+                    last_reviewed = ?pack.last_reviewed,
+                    persona_keys = ?pack.personas.keys().cloned().collect::<Vec<_>>(),
+                    "business pack loaded"
+                );
+                Some(pack)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(target: "hsm_business_pack", "business pack not loaded: {}", e);
+                None
+            }
+        };
+
+        let memory_md_excerpt =
+            Self::load_markdown_excerpt(&base_path.join("MEMORY.md"), MAX_MEMORY_MD_INJECT_BYTES)
+                .await;
+        let user_md_excerpt =
+            Self::load_markdown_excerpt(&base_path.join("USER.md"), MAX_USER_MD_INJECT_BYTES).await;
+        let agents_md_excerpt =
+            Self::load_markdown_excerpt(&base_path.join("AGENTS.md"), MAX_AGENTS_MD_INJECT_BYTES)
+                .await;
+        let prompt_template_excerpt = Self::load_markdown_excerpt(
+            &base_path.join("prompt.template.md"),
+            MAX_PROMPT_TEMPLATE_MD_INJECT_BYTES,
+        )
+        .await;
+        if memory_md_excerpt.is_some()
+            || user_md_excerpt.is_some()
+            || agents_md_excerpt.is_some()
+            || prompt_template_excerpt.is_some()
+        {
+            info!(
+                "Loaded Hermes-style instruction excerpts (MEMORY/USER/AGENTS/prompt.template)"
+            );
+        }
+
+        let prompt_router = super::agent_memory_pipeline::PromptRouter::try_load(
+            &base_path.join("config/prompt_routes.yaml"),
+        )
+        .await;
+
         info!("EnhancedPersonalAgent initialized with {} agents", world.agents.len());
 
         Ok(Self {
@@ -282,9 +384,414 @@ impl EnhancedPersonalAgent {
             gateway_tx: None,
             gateway: None,
             autocontext,
+            business_pack,
+            memory_md_excerpt,
+            user_md_excerpt,
+            agents_md_excerpt,
+            prompt_template_excerpt,
+            last_heartbeat_tick: Instant::now(),
+            last_autodream_tick: Instant::now(),
+            task_trail,
+            prompt_router,
         })
     }
-    
+
+    /// Record a multi-participant relation for stigmergy / graph-like audit (`memory/task_trail.jsonl`).
+    pub async fn record_hyperedge(
+        &self,
+        rel: impl Into<String>,
+        participants: Vec<String>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.task_trail
+            .append_hyperedge(rel, participants, payload)
+            .await
+    }
+
+    fn effective_heartbeat_interval_secs(&self) -> Option<u64> {
+        std::env::var("HSM_HEARTBEAT_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(self.config.heartbeat_interval_secs)
+            .filter(|&s| s > 0)
+    }
+
+    /// Reload `AGENTS.md`, `prompt.template.md`, `MEMORY.md`, `USER.md` into prompt excerpts (disk → RAM).
+    pub async fn reload_instruction_excerpts(&mut self) {
+        self.memory_md_excerpt = Self::load_markdown_excerpt(
+            &self.base_path.join("MEMORY.md"),
+            MAX_MEMORY_MD_INJECT_BYTES,
+        )
+        .await;
+        self.user_md_excerpt = Self::load_markdown_excerpt(
+            &self.base_path.join("USER.md"),
+            MAX_USER_MD_INJECT_BYTES,
+        )
+        .await;
+        self.agents_md_excerpt = Self::load_markdown_excerpt(
+            &self.base_path.join("AGENTS.md"),
+            MAX_AGENTS_MD_INJECT_BYTES,
+        )
+        .await;
+        self.prompt_template_excerpt = Self::load_markdown_excerpt(
+            &self.base_path.join("prompt.template.md"),
+            MAX_PROMPT_TEMPLATE_MD_INJECT_BYTES,
+        )
+        .await;
+    }
+
+    /// Scheduled autoDream consolidation (`memory/consolidated/`) when `HSM_AUTODREAM=1`.
+    pub async fn maybe_run_autodream_tick(&mut self) {
+        let interval = crate::personal::autodream::effective_interval_secs(
+            self.effective_heartbeat_interval_secs(),
+        );
+        if let Err(e) = crate::personal::autodream::maybe_consolidate(
+            &self.base_path,
+            &mut self.last_autodream_tick,
+            interval,
+        )
+        .await
+        {
+            warn!(target: "hsm_autodream", "consolidation failed: {e}");
+        }
+    }
+
+    /// Message-driven heartbeat: runs `HEARTBEAT.md` checklist / cron / routines when the interval has elapsed.
+    pub async fn maybe_run_heartbeat_tick(&mut self) {
+        let Some(interval) = self.effective_heartbeat_interval_secs() else {
+            return;
+        };
+        if self.last_heartbeat_tick.elapsed().as_secs() < interval {
+            return;
+        }
+        self.last_heartbeat_tick = Instant::now();
+        match crate::personal::heartbeat::Heartbeat::load(&self.base_path).await {
+            Ok(mut hb) => match hb.tick(&self.base_path).await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        info!(
+                            target: "hsm_heartbeat",
+                            n = results.len(),
+                            "heartbeat tick completed"
+                        );
+                    }
+                }
+                Err(e) => warn!(target: "hsm_heartbeat", "heartbeat tick failed: {e}"),
+            },
+            Err(e) => warn!(target: "hsm_heartbeat", "heartbeat load failed: {e}"),
+        }
+    }
+
+    fn memory_journal_enabled(&self) -> bool {
+        self.config.memory_journal
+            || std::env::var("HSM_MEMORY_JOURNAL")
+                .map(|v| {
+                    let t = v.trim();
+                    t == "1"
+                        || t.eq_ignore_ascii_case("true")
+                        || t.eq_ignore_ascii_case("yes")
+                })
+                .unwrap_or(false)
+    }
+
+    fn outbound_webhook_url(&self) -> Option<String> {
+        let Ok(v) = std::env::var("HSM_OUTBOUND_WEBHOOK_URL") else {
+            return None;
+        };
+        let u = v.trim().to_string();
+        if u.is_empty() {
+            None
+        } else {
+            Some(u)
+        }
+    }
+
+    /// Journal append + optional outbound JSON webhook (background).
+    fn post_turn_hooks(&self, msg: &Message, response: &AgentResponse) {
+        let journal = self.memory_journal_enabled();
+        let url = self.outbound_webhook_url();
+        if !journal && url.is_none() {
+            return;
+        }
+        let base = self.base_path.clone();
+        let user = msg.content.clone();
+        let assistant = response.content.clone();
+        tokio::spawn(async move {
+            if journal {
+                if let Err(e) =
+                    crate::personal::memory::append_turn_journal(&base, &user, &assistant).await
+                {
+                    warn!(target: "hsm_memory_journal", "append failed: {e}");
+                }
+            }
+            if let Some(ref u) = url {
+                let payload = serde_json::json!({
+                    "source": "hsm-enhanced-agent",
+                    "user_preview": user.chars().take(800).collect::<String>(),
+                    "assistant_preview": assistant.chars().take(1200).collect::<String>(),
+                });
+                if let Err(e) = crate::personal::outbound::post_json_webhook(u, &payload).await {
+                    warn!(target: "hsm_outbound", "webhook failed: {e}");
+                }
+            }
+        });
+    }
+
+    async fn load_markdown_excerpt(path: &Path, max_bytes: usize) -> Option<String> {
+        let s = tokio::fs::read_to_string(path).await.ok()?;
+        let t = s.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let mut out = t.to_string();
+        if out.len() > max_bytes {
+            let mut end = max_bytes;
+            while end > 0 && !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
+            out.push_str("\n\n_(truncated to fit prompt budget.)_");
+        }
+        Some(out)
+    }
+
+    /// Markdown from `MEMORY.md` / `USER.md` at agent home (human-editable, survives restarts).
+    fn persistent_memory_addon(&self) -> String {
+        let mut out = String::new();
+        if let Some(ref m) = self.memory_md_excerpt {
+            out.push_str("\n\n## Persistent memory (MEMORY.md)\n\n");
+            out.push_str(m);
+            out.push('\n');
+        }
+        if let Some(ref u) = self.user_md_excerpt {
+            out.push_str("\n\n## User profile (USER.md)\n\n");
+            out.push_str(u);
+            out.push('\n');
+        }
+        if let Some(ref a) = self.agents_md_excerpt {
+            out.push_str("\n\n## Agent instructions (AGENTS.md)\n\n");
+            out.push_str(a);
+            out.push('\n');
+        }
+        if let Some(ref p) = self.prompt_template_excerpt {
+            out.push_str("\n\n## Prompt template (prompt.template.md)\n\n");
+            out.push_str(p);
+            out.push('\n');
+        }
+        out.push_str(&prompt_defaults::coowner_manager_role_addon());
+        out
+    }
+
+    /// Markdown block from [`BusinessPack`] + active persona (`HSM_BUSINESS_PERSONA` or config).
+    fn business_prompt_addon(&self) -> String {
+        self.business_prompt_addon_for_persona(None)
+    }
+
+    /// Same as [`Self::business_prompt_addon`], with optional per-turn persona from the prompt router.
+    fn business_prompt_addon_for_persona(&self, persona_override: Option<&str>) -> String {
+        let persona = persona_override
+            .map(|s| s.to_string())
+            .or_else(|| {
+                std::env::var("HSM_BUSINESS_PERSONA")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                self.config
+                    .business_persona
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+            });
+        if let Some(ref pack) = self.business_pack {
+            let pid = persona.as_deref();
+            let files = pack.bound_asset_paths(pid);
+            tracing::info!(
+                target: "hsm_business_pack",
+                active_persona = ?pid,
+                bound_file_paths = ?files,
+                "injecting business pack into prompt"
+            );
+            return pack.render_prompt_addon(pid);
+        }
+        String::new()
+    }
+
+    /// Draft an email reply: expands `@/path/to/file` tokens from [`path_attachments`], then runs a short tool loop or a single LLM call.
+    ///
+    /// Set `HSM_EMAIL_DRAFT_SIMPLE=1` to skip the tool loop (read_eml / Maildir / read_file).
+    pub async fn draft_email_reply(&mut self, inbound_raw: &str) -> Result<String> {
+        let simple = std::env::var("HSM_EMAIL_DRAFT_SIMPLE")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false);
+        self.draft_email_reply_with_options(inbound_raw, simple).await
+    }
+
+    /// Same as [`Self::draft_email_reply`], but `simple` is explicit (e.g. HTTP API) instead of only `HSM_EMAIL_DRAFT_SIMPLE`.
+    pub async fn draft_email_reply_with_options(
+        &mut self,
+        inbound_raw: &str,
+        simple: bool,
+    ) -> Result<String> {
+        let t = inbound_raw.trim();
+        if t.is_empty() {
+            anyhow::bail!("empty inbound email");
+        }
+        let expanded =
+            crate::personal::path_attachments::expand_at_paths(t, &self.base_path).await?;
+
+        if simple {
+            return self.draft_email_reply_one_shot(&expanded).await;
+        }
+
+        self.draft_email_reply_with_tools(&expanded).await
+    }
+
+    async fn draft_email_reply_one_shot(&self, inbound: &str) -> Result<String> {
+        let system = format!(
+            "{}{}{}\n\n## Task\nYou are helping draft an **email reply**.\n\
+            - The user pasted an inbound message (optionally with From/Subject headers).\n\
+            - `@/path` references were expanded into attached sections if paths existed.\n\
+            - Produce a **ready-to-send reply** (email body). Put `Subject: …` as the first line only if a new subject is clearly needed.\n\
+            - Match tone to the thread (usually professional and courteous).\n\
+            - Do not invent binding commitments, fees, or legal facts; if information is missing, say you will verify or ask one short clarifying question.\n\
+            - Apply any **business pack** policies above when relevant.\n\
+            - Output plain text suitable for email (no markdown code fences unless quoting code).\n\
+            - Do **not** output JSON, code blocks containing only `{{...}}`, or `tool` / `read_file` calls — you cannot run tools here; MEMORY.md context is already in the system prompt when configured.\n",
+            self.living_prompt.render(),
+            self.persistent_memory_addon(),
+            self.business_prompt_addon(),
+        );
+        let user = format!("--- Inbound message ---\n\n{inbound}\n\n---\nDraft my reply.");
+        let llm_result = self.llm.chat(&system, &user, &[]).await;
+        if llm_result.timed_out || llm_result.text.is_empty() {
+            anyhow::bail!(
+                "LLM unavailable or returned empty text (check Ollama / OPENAI / cloud model config)"
+            );
+        }
+        let out = Self::clean_response(&llm_result.text);
+        if Self::response_looks_like_tool_json(&out) {
+            anyhow::bail!(
+                "The model returned a tool-call JSON instead of email text. Turn on **Simple mode** in the console (or set HSM_EMAIL_DRAFT_SIMPLE=1) and try again."
+            );
+        }
+        Ok(out)
+    }
+
+    /// Up to 4 turns: model may call `read_eml`, `maildir_list`, `maildir_read`, or `read_file`, then must emit `FINAL_DRAFT`.
+    async fn draft_email_reply_with_tools(&mut self, inbound_expanded: &str) -> Result<String> {
+        const ALLOWED: &[&str] = &["read_eml", "maildir_list", "maildir_read", "read_file"];
+        const MAX_ROUNDS: usize = 4;
+
+        let tools_help = "\n## Optional tools (one JSON object per turn)\n\
+            You may read local files before drafting. Respond with exactly one JSON object:\n\
+            `{\"tool\":\"read_eml\",\"parameters\":{\"path\":\"/path/to.msg.eml\"}}`\n\
+            - **read_eml** — parse `.eml` / RFC822: headers, text body, **paperclip** attachment list (and inline text for small text attachments).\n\
+            - **maildir_list** — `{\"tool\":\"maildir_list\",\"parameters\":{\"maildir_root\":\"/path/Maildir\",\"limit\":20}}`\n\
+            - **maildir_read** — `{\"tool\":\"maildir_read\",\"parameters\":{\"path\":\"/path/Maildir/cur/…\"}}`\n\
+            - **read_file** — `{\"tool\":\"read_file\",\"parameters\":{\"path\":\"…\",\"limit\":400}}`\n\n\
+            When ready, output the line `FINAL_DRAFT` on its own line, then the **plain-text** email reply (no JSON).\n";
+
+        let system = format!(
+            "{}{}{}\n{}{}",
+            self.living_prompt.render(),
+            self.persistent_memory_addon(),
+            self.business_prompt_addon(),
+            tools_help,
+            "## Task\nDraft a professional email reply. Do not invent legal/financial facts; use tool output when you read messages or policies.\n"
+        );
+
+        let mut user_msg = format!(
+            "--- Inbound (paste + any `## Attached file` blocks from @paths) ---\n\n{inbound_expanded}\n\n\
+            Either emit one allowed tool JSON ({ALLOWED:?}), or `FINAL_DRAFT` plus the reply body.\n",
+            inbound_expanded = inbound_expanded,
+            ALLOWED = ALLOWED
+        );
+
+        let mut scratch = String::new();
+        let mut last_text = String::new();
+
+        for round in 0..MAX_ROUNDS {
+            let llm_result = self.llm.chat(&system, &user_msg, &[]).await;
+            if llm_result.timed_out || llm_result.text.is_empty() {
+                anyhow::bail!("LLM unavailable or returned empty text");
+            }
+            let text = Self::clean_response(&llm_result.text);
+            last_text = text.clone();
+
+            if let Some(idx) = text.find("FINAL_DRAFT") {
+                let rest = text[idx + "FINAL_DRAFT".len()..].trim();
+                let body = rest
+                    .strip_prefix(':')
+                    .map(str::trim)
+                    .unwrap_or(rest)
+                    .trim();
+                if !body.is_empty() {
+                    return Ok(body.to_string());
+                }
+            }
+
+            if let Some(json) = Self::extract_tool_call_json(&text) {
+                let params = json.get("parameters").or_else(|| json.get("arguments"));
+                if let (Some(tool_name), Some(params)) =
+                    (json.get("tool").and_then(|v| v.as_str()), params)
+                {
+                    if ALLOWED.contains(&tool_name) && self.tool_registry.has(tool_name) {
+                        let call = ToolCallEntry {
+                            name: tool_name.to_string(),
+                            parameters: params.clone(),
+                            call_id: uuid::Uuid::new_v4().to_string(),
+                        };
+                        let result = self.tool_registry.execute(call).await;
+                        let tool_out = if result.output.success {
+                            result.output.result.clone()
+                        } else {
+                            result
+                                .output
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "tool failed".into())
+                        };
+                        scratch.push_str(&format!(
+                            "\n--- tool `{}` ---\n{}\n",
+                            tool_name, tool_out
+                        ));
+                        user_msg = format!(
+                            "Accumulated tool output:{scratch}\n\n\
+                            Either call **one** more tool as JSON (tools: {:?}), or output `FINAL_DRAFT` and the reply body.\n",
+                            ALLOWED
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // No tool and no FINAL_DRAFT: treat whole message as draft on last round
+            if round + 1 == MAX_ROUNDS {
+                if Self::response_looks_like_tool_json(&text) {
+                    anyhow::bail!(
+                        "Model kept returning tool JSON (e.g. read_file) without a reply. \
+                        Many models use `arguments` instead of `parameters` — now supported. \
+                        If this persists, use Simple mode (one-shot draft, no tools) or shorten the thread."
+                    );
+                }
+                return Ok(text);
+            }
+
+            user_msg = format!(
+                "Your last response did not include a valid tool JSON or FINAL_DRAFT. Last output:\n\n{text}\n\n\
+                Please either call one tool as JSON (tools: {ALLOWED:?}) or output FINAL_DRAFT then the reply.\n",
+                text = text,
+                ALLOWED = ALLOWED
+            );
+        }
+
+        Ok(last_text)
+    }
+
     /// Create a new world with configured agents
     pub(crate) async fn create_new_world(config: &EnhancedAgentConfig) -> Result<HyperStigmergicMorphogenesis> {
         let mut world = HyperStigmergicMorphogenesis::new(config.agent_count);
@@ -429,6 +936,17 @@ impl EnhancedPersonalAgent {
     /// Process incoming message with full HSM-II pipeline
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
         self.maybe_reload_skill_bank_from_disk().await;
+        self.maybe_run_heartbeat_tick().await;
+        self.maybe_run_autodream_tick().await;
+        if std::env::var("HSM_INSTR_HOT_RELOAD")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false)
+        {
+            self.reload_instruction_excerpts().await;
+        }
 
         let start_time = Instant::now();
         let message_id = msg.id.clone();
@@ -448,7 +966,54 @@ impl EnhancedPersonalAgent {
         };
         
         // Check for special commands first
-        let response = if msg.content.starts_with("/ralph") {
+        let response = if msg.content.trim_start().starts_with("/email answer")
+            || msg.content.trim_start().starts_with("/email reply")
+        {
+            let trimmed = msg.content.trim();
+            let rest = trimmed
+                .strip_prefix("/email answer")
+                .or_else(|| trimmed.strip_prefix("/email reply"))
+                .map(str::trim)
+                .unwrap_or("");
+            if rest.is_empty() {
+                AgentResponse {
+                    content: "📧 **Usage:** paste the inbound email in the **same message** after the command, e.g.:\n\n\
+                        `/email answer`\n\
+                        From: someone@example.com\n\
+                        Subject: Question about…\n\n\
+                        Message body…\n\n\
+                        (`/email reply` works the same.) Business pack + MEMORY.md/USER.md are included when configured. Review the draft before sending."
+                        .to_string(),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 1.0,
+                    skills_used: vec!["email_draft".to_string()],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                }
+            } else {
+                match self.draft_email_reply(rest).await {
+                    Ok(draft) => AgentResponse {
+                        content: format!("📧 **Draft reply** (review before sending)\n\n{draft}"),
+                        primary_agent: 0,
+                        council_used: false,
+                        confidence: 0.85,
+                        skills_used: vec!["email_draft".to_string()],
+                        joulework_contributions: HashMap::new(),
+                        processing_time_ms: 0,
+                    },
+                    Err(e) => AgentResponse {
+                        content: format!("❌ Could not draft reply: {e}"),
+                        primary_agent: 0,
+                        council_used: false,
+                        confidence: 0.0,
+                        skills_used: vec![],
+                        joulework_contributions: HashMap::new(),
+                        processing_time_ms: 0,
+                    },
+                }
+            }
+        } else if msg.content.starts_with("/ralph") {
             // Explicit Ralph Loop command
             let task = msg.content.trim_start_matches("/ralph").trim();
             if task.is_empty() {
@@ -496,6 +1061,23 @@ impl EnhancedPersonalAgent {
         if self.config.enable_dks {
             let dks_tick = self.services.dks.tick();
             self.services.last_dks_tick = Some(dks_tick);
+        }
+
+        if let Err(e) = self
+            .task_trail
+            .append_turn(
+                &message_id,
+                &msg.content,
+                &response.content,
+                &response.skills_used,
+                response.council_used,
+                context.tool_steps.len(),
+                self.world.edges.len(),
+                self.world.beliefs.len(),
+            )
+            .await
+        {
+            warn!("task trail append_turn failed: {}", e);
         }
 
         // Update chat history for conversation context (keep last 20 exchanges)
@@ -684,6 +1266,27 @@ impl EnhancedPersonalAgent {
             self.living_prompt.evolve(&summary, coherence_before, coherence_after);
             self.messages_since_reflection = 0;
             info!("RLM: Living prompt evolved (coherence {:.4} → {:.4})", coherence_before, coherence_after);
+        }
+
+        self.post_turn_hooks(&msg, &response);
+
+        if std::env::var("HSM_MEMORY_EXTRACT")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false)
+        {
+            let home = self.base_path.clone();
+            let u = msg.content.clone();
+            let a = response.content.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    super::agent_memory_pipeline::run_post_turn_extract(&home, &u, &a).await
+                {
+                    tracing::warn!(target: "hsm_memory_extract", "{}", e);
+                }
+            });
         }
 
         // Save if needed
@@ -1182,9 +1785,13 @@ impl EnhancedPersonalAgent {
 
         // Build enriched prompt with RLM LivingPrompt context
         let enriched_prompt = self.living_prompt.render();
+        let mem = self.persistent_memory_addon();
+        let biz = self.business_prompt_addon();
         let council_prompt = format!(
-            "{}\n\n## Council Decision\nMode: {:?}\nOutcome: {}\nConfidence: {:.2}\nAgents: {:?}\n\nBased on the council's deliberation above, provide a helpful response to the user's query:\n{}",
+            "{}{}{}\n\n## Council Decision\nMode: {:?}\nOutcome: {}\nConfidence: {:.2}\nAgents: {:?}\n\nBased on the council's deliberation above, provide a helpful response to the user's query:\n{}",
             enriched_prompt,
+            mem,
+            biz,
             decision.mode_used,
             decision_text,
             decision.confidence,
@@ -1266,6 +1873,7 @@ impl EnhancedPersonalAgent {
 
         // Build enriched system prompt with RLM LivingPrompt + tool schemas
         let enriched_prompt = self.living_prompt.render();
+        let mem = self.persistent_memory_addon();
         let tools_description = self.tool_registry.list_tools()
             .iter()
             .map(|(name, desc)| format!("- {}: {}", name, desc))
@@ -1307,14 +1915,49 @@ impl EnhancedPersonalAgent {
             String::new()
         };
 
+        let route_hit = self
+            .prompt_router
+            .as_ref()
+            .map(|r| r.route(&msg.content))
+            .unwrap_or_default();
+        let biz = self.business_prompt_addon_for_persona(route_hit.persona_key.as_deref());
+
+        let mut prefetch_block = String::new();
+        let prefetch_on = std::env::var("HSM_MEMORY_PREFETCH")
+            .map(|v| {
+                let s = v.trim();
+                !(s == "0" || s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false);
+        if prefetch_on {
+            let n = std::env::var("HSM_MEMORY_PREFETCH_N")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5)
+                .clamp(1, 12);
+            match super::agent_memory_pipeline::prefetch_memory_context(
+                &self.llm,
+                &self.base_path,
+                &msg.content,
+                n,
+            )
+            .await
+            {
+                Ok(s) => prefetch_block = s,
+                Err(e) => warn!("memory prefetch: {}", e),
+            }
+        }
+
         let system_prompt = format!(
-            "{enriched_prompt}{belief_context}{skill_context}{autocontext_section}\n\n\
+            "{enriched_prompt}{mem}{route_hit}{biz}{prefetch}{belief_context}{skill_context}{autocontext_section}\n\n\
              ## Available Tools\n{tools_description}\n\n\
              ## Tool Usage\n\
              When the user asks you to perform an action (search, read files, run commands, calculate, etc.), \
              respond with a JSON tool call:\n\
              {{\"tool\": \"tool_name\", \"parameters\": {{\"param\": \"value\"}}}}\n\n\
-             If no tool is needed, respond normally with helpful text."
+             If no tool is needed, respond normally with helpful text.",
+            route_hit = route_hit.system_block,
+            prefetch = prefetch_block,
         );
 
         // Generate response with tool-aware prompt
@@ -1452,6 +2095,22 @@ impl EnhancedPersonalAgent {
             .unwrap_or(0)
     }
     
+    /// True if the model output is (mostly) a single JSON tool call — not acceptable as email body.
+    fn response_looks_like_tool_json(text: &str) -> bool {
+        let t = text.trim();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            if v.get("tool").and_then(|x| x.as_str()).is_some() {
+                return v.get("parameters").is_some() || v.get("arguments").is_some();
+            }
+        }
+        if let Some(v) = Self::extract_tool_call_json(t) {
+            if v.get("tool").and_then(|x| x.as_str()).is_some() {
+                return v.get("parameters").is_some() || v.get("arguments").is_some();
+            }
+        }
+        false
+    }
+
     /// Extract tool call JSON from LLM response (handles markdown-wrapped and inline JSON)
     fn extract_tool_call_json(content: &str) -> Option<serde_json::Value> {
         let trimmed = content.trim();
@@ -1596,6 +2255,22 @@ impl EnhancedPersonalAgent {
             let dks_tick = self.services.dks.tick();
             self.services.last_dks_tick = Some(dks_tick);
         }
+        if let Err(e) = self
+            .task_trail
+            .append_turn(
+                &context.message_id,
+                &msg.content,
+                &response.content,
+                &response.skills_used,
+                response.council_used,
+                context.tool_steps.len(),
+                self.world.edges.len(),
+                self.world.beliefs.len(),
+            )
+            .await
+        {
+            warn!("task trail append_turn failed: {}", e);
+        }
         self.chat_history
             .push(("user".to_string(), msg.content.clone()));
         self.chat_history
@@ -1604,6 +2279,7 @@ impl EnhancedPersonalAgent {
             let drain_count = self.chat_history.len() - 40;
             self.chat_history.drain(..drain_count);
         }
+        self.post_turn_hooks(msg, response);
         self.maybe_save().await?;
         self.active_contexts
             .insert(context.message_id.clone(), context);
@@ -1683,6 +2359,7 @@ impl EnhancedPersonalAgent {
     async fn ensure_structure(base_path: &Path) -> Result<()> {
         tokio::fs::create_dir_all(base_path).await?;
         tokio::fs::create_dir_all(base_path.join("memory")).await?;
+        tokio::fs::create_dir_all(base_path.join("business")).await?;
         tokio::fs::create_dir_all(base_path.join("metrics")).await?;
         Ok(())
     }

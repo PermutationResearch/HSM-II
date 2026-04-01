@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod registry;
+pub mod tool_permissions;
 pub mod web_search;
 pub mod file_tools;
 pub mod shell_tools;
@@ -59,8 +60,10 @@ pub mod api_tools;
 pub mod calculation_tools;
 pub mod system_tools;
 pub mod text_tools;
+pub mod email_tools;
 
 pub use registry::ToolRegistry;
+pub use tool_permissions::ToolPermissionContext;
 pub use web_search::WebSearchTool;
 pub use file_tools::{ReadTool, WriteTool, EditTool};
 pub use shell_tools::{BashTool, GrepTool, FindTool};
@@ -112,9 +115,17 @@ pub use flags_tools::{
 pub mod rlm_tool;
 pub use rlm_tool::{RlmProcessTool, RlmTrajectoryTool};
 
+/// HTTP MCP tools on the personal agent (plugin manifests + optional `tools/list`).
+pub mod mcp_bridge;
+
+/// Enterprise ops YAML: `read_operations`, `list_tickets` (personal agent home).
+pub mod ops_tools;
+pub use ops_tools::register_personal_ops_tools;
+
 // MiroFish-inspired prediction tool
 pub mod prediction_tool;
 pub use prediction_tool::PredictionTool;
+pub use email_tools::{MaildirListTool, MaildirReadTool, ReadEmlTool};
 
 /// Tool trait - all tools implement this
 #[async_trait::async_trait]
@@ -306,4 +317,9 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
 
     // MiroFish-inspired prediction tool
     registry.register(Arc::new(PredictionTool::new()));
+
+    // Email: .eml + Maildir (attachments / paperclip inventory)
+    registry.register(Arc::new(ReadEmlTool::new()));
+    registry.register(Arc::new(MaildirListTool::new()));
+    registry.register(Arc::new(MaildirReadTool::new()));
 }

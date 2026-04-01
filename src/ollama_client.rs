@@ -490,13 +490,22 @@ impl OllamaClient {
             Ok(response) => {
                 let latency = start.elapsed().as_millis() as u64;
                 self.record_latency(latency).await;
-                return LlmResult {
+                let result = LlmResult {
                     text: response.response,
                     latency_ms: latency,
                     tokens_generated: response.eval_count.unwrap_or(0) as usize,
                     cached: false,
                     timed_out: false,
                 };
+                crate::company_os::spawn_record_llm_spend(
+                    &self.config.model,
+                    &result.text,
+                    result.tokens_generated,
+                    result.latency_ms,
+                    result.timed_out,
+                    result.cached,
+                );
+                return result;
             }
             Err(e) => {
                 let err_msg = e.to_string();
@@ -506,6 +515,14 @@ impl OllamaClient {
                     let messages = vec![json!({"role": "user", "content": prompt})];
                     if let Ok(r) = call_cloud_chat(&cloud, messages, self.config.temperature, self.config.max_tokens).await {
                         self.record_latency(r.latency_ms).await;
+                        crate::company_os::spawn_record_llm_spend(
+                            &self.config.model,
+                            &r.text,
+                            r.tokens_generated,
+                            r.latency_ms,
+                            r.timed_out,
+                            r.cached,
+                        );
                         return r;
                     }
                 }
@@ -545,13 +562,22 @@ impl OllamaClient {
                 let latency = start.elapsed().as_millis() as u64;
                 self.record_latency(latency).await;
 
-                LlmResult {
+                let result = LlmResult {
                     text: response.message.content,
                     latency_ms: latency,
                     tokens_generated: response.final_data.as_ref().map(|d| d.eval_count as usize).unwrap_or(0),
                     cached: false,
                     timed_out: false,
-                }
+                };
+                crate::company_os::spawn_record_llm_spend(
+                    &self.config.model,
+                    &result.text,
+                    result.tokens_generated,
+                    result.latency_ms,
+                    result.timed_out,
+                    result.cached,
+                );
+                result
             }
             Err(e) => {
                 let err_msg = e.to_string();

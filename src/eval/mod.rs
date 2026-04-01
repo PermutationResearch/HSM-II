@@ -49,6 +49,7 @@
 //! ```
 
 pub mod artifacts;
+pub mod autoreason;
 pub mod calibration;
 pub mod external;
 pub mod judges;
@@ -63,12 +64,16 @@ pub mod tasks;
 pub mod trace;
 
 pub use judges::{
-    evaluate_turn_rubric, grounding_metrics, llm_judge_enabled, llm_judge_turn, parse_tool_json,
-    tool_metrics, RubricExtras,
+    evaluate_turn_rubric, grounding_metrics, injected_text_for_grounding_overlap, llm_judge_enabled,
+    llm_judge_turn, parse_tool_json, tool_metrics, RubricExtras,
 };
 pub use metrics::{
     compare, print_report, ComparisonReport, ImprovementMetrics, RunnerMetrics, RunnerSummary,
     TurnMetrics, turn_rubric_composite,
+};
+pub use autoreason::{
+    borda_points_from_slot_order, parse_judge_ranking_1based, run_autoreason, AutoreasonConfig,
+    AutoreasonOutput, AutoreasonRoundRecord,
 };
 pub use artifacts::{
     append_runs_index, default_runs_index, try_git_head, write_jsonl, write_manifest,

@@ -100,6 +100,8 @@ pub mod bench;
 
 // REST API (axum-based)
 pub mod api;
+pub mod console;
+pub mod company_os;
 
 // Comparative evaluation harness (HSM-II vs baseline)
 pub mod eval;
@@ -293,7 +295,8 @@ pub use llm::{
 // Email agent integration
 pub use email::{
     classifier::{Category, Classification, EmailClassifier, Priority},
-    client::{EmailClient, EmailProvider, ImapConfig, SmtpConfig},
+    client::{EmailClient, EmailProvider, ImapConfig, ImapFetchedMessage, SmtpConfig},
+    email_config_from_env,
     memory::{ConversationThread, EmailMemory},
     responder::{QuickReplyType, ResponseGenerator, ResponseTemplate, Tone},
     Attachment, Email, EmailAction, EmailAgent, EmailConfig, EmailStats, OutgoingEmail,

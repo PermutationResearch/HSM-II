@@ -1,0 +1,75 @@
+# Copy to <tenant_home>/config/operations.yaml or <HSMII_HOME>/config/operations.yaml
+# Schema is descriptive until an ops loader is wired; use as contract for goals / org / budgets / tickets.
+
+schema_version: 1
+company_id: "acme-demo"
+display_name: "Acme Demo Co"
+
+goals:
+  - id: goal_q2_pipeline
+    title: "Qualified pipeline + on-time delivery"
+    period: "2026-Q2"
+    key_results:
+      - metric: "qualified_leads"
+        target: 50
+      - metric: "video_deliveries_on_time_pct"
+        target: 95
+
+# Mirrors org chart for humans + agent roles (link to BusinessRole tags in code if aligned)
+org:
+  root_role: "ceo"
+  roles:
+    - id: ceo
+      title: "CEO"
+      delegates_to: [marketing, sales, operations]
+    - id: marketing
+      title: "Marketing"
+      agent_persona: "marketing" # optional: maps to business pack or TeamOrchestrator role
+    - id: sales
+      title: "Sales / outbound"
+      agent_persona: "sales"
+    - id: operations
+      title: "Delivery / CRM"
+      agent_persona: "operations"
+
+# Soft budgets — enforce in runtime when cost middleware exists (USD/month example)
+budgets:
+  - scope: company
+    id: company_llm
+    kind: llm_usd
+    cap_monthly: 500.0
+    hard_stop: true
+  - scope: role
+    role_id: sales
+    kind: llm_usd
+    cap_monthly: 100.0
+    hard_stop: true
+
+# Governance: tool policy hints (actual enforcement via HSM_TOOL_* env + harness approvals)
+governance:
+  default_tool_allow: [] # empty = use env defaults
+  approval_required_prefixes:
+    - "payment_"
+    - "send_email_"
+    - "post_social_"
+
+heartbeats:
+  # Logical schedules; wire to HEARTBEAT.md or a future cron driver
+  - id: stale_ticket_sweep
+    interval_minutes: 60
+    action: "notify_if_ticket_idle_gt_48h"
+  - id: budget_report
+    interval_minutes: 1440
+    action: "summarize_spend_vs_budget"
+
+# Persistent tickets (example); production may use external tracker + sync tool
+tickets:
+  - id: tkt_001
+    title: "Cut 30s sizzle reel for product X"
+    state: in_progress
+    owner_role: operations
+    requester_role: marketing
+    budget_ticket_usd: 200.0
+    delegated_to: null # e.g. hermes session id or delegation_id
+    created: "2026-04-01T00:00:00Z"
+    updated: "2026-04-01T12:00:00Z"

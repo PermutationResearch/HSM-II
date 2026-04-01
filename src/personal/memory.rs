@@ -9,6 +9,40 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::gateway::Message;
+use tokio::io::AsyncWriteExt;
+
+/// Append one user/assistant exchange to `memory/journal/YYYY-MM-DD.md` (auto-written session log).
+pub async fn append_turn_journal(
+    base_path: &Path,
+    user_message: &str,
+    assistant_message: &str,
+) -> Result<()> {
+    let dir = base_path.join("memory").join("journal");
+    tokio::fs::create_dir_all(&dir).await?;
+    let day = Utc::now().format("%Y-%m-%d").to_string();
+    let path = dir.join(format!("{day}.md"));
+    let ts = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    let block = format!(
+        "\n### {ts}\n\n**User:** {}\n\n**Assistant:** {}\n\n---\n",
+        user_message
+            .trim()
+            .chars()
+            .take(4000)
+            .collect::<String>(),
+        assistant_message
+            .trim()
+            .chars()
+            .take(8000)
+            .collect::<String>()
+    );
+    let mut f = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await?;
+    f.write_all(block.as_bytes()).await?;
+    Ok(())
+}
 
 /// Personal memory manager
 pub struct PersonalMemory {

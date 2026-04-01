@@ -18,6 +18,14 @@ futures-util = "0.3"
 # Database & Persistence
 mysql_async = "0.34"
 rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-native-tls",
+    "postgres",
+    "migrate",
+    "uuid",
+    "chrono",
+    "json",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -84,6 +92,9 @@ walkdir = "2"
 glob = "0.3"
 num_cpus = "1.16"
 base64 = "0.21"
+mailparse = "0.16"
+imap = "2.4"
+native-tls = "0.2"
 
 # GPU acceleration (optional)
 wgpu = { version = "0.19", optional = true }
@@ -150,6 +161,26 @@ path = "src/bin/hsm_bench.rs"
 [[bin]]
 name = "hsm-eval"
 path = "src/bin/hsm_eval.rs"
+
+[[bin]]
+name = "hsm-autoreason"
+path = "src/bin/hsm_autoreason.rs"
+
+[[bin]]
+name = "hsm-council-demo"
+path = "src/bin/hsm_council_demo.rs"
+
+[[bin]]
+name = "hsm-business-pack"
+path = "src/bin/hsm_business_pack.rs"
+
+[[bin]]
+name = "hsm_inbox_draft"
+path = "src/bin/hsm_inbox_draft.rs"
+
+[[bin]]
+name = "hsm_console"
+path = "src/bin/hsm_console.rs"
 
 [[bin]]
 name = "hsm_gepa"
