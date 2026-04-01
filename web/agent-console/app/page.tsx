@@ -43,7 +43,7 @@ type MemoryFilesResp = {
 
 type AutoDreamResp = Record<string, unknown>;
 
-type NavId = "dash" | "company" | "trail" | "memory" | "graph" | "search" | "email";
+type NavId = "dash" | "onboard" | "company" | "trail" | "memory" | "graph" | "search" | "email";
 
 type CompanyRow = {
   id: string;
@@ -97,6 +97,30 @@ type PolicyRule = {
   decision_mode: "auto" | "admin_required" | "blocked" | string;
 };
 type QueueView = "all" | "overdue" | "atrisk" | "waiting_admin" | "pending_approvals" | "blocked";
+type OnboardWorkflow = {
+  title: string;
+  owner_role: string;
+  priority: string;
+  sla_target: string;
+  approval: string;
+};
+type OnboardPolicy = {
+  action_type: string;
+  risk_level: string;
+  decision_mode: string;
+  amount_min?: number | null;
+  amount_max?: number | null;
+  approver_role: string;
+};
+type OnboardDraft = {
+  company_name: string;
+  industry: string;
+  vertical_template: string;
+  workflows: OnboardWorkflow[];
+  policy_rules: OnboardPolicy[];
+  missing_critical_items: string[];
+  confidence_by_field: Record<string, number>;
+};
 
 export default function ConsolePage() {
   const api = process.env.NEXT_PUBLIC_API_BASE ?? defaultApi;
@@ -160,6 +184,13 @@ export default function ConsolePage() {
   const [coSlaReason, setCoSlaReason] = useState<Record<string, string>>({});
   const [coSlaPrio, setCoSlaPrio] = useState<Record<string, string>>({});
   const [coDecisionReason, setCoDecisionReason] = useState<Record<string, string>>({});
+  const [obVertical, setObVertical] = useState("generic_smb");
+  const [obInput, setObInput] = useState("");
+  const [obTranscript, setObTranscript] = useState<string[]>([]);
+  const [obLoading, setObLoading] = useState(false);
+  const [obDraft, setObDraft] = useState<OnboardDraft | null>(null);
+  const [obApplyLoading, setObApplyLoading] = useState(false);
+  const [obApplyMsg, setObApplyMsg] = useState<string | null>(null);
   const coImportRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -363,6 +394,27 @@ export default function ConsolePage() {
     return out;
   }, [coGovernance]);
 
+  const obNextQuestion = useMemo(() => {
+    if (obDraft?.missing_critical_items?.length) {
+      const miss = obDraft.missing_critical_items[0];
+      if (miss === "company_name") return "What is your official company name?";
+      if (miss === "approver_role") return "Who should approve sensitive actions (refunds, legal, budget)?";
+      if (miss === "workflows") return "What are your top 3 recurring workflows?";
+      return `Please clarify: ${miss}`;
+    }
+    // Adaptive follow-ups even when critical fields are present
+    if (!obTranscript.some((x) => /urgent|1h|same day|24h/i.test(x))) {
+      return "Which requests are urgent (1h), same day, or can wait 24h?";
+    }
+    if (!obTranscript.some((x) => /refund|budget|legal|approve|manager|owner/i.test(x))) {
+      return "Which actions should AI ask approval for (refunds, legal replies, budget edits)?";
+    }
+    if (!obTranscript.some((x) => /email|crm|helpdesk|shopify|ads|accounting/i.test(x))) {
+      return "Which tools do you use now (email, CRM, helpdesk, ecommerce, ads, accounting)?";
+    }
+    return "Anything else AI should never do automatically?";
+  }, [obDraft, obTranscript]);
+
   const loadQueueView = useCallback(
     async (viewOverride?: QueueView) => {
       if (!coSel) return;
@@ -407,6 +459,7 @@ export default function ConsolePage() {
         <div className="mb-6 text-sm font-semibold tracking-tight text-white">HSM Console</div>
         <nav className="space-y-1 text-sm">
           {nav("dash", "Dashboard")}
+          {nav("onboard", "Onboarding")}
           {nav("company", "Company OS")}
           {nav("email", "Email draft")}
           {nav("trail", "Trail")}
@@ -454,6 +507,261 @@ export default function ConsolePage() {
                   : "No trail yet."}
               </pre>
             </div>
+          </>
+        )}
+        {view === "onboard" && (
+          <>
+            <h1 className="mb-2 text-lg font-medium text-white">Onboarding wizard</h1>
+            <p className="mb-4 max-w-3xl text-sm text-gray-500">
+              Chat-driven intake converts business language into draft workflows, policy rules, SLA defaults,
+              and ownership. Review, quick-edit, then approve all.
+            </p>
+            {obApplyMsg && (
+              <div className="mb-4 rounded border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
+                {obApplyMsg}
+              </div>
+            )}
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <select
+                className="rounded border border-line bg-panel px-2 py-1 text-sm text-gray-200"
+                value={obVertical}
+                onChange={(e) => setObVertical(e.target.value)}
+              >
+                <option value="generic_smb">generic_smb</option>
+                <option value="ecommerce">ecommerce</option>
+                <option value="marketing">marketing</option>
+                <option value="property_management">property_management</option>
+              </select>
+              <button
+                type="button"
+                className="rounded border border-line px-3 py-1 text-sm text-gray-300"
+                onClick={async () => {
+                  if (!obTranscript.length) return;
+                  setErr(null);
+                  setObLoading(true);
+                  try {
+                    const r = await fetch(`${api}/api/company/onboarding/draft`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        transcript: obTranscript.join("\n"),
+                        vertical_template: obVertical,
+                        company_name: obDraft?.company_name ?? "",
+                      }),
+                    });
+                    const j = await r.json();
+                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                    setObDraft((j as { draft: OnboardDraft }).draft);
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setObLoading(false);
+                  }
+                }}
+              >
+                Refresh draft
+              </button>
+            </div>
+            <div className="mb-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded border border-line bg-panel p-3">
+                <div className="mb-2 text-xs uppercase text-gray-500">Interview</div>
+                <div className="mb-2 max-h-[220px] space-y-1 overflow-auto rounded border border-line bg-ink/40 p-2 text-xs text-gray-300">
+                  {obTranscript.map((m, i) => (
+                    <div key={i}>- {m}</div>
+                  ))}
+                  {!obTranscript.length && <div className="text-gray-600">No answers yet.</div>}
+                </div>
+                <textarea
+                  className="mb-2 min-h-[80px] w-full rounded border border-line bg-ink px-2 py-1 text-sm"
+                  placeholder="Tell us how your business works day-to-day..."
+                  value={obInput}
+                  onChange={(e) => setObInput(e.target.value)}
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+                    disabled={obLoading}
+                    onClick={async () => {
+                      const msg = obInput.trim();
+                      if (!msg) return;
+                      const next = [...obTranscript, msg];
+                      setObTranscript(next);
+                      setObInput("");
+                      setErr(null);
+                      setObLoading(true);
+                      try {
+                        const r = await fetch(`${api}/api/company/onboarding/draft`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            transcript: next.join("\n"),
+                            vertical_template: obVertical,
+                            company_name: obDraft?.company_name ?? "",
+                          }),
+                        });
+                        const j = await r.json();
+                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                        setObDraft((j as { draft: OnboardDraft }).draft);
+                      } catch (e) {
+                        setErr(e instanceof Error ? e.message : String(e));
+                      } finally {
+                        setObLoading(false);
+                      }
+                    }}
+                  >
+                    {obLoading ? "Thinking..." : "Add answer"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-line px-3 py-1 text-sm text-gray-400"
+                    onClick={() => {
+                      setObTranscript([]);
+                      setObInput("");
+                      setObDraft(null);
+                      setObApplyMsg(null);
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+              <div className="rounded border border-line bg-panel p-3">
+                <div className="mb-2 text-xs uppercase text-gray-500">Progressive summary</div>
+                {!obDraft ? (
+                  <div className="text-sm text-gray-600">Start the interview to generate a draft.</div>
+                ) : (
+                  <>
+                    <input
+                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
+                      placeholder="Company name"
+                      value={obDraft.company_name}
+                      onChange={(e) =>
+                        setObDraft((d) => (d ? { ...d, company_name: e.target.value } : d))
+                      }
+                    />
+                    <div className="mb-2 text-xs text-gray-500">
+                      template: {obDraft.vertical_template} · industry: {obDraft.industry}
+                    </div>
+                    <div className="mb-2 text-xs text-gray-400">
+                      Missing critical:{" "}
+                      {obDraft.missing_critical_items.length
+                        ? obDraft.missing_critical_items.join(", ")
+                        : "none"}
+                    </div>
+                    <div className="mb-2 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1 text-xs text-amber-200">
+                      Next question: {obNextQuestion}
+                    </div>
+                    <div className="mb-2 rounded border border-line bg-ink/40 p-2">
+                      <div className="mb-1 text-xs uppercase text-gray-500">Confidence by field</div>
+                      <ul className="space-y-1 text-xs text-gray-400">
+                        {Object.entries(obDraft.confidence_by_field ?? {}).map(([k, v]) => (
+                          <li key={k}>
+                            {k}: {(v * 100).toFixed(0)}%
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            {obDraft && (
+              <div className="mb-4 rounded border border-line bg-panel p-3">
+                <div className="mb-2 text-xs uppercase text-gray-500">Review + quick edits</div>
+                <div className="mb-2 text-xs text-gray-400">
+                  Workflows
+                </div>
+                <div className="mb-3 space-y-2">
+                  {obDraft.workflows.map((w, i) => (
+                    <div key={i} className="grid gap-2 md:grid-cols-5">
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                        value={w.title}
+                        onChange={(e) =>
+                          setObDraft((d) =>
+                            d
+                              ? {
+                                  ...d,
+                                  workflows: d.workflows.map((x, ix) =>
+                                    ix === i ? { ...x, title: e.target.value } : x
+                                  ),
+                                }
+                              : d
+                          )
+                        }
+                      />
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                        value={w.owner_role}
+                        onChange={(e) =>
+                          setObDraft((d) =>
+                            d
+                              ? {
+                                  ...d,
+                                  workflows: d.workflows.map((x, ix) =>
+                                    ix === i ? { ...x, owner_role: e.target.value } : x
+                                  ),
+                                }
+                              : d
+                          )
+                        }
+                      />
+                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.priority} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, priority: e.target.value } : x) }) : d)} />
+                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.sla_target} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, sla_target: e.target.value } : x) }) : d)} />
+                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.approval} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, approval: e.target.value } : x) }) : d)} />
+                    </div>
+                  ))}
+                </div>
+                <div className="mb-2 text-xs text-gray-400">Policy rules</div>
+                <div className="mb-3 max-h-[220px] space-y-1 overflow-auto text-xs text-gray-400">
+                  {obDraft.policy_rules.map((r, i) => (
+                    <div key={i} className="rounded border border-line bg-ink/40 px-2 py-1">
+                      {r.action_type} · {r.risk_level} · {r.decision_mode} · approver {r.approver_role}
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="rounded bg-accent/20 px-3 py-1 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={obApplyLoading || (obDraft.missing_critical_items?.length ?? 0) > 0}
+                  onClick={async () => {
+                    if (!obDraft) return;
+                    setErr(null);
+                    setObApplyMsg(null);
+                    setObApplyLoading(true);
+                    try {
+                      const r = await fetch(`${api}/api/company/onboarding/apply`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ draft: obDraft }),
+                      });
+                      const j = await r.json();
+                      if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                      const cid = (j as { company_id?: string }).company_id;
+                      setObApplyMsg(`Applied onboarding draft${cid ? ` · company_id ${cid}` : ""}.`);
+                      if (cid) {
+                        setCoSel(cid);
+                        setView("company");
+                        await loadCompanyOs(cid);
+                      }
+                    } catch (e) {
+                      setErr(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setObApplyLoading(false);
+                    }
+                  }}
+                >
+                  {obApplyLoading ? "Applying..." : "Approve all"}
+                </button>
+                {!!obDraft.missing_critical_items.length && (
+                  <div className="mt-2 text-xs text-amber-300">
+                    Approve all is blocked until missing critical items are resolved:{" "}
+                    {obDraft.missing_critical_items.join(", ")}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
         {view === "company" && (

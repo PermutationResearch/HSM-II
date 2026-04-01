@@ -43,6 +43,8 @@ pub fn router() -> Router<ConsoleState> {
     Router::new()
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
+        .route("/api/company/onboarding/draft", post(generate_onboarding_draft))
+        .route("/api/company/onboarding/apply", post(apply_onboarding_draft))
         .route("/api/company/companies", get(list_companies).post(create_company))
         .route(
             "/api/company/companies/:company_id/export",
@@ -1384,5 +1386,324 @@ async fn import_company_bundle(
     Ok((
         StatusCode::CREATED,
         Json(json!({ "company_id": id, "message": "imported" })),
+    ))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardWorkflowDraft {
+    title: String,
+    owner_role: String,
+    priority: String,
+    sla_target: String,
+    approval: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardPolicyDraft {
+    action_type: String,
+    risk_level: String,
+    decision_mode: String,
+    amount_min: Option<f64>,
+    amount_max: Option<f64>,
+    approver_role: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardingDraft {
+    company_name: String,
+    industry: String,
+    vertical_template: String,
+    workflows: Vec<OnboardWorkflowDraft>,
+    policy_rules: Vec<OnboardPolicyDraft>,
+    missing_critical_items: Vec<String>,
+    confidence_by_field: std::collections::BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnboardingDraftRequest {
+    transcript: String,
+    #[serde(default)]
+    vertical_template: Option<String>,
+    #[serde(default)]
+    company_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnboardingApplyRequest {
+    draft: OnboardingDraft,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+fn template_defaults(vertical: &str) -> (&'static str, Vec<OnboardWorkflowDraft>, Vec<OnboardPolicyDraft>) {
+    let v = vertical.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "ecommerce" | "online_commerce" => (
+            "ecommerce",
+            vec![
+                OnboardWorkflowDraft { title: "Customer inquiry triage".into(), owner_role: "support_admin".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Order issue follow-up".into(), owner_role: "ops_admin".into(), priority: "high".into(), sla_target: "same_day".into(), approval: "admin_required".into() },
+                OnboardWorkflowDraft { title: "Product content refresh".into(), owner_role: "marketing_admin".into(), priority: "medium".into(), sla_target: "24h".into(), approval: "auto".into() },
+            ],
+            vec![
+                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "medium".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "support_admin".into() },
+                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(100.0), amount_max: None, approver_role: "finance_admin".into() },
+                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+            ],
+        ),
+        "marketing" | "marketing_agency" => (
+            "marketing",
+            vec![
+                OnboardWorkflowDraft { title: "Lead response drafting".into(), owner_role: "account_manager".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Campaign performance summary".into(), owner_role: "ads_manager".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Client update email".into(), owner_role: "account_manager".into(), priority: "medium".into(), sla_target: "24h".into(), approval: "admin_required".into() },
+            ],
+            vec![
+                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "low".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "account_manager".into() },
+                OnboardPolicyDraft { action_type: "publish_campaign".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: None, amount_max: None, approver_role: "ads_manager".into() },
+                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+            ],
+        ),
+        _ => (
+            "generic_smb",
+            vec![
+                OnboardWorkflowDraft { title: "Inbound message triage".into(), owner_role: "ops_admin".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Follow-up scheduling".into(), owner_role: "ops_admin".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "auto".into() },
+                OnboardWorkflowDraft { title: "Exception escalation".into(), owner_role: "manager".into(), priority: "high".into(), sla_target: "1h".into(), approval: "admin_required".into() },
+            ],
+            vec![
+                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "medium".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "ops_admin".into() },
+                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(50.0), amount_max: None, approver_role: "manager".into() },
+                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+            ],
+        ),
+    }
+}
+
+async fn generate_onboarding_draft(
+    Json(req): Json<OnboardingDraftRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let transcript = req.transcript.trim();
+    if transcript.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "transcript required" })),
+        ));
+    }
+
+    let t = transcript.to_ascii_lowercase();
+    let selected_vertical = req
+        .vertical_template
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if t.contains("shopify") || t.contains("order") || t.contains("ecom") {
+                "ecommerce".to_string()
+            } else if t.contains("campaign") || t.contains("ads") || t.contains("lead") {
+                "marketing".to_string()
+            } else if t.contains("tenant") || t.contains("property") || t.contains("building") {
+                "property_management".to_string()
+            } else {
+                "generic_smb".to_string()
+            }
+        });
+
+    let (industry, mut workflows, mut rules) = template_defaults(&selected_vertical);
+
+    if t.contains("refund") {
+        rules.push(OnboardPolicyDraft {
+            action_type: "refund".into(),
+            risk_level: "high".into(),
+            decision_mode: "admin_required".into(),
+            amount_min: Some(0.0),
+            amount_max: None,
+            approver_role: "finance_admin".into(),
+        });
+    }
+    if t.contains("legal") || t.contains("contract") {
+        rules.push(OnboardPolicyDraft {
+            action_type: "legal_reply".into(),
+            risk_level: "critical".into(),
+            decision_mode: "blocked".into(),
+            amount_min: None,
+            amount_max: None,
+            approver_role: "legal_owner".into(),
+        });
+    }
+    if t.contains("urgent") || t.contains("1h") {
+        for w in &mut workflows {
+            if w.priority != "low" {
+                w.sla_target = "1h".to_string();
+            }
+        }
+    }
+
+    let company_name = req
+        .company_name
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let mut missing = Vec::new();
+    if company_name.is_empty() {
+        missing.push("company_name".to_string());
+    }
+    if !t.contains("approve") && !t.contains("manager") && !t.contains("owner") {
+        missing.push("approver_role".to_string());
+    }
+    if workflows.is_empty() {
+        missing.push("workflows".to_string());
+    }
+
+    let mut conf = std::collections::BTreeMap::new();
+    conf.insert("company_name".to_string(), if company_name.is_empty() { 0.2 } else { 0.95 });
+    conf.insert("industry".to_string(), if selected_vertical == "generic_smb" { 0.6 } else { 0.85 });
+    conf.insert("workflows".to_string(), 0.82);
+    conf.insert("policy_rules".to_string(), 0.79);
+    conf.insert("ownership".to_string(), if missing.iter().any(|x| x == "approver_role") { 0.45 } else { 0.8 });
+
+    let draft = OnboardingDraft {
+        company_name,
+        industry: industry.to_string(),
+        vertical_template: selected_vertical,
+        workflows,
+        policy_rules: rules,
+        missing_critical_items: missing,
+        confidence_by_field: conf,
+    };
+    Ok(Json(json!({ "draft": draft })))
+}
+
+async fn apply_onboarding_draft(
+    State(st): State<ConsoleState>,
+    Json(req): Json<OnboardingApplyRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let d = req.draft;
+    let display_name = req
+        .display_name
+        .as_deref()
+        .unwrap_or(d.company_name.as_str())
+        .trim();
+    if display_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "company name required in draft/display_name" })),
+        ));
+    }
+    let mut slug = req.slug.unwrap_or_else(|| {
+        display_name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    });
+    if slug.is_empty() {
+        slug = "company".to_string();
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let company_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO companies (slug, display_name)
+           VALUES ($1, $2) RETURNING id"#,
+    )
+    .bind(&slug)
+    .bind(display_name)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    for r in d.policy_rules {
+        let risk = normalize_risk(&r.risk_level).unwrap_or("medium");
+        let decision = normalize_decision(&r.decision_mode).unwrap_or("admin_required");
+        let action = r.action_type.trim().to_ascii_lowercase();
+        if action.is_empty() {
+            continue;
+        }
+        sqlx::query(
+            r#"INSERT INTO policy_rules (company_id, action_type, risk_level, amount_min, amount_max, decision_mode)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(company_id)
+        .bind(action)
+        .bind(risk)
+        .bind(r.amount_min)
+        .bind(r.amount_max)
+        .bind(decision)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    }
+
+    for w in d.workflows {
+        let p = match w.priority.trim().to_ascii_lowercase().as_str() {
+            "high" => 3,
+            "low" => 1,
+            _ => 2,
+        };
+        let state = match w.approval.trim().to_ascii_lowercase().as_str() {
+            "blocked" => "blocked",
+            "admin_required" => "waiting_admin",
+            _ => "open",
+        };
+        sqlx::query(
+            r#"INSERT INTO tasks (company_id, title, specification, state, owner_persona, priority)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(company_id)
+        .bind(w.title.trim())
+        .bind(format!("onboarding workflow · sla_target={} · approval={}", w.sla_target, w.approval))
+        .bind(state)
+        .bind(w.owner_role.trim())
+        .bind(p)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    }
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "company_id": company_id,
+            "slug": slug,
+            "message": "onboarding draft applied"
+        })),
     ))
 }
