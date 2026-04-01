@@ -276,16 +276,23 @@ export default function ConsolePage() {
   const coGoalDepth = useMemo(() => {
     const byId = new Map(coGoals.map((g) => [g.id, g]));
     const memo = new Map<string, number>();
-    const depth = (id: string): number => {
+    const depth = (id: string, visiting: Set<string>): number => {
       if (memo.has(id)) return memo.get(id)!;
+      if (visiting.has(id)) return 0;
       const g = byId.get(id);
-      let d = 0;
       const pid = g?.parent_goal_id;
-      if (pid) d = 1 + depth(String(pid));
+      if (!pid) {
+        memo.set(id, 0);
+        return 0;
+      }
+      const ps = String(pid);
+      visiting.add(id);
+      const d = 1 + depth(ps, visiting);
+      visiting.delete(id);
       memo.set(id, d);
       return d;
     };
-    for (const g of coGoals) depth(g.id);
+    for (const g of coGoals) depth(g.id, new Set());
     return memo;
   }, [coGoals]);
 

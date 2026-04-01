@@ -387,6 +387,40 @@ async fn compute_goal_ancestry(
     Ok(chain)
 }
 
+/// Walk from `start` up via `parent_goal_id`; true if `needle` appears on that path (strictly above `start`).
+/// Used so `goal_id.parent = start` is rejected when it would close a loop.
+async fn parent_chain_contains_goal(
+    pool: &PgPool,
+    company_id: Uuid,
+    mut start: Uuid,
+    needle: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut guard = 0u8;
+    loop {
+        let row: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT parent_goal_id FROM goals WHERE id = $1 AND company_id = $2")
+                .bind(start)
+                .bind(company_id)
+                .fetch_optional(pool)
+                .await?;
+        let Some((parent_opt,)) = row else {
+            break;
+        };
+        let Some(parent) = parent_opt else {
+            break;
+        };
+        if parent == needle {
+            return Ok(true);
+        }
+        start = parent;
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+    }
+    Ok(false)
+}
+
 async fn create_task(
     State(st): State<ConsoleState>,
     Path(company_id): Path<Uuid>,
@@ -658,6 +692,20 @@ async fn patch_goal(
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "parent_goal_id not in company" })),
+            ));
+        }
+        let chain_hits = parent_chain_contains_goal(pool, company_id, *pid, goal_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+        if chain_hits {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "parent_goal_id would create a cycle" })),
             ));
         }
     }
