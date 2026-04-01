@@ -6,7 +6,7 @@ mod bundle;
 mod spend;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, patch, post},
     Json, Router,
@@ -57,6 +57,14 @@ pub fn router() -> Router<ConsoleState> {
             get(list_governance).post(post_governance),
         )
         .route(
+            "/api/company/companies/:company_id/policies/rules",
+            get(list_policy_rules).post(post_policy_rule),
+        )
+        .route(
+            "/api/company/companies/:company_id/policies/evaluate",
+            post(evaluate_policy),
+        )
+        .route(
             "/api/company/companies/:company_id/goals",
             get(list_goals).post(create_goal),
         )
@@ -68,6 +76,12 @@ pub fn router() -> Router<ConsoleState> {
             "/api/company/companies/:company_id/tasks",
             get(list_tasks).post(create_task),
         )
+        .route(
+            "/api/company/companies/:company_id/tasks/queue",
+            get(list_task_queue),
+        )
+        .route("/api/company/tasks/:task_id/sla", patch(patch_task_sla))
+        .route("/api/company/tasks/:task_id/decision", post(post_task_decision))
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
 }
@@ -491,6 +505,271 @@ async fn create_task(
     Ok((StatusCode::CREATED, Json(json!({ "task": row }))))
 }
 
+#[derive(Deserialize, Default)]
+struct PatchTaskSlaBody {
+    #[serde(default)]
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    sla_policy: Option<String>,
+    #[serde(default)]
+    escalate_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    status_reason: Option<String>,
+    #[serde(default)]
+    priority: Option<i32>,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct TaskSlaRow {
+    id: Uuid,
+    company_id: Uuid,
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    sla_policy: Option<String>,
+    escalate_after: Option<chrono::DateTime<chrono::Utc>>,
+    status_reason: Option<String>,
+    priority: i32,
+    updated_at: String,
+}
+
+async fn patch_task_sla(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PatchTaskSlaBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let row = sqlx::query_as::<_, TaskSlaRow>(
+        r#"UPDATE tasks SET
+            due_at = COALESCE($2, due_at),
+            sla_policy = COALESCE($3, sla_policy),
+            escalate_after = COALESCE($4, escalate_after),
+            status_reason = COALESCE($5, status_reason),
+            priority = COALESCE($6, priority),
+            updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, due_at, sla_policy, escalate_after, status_reason, priority, updated_at::text"#,
+    )
+    .bind(task_id)
+    .bind(body.due_at)
+    .bind(body.sla_policy.as_ref())
+    .bind(body.escalate_after)
+    .bind(body.status_reason.as_ref())
+    .bind(body.priority)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let Some(task) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+    };
+    Ok(Json(json!({ "task": task })))
+}
+
+#[derive(Deserialize, Default)]
+struct TaskQueueQuery {
+    #[serde(default)]
+    view: Option<String>,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct QueueTaskRow {
+    id: Uuid,
+    company_id: Uuid,
+    title: String,
+    state: String,
+    priority: i32,
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    escalate_after: Option<chrono::DateTime<chrono::Utc>>,
+    checked_out_by: Option<String>,
+    decision_mode: String,
+    created_at: String,
+}
+
+async fn list_task_queue(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Query(q): Query<TaskQueueQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let view = q
+        .view
+        .as_deref()
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase();
+
+    let sql = match view.as_str() {
+        "overdue" => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      CASE
+                        WHEN state = 'blocked' THEN 'blocked'
+                        WHEN state = 'waiting_admin' THEN 'admin_required'
+                        ELSE 'auto'
+                      END AS decision_mode,
+                      created_at::text
+               FROM tasks
+               WHERE company_id = $1
+                 AND due_at IS NOT NULL
+                 AND due_at < NOW()
+                 AND state NOT IN ('done','closed','cancelled')
+               ORDER BY priority DESC, due_at ASC, created_at"#
+        }
+        "atrisk" => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      CASE
+                        WHEN state = 'blocked' THEN 'blocked'
+                        WHEN state = 'waiting_admin' THEN 'admin_required'
+                        ELSE 'auto'
+                      END AS decision_mode,
+                      created_at::text
+               FROM tasks
+               WHERE company_id = $1
+                 AND escalate_after IS NOT NULL
+                 AND escalate_after <= NOW() + INTERVAL '2 hours'
+                 AND state NOT IN ('done','closed','cancelled')
+               ORDER BY escalate_after ASC, priority DESC, created_at"#
+        }
+        "waiting_admin" | "pending_approvals" => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      'admin_required' AS decision_mode,
+                      created_at::text
+               FROM tasks
+               WHERE company_id = $1
+                 AND state = 'waiting_admin'
+               ORDER BY priority DESC, created_at"#
+        }
+        "blocked" => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      'blocked' AS decision_mode,
+                      created_at::text
+               FROM tasks
+               WHERE company_id = $1
+                 AND state = 'blocked'
+               ORDER BY priority DESC, created_at"#
+        }
+        _ => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      CASE
+                        WHEN state = 'blocked' THEN 'blocked'
+                        WHEN state = 'waiting_admin' THEN 'admin_required'
+                        ELSE 'auto'
+                      END AS decision_mode,
+                      created_at::text
+               FROM tasks
+               WHERE company_id = $1
+               ORDER BY priority DESC, created_at"#
+        }
+    };
+
+    let rows = sqlx::query_as::<_, QueueTaskRow>(sql)
+        .bind(company_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "view": view,
+        "tasks": rows,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PostTaskDecisionBody {
+    decision_mode: String,
+    #[serde(default)]
+    actor: String,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn post_task_decision(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PostTaskDecisionBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let Some(decision) = normalize_decision(&body.decision_mode) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "decision_mode must be auto|admin_required|blocked" })),
+        ));
+    };
+    let next_state = match decision {
+        "blocked" => "blocked",
+        "admin_required" => "waiting_admin",
+        _ => "in_progress",
+    };
+    let reason = body.reason.trim();
+    let status_reason = if reason.is_empty() {
+        format!("policy:{decision}")
+    } else {
+        format!("policy:{decision}:{reason}")
+    };
+
+    let task = sqlx::query_as::<_, TaskRow>(
+        r#"UPDATE tasks SET
+            state = $2,
+            status_reason = $3,
+            updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
+                     owner_persona, checked_out_by, checked_out_until, priority, created_at::text"#,
+    )
+    .bind(task_id)
+    .bind(next_state)
+    .bind(status_reason.clone())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(task) = task else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+    };
+
+    let actor = if body.actor.trim().is_empty() {
+        "admin"
+    } else {
+        body.actor.trim()
+    };
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events
+           (company_id, actor, action, subject_type, subject_id, payload, decision, severity)
+           VALUES ($1, $2, 'task_policy_decision', 'task', $3, $4, $5, $6)"#,
+    )
+    .bind(task.company_id)
+    .bind(actor)
+    .bind(task_id.to_string())
+    .bind(SqlxJson(json!({ "decision_mode": decision, "reason": reason })))
+    .bind(decision)
+    .bind(if decision == "blocked" { "warn" } else { "info" })
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({
+        "task": task,
+        "decision_mode": decision,
+    })))
+}
+
 #[derive(Deserialize)]
 struct CheckoutBody {
     agent_ref: String,
@@ -762,6 +1041,19 @@ struct GovRow {
     created_at: String,
 }
 
+#[derive(sqlx::FromRow, Serialize)]
+struct PolicyRuleRow {
+    id: Uuid,
+    company_id: Uuid,
+    action_type: String,
+    risk_level: String,
+    amount_min: Option<f64>,
+    amount_max: Option<f64>,
+    decision_mode: String,
+    created_at: String,
+    updated_at: String,
+}
+
 async fn list_governance(
     State(st): State<ConsoleState>,
     Path(company_id): Path<Uuid>,
@@ -829,6 +1121,203 @@ async fn post_governance(
         )
     })?;
     Ok((StatusCode::CREATED, Json(json!({ "event": row }))))
+}
+
+#[derive(Deserialize)]
+struct PostPolicyRuleBody {
+    action_type: String,
+    risk_level: String,
+    #[serde(default)]
+    amount_min: Option<f64>,
+    #[serde(default)]
+    amount_max: Option<f64>,
+    decision_mode: String,
+}
+
+#[derive(Deserialize)]
+struct EvaluatePolicyBody {
+    action_type: String,
+    risk_level: String,
+    #[serde(default)]
+    amount: Option<f64>,
+}
+
+fn normalize_risk(v: &str) -> Option<&'static str> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "critical" => Some("critical"),
+        _ => None,
+    }
+}
+
+fn normalize_decision(v: &str) -> Option<&'static str> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some("auto"),
+        "admin_required" => Some("admin_required"),
+        "blocked" => Some("blocked"),
+        _ => None,
+    }
+}
+
+async fn list_policy_rules(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, PolicyRuleRow>(
+        r#"SELECT id, company_id, action_type, risk_level,
+                  amount_min::float8 as amount_min, amount_max::float8 as amount_max,
+                  decision_mode, created_at::text, updated_at::text
+           FROM policy_rules
+           WHERE company_id = $1
+           ORDER BY action_type, risk_level, amount_min NULLS FIRST, created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "rules": rows })))
+}
+
+async fn post_policy_rule(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<PostPolicyRuleBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let action = body.action_type.trim().to_ascii_lowercase();
+    if action.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "action_type required" })),
+        ));
+    }
+    let Some(risk) = normalize_risk(&body.risk_level) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "risk_level must be low|medium|high|critical" })),
+        ));
+    };
+    let Some(decision) = normalize_decision(&body.decision_mode) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "decision_mode must be auto|admin_required|blocked" })),
+        ));
+    };
+    if let (Some(min), Some(max)) = (body.amount_min, body.amount_max) {
+        if min > max {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "amount_min must be <= amount_max" })),
+            ));
+        }
+    }
+
+    let row = sqlx::query_as::<_, PolicyRuleRow>(
+        r#"INSERT INTO policy_rules (company_id, action_type, risk_level, amount_min, amount_max, decision_mode)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, company_id, action_type, risk_level,
+                     amount_min::float8 as amount_min, amount_max::float8 as amount_max,
+                     decision_mode, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(action)
+    .bind(risk)
+    .bind(body.amount_min)
+    .bind(body.amount_max)
+    .bind(decision)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok((StatusCode::CREATED, Json(json!({ "rule": row }))))
+}
+
+async fn evaluate_policy(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<EvaluatePolicyBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let action = body.action_type.trim().to_ascii_lowercase();
+    if action.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "action_type required" })),
+        ));
+    }
+    let Some(risk) = normalize_risk(&body.risk_level) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "risk_level must be low|medium|high|critical" })),
+        ));
+    };
+
+    let matched = sqlx::query_as::<_, PolicyRuleRow>(
+        r#"SELECT id, company_id, action_type, risk_level,
+                  amount_min::float8 as amount_min, amount_max::float8 as amount_max,
+                  decision_mode, created_at::text, updated_at::text
+           FROM policy_rules
+           WHERE company_id = $1
+             AND action_type = $2
+             AND risk_level = $3
+             AND ($4::float8 IS NULL OR amount_min IS NULL OR amount_min <= $4::float8)
+             AND ($4::float8 IS NULL OR amount_max IS NULL OR amount_max >= $4::float8)
+           ORDER BY
+             CASE decision_mode
+               WHEN 'blocked' THEN 0
+               WHEN 'admin_required' THEN 1
+               ELSE 2
+             END,
+             amount_min DESC NULLS LAST,
+             created_at
+           LIMIT 1"#,
+    )
+    .bind(company_id)
+    .bind(action.clone())
+    .bind(risk)
+    .bind(body.amount)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    if let Some(rule) = matched {
+        return Ok(Json(json!({
+            "decision_mode": rule.decision_mode,
+            "matched_rule": rule,
+            "reason": "matched_company_rule"
+        })));
+    }
+
+    Ok(Json(json!({
+        "decision_mode": "admin_required",
+        "matched_rule": Value::Null,
+        "reason": "no_matching_rule_default_admin_required",
+        "action_type": action,
+        "risk_level": risk,
+    })))
 }
 
 async fn spend_summary(

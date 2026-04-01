@@ -62,6 +62,12 @@ type TaskRow = {
   checked_out_by?: string | null;
   checked_out_until?: string | null;
   owner_persona?: string | null;
+  due_at?: string | null;
+  sla_policy?: string | null;
+  escalate_after?: string | null;
+  status_reason?: string | null;
+  priority?: number;
+  decision_mode?: "auto" | "admin_required" | "blocked" | string;
 };
 type GoalRowUi = {
   id: string;
@@ -81,6 +87,16 @@ type GovEvent = {
   created_at: string;
 };
 type SpendSummary = { company_id: string; total_usd: number; by_kind: { kind: string; amount_usd: number }[] };
+type PolicyRule = {
+  id: string;
+  company_id: string;
+  action_type: string;
+  risk_level: string;
+  amount_min?: number | null;
+  amount_max?: number | null;
+  decision_mode: "auto" | "admin_required" | "blocked" | string;
+};
+type QueueView = "all" | "overdue" | "atrisk" | "waiting_admin" | "pending_approvals" | "blocked";
 
 export default function ConsolePage() {
   const api = process.env.NEXT_PUBLIC_API_BASE ?? defaultApi;
@@ -128,6 +144,22 @@ export default function ConsolePage() {
   const [coGovAction, setCoGovAction] = useState("note");
   const [coGovSubjT, setCoGovSubjT] = useState("company");
   const [coGovSubjId, setCoGovSubjId] = useState("");
+  const [coPolicyRules, setCoPolicyRules] = useState<PolicyRule[]>([]);
+  const [coPolicyAction, setCoPolicyAction] = useState("send_message");
+  const [coPolicyRisk, setCoPolicyRisk] = useState("medium");
+  const [coPolicyAmtMin, setCoPolicyAmtMin] = useState("");
+  const [coPolicyAmtMax, setCoPolicyAmtMax] = useState("");
+  const [coPolicyDecision, setCoPolicyDecision] = useState("admin_required");
+  const [coEvalAmount, setCoEvalAmount] = useState("");
+  const [coPolicyEvalRes, setCoPolicyEvalRes] = useState<string | null>(null);
+  const [coQueueView, setCoQueueView] = useState<QueueView>("all");
+  const [coQueueTasks, setCoQueueTasks] = useState<TaskRow[]>([]);
+  const [coSlaDueAt, setCoSlaDueAt] = useState<Record<string, string>>({});
+  const [coSlaEscAt, setCoSlaEscAt] = useState<Record<string, string>>({});
+  const [coSlaPol, setCoSlaPol] = useState<Record<string, string>>({});
+  const [coSlaReason, setCoSlaReason] = useState<Record<string, string>>({});
+  const [coSlaPrio, setCoSlaPrio] = useState<Record<string, string>>({});
+  const [coDecisionReason, setCoDecisionReason] = useState<Record<string, string>>({});
   const coImportRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -224,6 +256,8 @@ export default function ConsolePage() {
           setCoGoals([]);
           setCoGovernance([]);
           setCoSpend(null);
+          setCoPolicyRules([]);
+          setCoQueueTasks([]);
           return;
         }
         const list = await fetch(`${api}/api/company/companies`).then((r) => {
@@ -234,7 +268,7 @@ export default function ConsolePage() {
         const effectiveSel = selOverride !== undefined ? selOverride : coSel;
         if (effectiveSel) {
           const cid = effectiveSel;
-          const [g, t, gov, sp] = await Promise.all([
+          const [g, t, gov, sp, pr, q] = await Promise.all([
             fetch(`${api}/api/company/companies/${cid}/goals`).then((r) => {
               if (!r.ok) throw new Error(`goals ${r.status}`);
               return r.json() as Promise<{ goals: GoalRowUi[] }>;
@@ -251,22 +285,34 @@ export default function ConsolePage() {
               if (!r.ok) throw new Error(`spend ${r.status}`);
               return r.json() as Promise<SpendSummary>;
             }),
+            fetch(`${api}/api/company/companies/${cid}/policies/rules`).then((r) => {
+              if (!r.ok) throw new Error(`policy rules ${r.status}`);
+              return r.json() as Promise<{ rules: PolicyRule[] }>;
+            }),
+            fetch(`${api}/api/company/companies/${cid}/tasks/queue?view=${coQueueView}`).then((r) => {
+              if (!r.ok) throw new Error(`queue ${r.status}`);
+              return r.json() as Promise<{ tasks: TaskRow[] }>;
+            }),
           ]);
           setCoGoals(g.goals ?? []);
           setCoTasks(t.tasks ?? []);
           setCoGovernance(gov.events ?? []);
           setCoSpend(sp);
+          setCoPolicyRules(pr.rules ?? []);
+          setCoQueueTasks(q.tasks ?? []);
         } else {
           setCoTasks([]);
           setCoGoals([]);
           setCoGovernance([]);
           setCoSpend(null);
+          setCoPolicyRules([]);
+          setCoQueueTasks([]);
         }
       } catch (e) {
         setCoErr(e instanceof Error ? e.message : String(e));
       }
     },
-    [api, coSel]
+    [api, coSel, coQueueView]
   );
 
   useEffect(() => {
@@ -304,6 +350,29 @@ export default function ConsolePage() {
           a.title.localeCompare(b.title)
       ),
     [coGoals, coGoalDepth]
+  );
+
+  const coLatestTaskDecision = useMemo(() => {
+    const out = new Map<string, GovEvent>();
+    for (const ev of coGovernance) {
+      if (ev.action !== "task_policy_decision" || ev.subject_type !== "task") continue;
+      const sid = String(ev.subject_id || "");
+      if (!sid) continue;
+      if (!out.has(sid)) out.set(sid, ev);
+    }
+    return out;
+  }, [coGovernance]);
+
+  const loadQueueView = useCallback(
+    async (viewOverride?: QueueView) => {
+      if (!coSel) return;
+      const v = viewOverride ?? coQueueView;
+      const r = await fetch(`${api}/api/company/companies/${coSel}/tasks/queue?view=${v}`);
+      const j = (await r.json()) as { tasks?: TaskRow[]; error?: string };
+      if (!r.ok) throw new Error(j.error ?? `queue ${r.status}`);
+      setCoQueueTasks(j.tasks ?? []);
+    },
+    [api, coSel, coQueueView]
   );
 
   useEffect(() => {
@@ -579,6 +648,250 @@ export default function ConsolePage() {
 
                 <div className="mb-4 grid gap-4 md:grid-cols-2">
                   <div className="rounded border border-line bg-panel p-3">
+                    <div className="mb-2 text-xs uppercase text-gray-500">Policy rules</div>
+                    <div className="mb-2 grid grid-cols-2 gap-2">
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        placeholder="action_type"
+                        value={coPolicyAction}
+                        onChange={(e) => setCoPolicyAction(e.target.value)}
+                      />
+                      <select
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        value={coPolicyRisk}
+                        onChange={(e) => setCoPolicyRisk(e.target.value)}
+                      >
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                        <option value="critical">critical</option>
+                      </select>
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        placeholder="amount_min (optional)"
+                        value={coPolicyAmtMin}
+                        onChange={(e) => setCoPolicyAmtMin(e.target.value)}
+                      />
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        placeholder="amount_max (optional)"
+                        value={coPolicyAmtMax}
+                        onChange={(e) => setCoPolicyAmtMax(e.target.value)}
+                      />
+                    </div>
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      <select
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        value={coPolicyDecision}
+                        onChange={(e) => setCoPolicyDecision(e.target.value)}
+                      >
+                        <option value="auto">auto</option>
+                        <option value="admin_required">admin_required</option>
+                        <option value="blocked">blocked</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+                        onClick={async () => {
+                          if (!coSel) return;
+                          setCoErr(null);
+                          try {
+                            const numOrUndef = (v: string) => {
+                              const t = v.trim();
+                              if (!t) return undefined;
+                              const n = Number(t);
+                              return Number.isFinite(n) ? n : undefined;
+                            };
+                            const r = await fetch(`${api}/api/company/companies/${coSel}/policies/rules`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                action_type: coPolicyAction.trim(),
+                                risk_level: coPolicyRisk.trim(),
+                                amount_min: numOrUndef(coPolicyAmtMin),
+                                amount_max: numOrUndef(coPolicyAmtMax),
+                                decision_mode: coPolicyDecision.trim(),
+                              }),
+                            });
+                            const j = await r.json();
+                            if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                            await loadCompanyOs();
+                          } catch (e) {
+                            setCoErr(e instanceof Error ? e.message : String(e));
+                          }
+                        }}
+                      >
+                        Add rule
+                      </button>
+                    </div>
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      <input
+                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
+                        placeholder="evaluate amount (optional)"
+                        value={coEvalAmount}
+                        onChange={(e) => setCoEvalAmount(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="rounded border border-line px-3 py-1 text-sm text-gray-300"
+                        onClick={async () => {
+                          if (!coSel) return;
+                          setCoErr(null);
+                          setCoPolicyEvalRes(null);
+                          try {
+                            const t = coEvalAmount.trim();
+                            const amount = t ? Number(t) : undefined;
+                            const r = await fetch(`${api}/api/company/companies/${coSel}/policies/evaluate`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                action_type: coPolicyAction.trim(),
+                                risk_level: coPolicyRisk.trim(),
+                                amount: Number.isFinite(amount as number) ? amount : undefined,
+                              }),
+                            });
+                            const j = await r.json();
+                            if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                            setCoPolicyEvalRes(JSON.stringify(j, null, 2));
+                          } catch (e) {
+                            setCoErr(e instanceof Error ? e.message : String(e));
+                          }
+                        }}
+                      >
+                        Evaluate
+                      </button>
+                    </div>
+                    {coPolicyEvalRes && (
+                      <pre className="mb-2 max-h-[180px] overflow-auto rounded border border-line bg-ink p-2 font-mono text-[11px] text-gray-400">
+                        {coPolicyEvalRes}
+                      </pre>
+                    )}
+                    <ul className="max-h-[180px] space-y-1 overflow-auto text-xs text-gray-400">
+                      {coPolicyRules.map((r) => (
+                        <li key={r.id} className="rounded border border-line bg-ink/50 px-2 py-1">
+                          {r.action_type} · {r.risk_level} · {r.decision_mode}
+                          {(r.amount_min ?? r.amount_max) !== undefined
+                            ? ` · [${r.amount_min ?? "-inf"} .. ${r.amount_max ?? "+inf"}]`
+                            : ""}
+                        </li>
+                      ))}
+                      {!coPolicyRules.length && <li className="text-gray-600">No policy rules yet.</li>}
+                    </ul>
+                  </div>
+
+                  <div className="rounded border border-line bg-panel p-3">
+                    <div className="mb-2 text-xs uppercase text-gray-500">Queue views</div>
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {(["all", "overdue", "atrisk", "pending_approvals", "blocked"] as QueueView[]).map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          className={`rounded border px-2 py-1 text-xs ${
+                            coQueueView === v ? "border-accent bg-accent/10 text-accent" : "border-line text-gray-400"
+                          }`}
+                          onClick={async () => {
+                            setCoQueueView(v);
+                            try {
+                              await loadQueueView(v);
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                    <ul className="max-h-[220px] space-y-1 overflow-auto text-xs text-gray-400">
+                      {coQueueTasks.map((t) => (
+                        <li key={t.id} className="rounded border border-line bg-ink/50 px-2 py-1">
+                          <div className="mb-1 flex items-center justify-between gap-2">
+                            <span>
+                              {t.title} · {t.state}
+                              {t.priority !== undefined ? ` · p${t.priority}` : ""}
+                              {t.due_at ? ` · due ${t.due_at}` : ""}
+                            </span>
+                            <span
+                              className={`rounded px-2 py-0.5 text-[10px] ${
+                                (t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")) === "blocked"
+                                  ? "bg-red-900/40 text-red-300"
+                                  : (t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")) === "admin_required"
+                                  ? "bg-amber-900/40 text-amber-300"
+                                  : "bg-emerald-900/40 text-emerald-300"
+                              }`}
+                            >
+                              {((t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")).toUpperCase())}
+                            </span>
+                          </div>
+                          {(coQueueView === "pending_approvals" || t.state === "waiting_admin") && (
+                            <div className="flex items-center gap-2">
+                              <input
+                                className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-[11px]"
+                                placeholder="reason (optional)"
+                                value={coDecisionReason[t.id] ?? ""}
+                                onChange={(e) => setCoDecisionReason((m) => ({ ...m, [t.id]: e.target.value }))}
+                              />
+                              <button
+                                type="button"
+                                className="rounded border border-emerald-700 px-2 py-1 text-[11px] text-emerald-300"
+                                onClick={async () => {
+                                  setCoErr(null);
+                                  try {
+                                    const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({
+                                        decision_mode: "auto",
+                                        actor: coCheckoutAgent.trim() || "admin",
+                                        reason: coDecisionReason[t.id] ?? "",
+                                      }),
+                                    });
+                                    const j = await r.json();
+                                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                                    await loadCompanyOs();
+                                  } catch (e) {
+                                    setCoErr(e instanceof Error ? e.message : String(e));
+                                  }
+                                }}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded border border-red-800 px-2 py-1 text-[11px] text-red-300"
+                                onClick={async () => {
+                                  setCoErr(null);
+                                  try {
+                                    const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({
+                                        decision_mode: "blocked",
+                                        actor: coCheckoutAgent.trim() || "admin",
+                                        reason: coDecisionReason[t.id] ?? "",
+                                      }),
+                                    });
+                                    const j = await r.json();
+                                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                                    await loadCompanyOs();
+                                  } catch (e) {
+                                    setCoErr(e instanceof Error ? e.message : String(e));
+                                  }
+                                }}
+                              >
+                                Block
+                              </button>
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                      {!coQueueTasks.length && <li className="text-gray-600">No queue tasks in this view.</li>}
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="mb-4 grid gap-4 md:grid-cols-2">
+                  <div className="rounded border border-line bg-panel p-3">
                     <div className="mb-2 text-xs uppercase text-gray-500">New goal</div>
                     <input
                       className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
@@ -840,11 +1153,25 @@ export default function ConsolePage() {
                             <div className="font-medium text-gray-200">{t.title}</div>
                             <div className="text-xs text-gray-500">
                               {t.state}
+                              {" · "}
+                              <span
+                                className={`inline-block rounded px-1.5 py-0.5 ${
+                                  (t.state === "blocked")
+                                    ? "bg-red-900/40 text-red-300"
+                                    : (t.state === "waiting_admin")
+                                    ? "bg-amber-900/40 text-amber-300"
+                                    : "bg-emerald-900/40 text-emerald-300"
+                                }`}
+                              >
+                                {(t.state === "blocked" ? "BLOCKED" : t.state === "waiting_admin" ? "ADMIN_REQUIRED" : "AUTO")}
+                              </span>
                               {t.owner_persona ? ` · ${t.owner_persona}` : ""}
                               {t.checked_out_by ? ` · out: ${t.checked_out_by}` : ""}
                               {t.checked_out_until
                                 ? ` · until ${String(t.checked_out_until)}`
                                 : ""}
+                              {t.due_at ? ` · due ${String(t.due_at)}` : ""}
+                              {t.sla_policy ? ` · SLA ${t.sla_policy}` : ""}
                             </div>
                           </div>
                           <div className="flex shrink-0 gap-2">
@@ -901,6 +1228,87 @@ export default function ConsolePage() {
                             {t.specification}
                           </pre>
                         )}
+                        {coLatestTaskDecision.get(t.id) && (
+                          <div className="mt-2">
+                            <span className="inline-flex items-center gap-1 rounded border border-line bg-ink/60 px-2 py-0.5 text-[10px] text-gray-400">
+                              {(() => {
+                                const ev = coLatestTaskDecision.get(t.id)!;
+                                const p = (ev.payload ?? {}) as { decision_mode?: string; reason?: string };
+                                const d = (p.decision_mode ?? "").toUpperCase() || "DECISION";
+                                const rs = (p.reason ?? "").trim();
+                                const reasonPart = rs ? ` · ${rs}` : "";
+                                return `last ${d} by ${ev.actor} · ${ev.created_at}${reasonPart}`;
+                              })()}
+                            </span>
+                          </div>
+                        )}
+                        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-5">
+                          <input
+                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                            placeholder="due_at (ISO)"
+                            value={coSlaDueAt[t.id] ?? ""}
+                            onChange={(e) => setCoSlaDueAt((m) => ({ ...m, [t.id]: e.target.value }))}
+                          />
+                          <input
+                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                            placeholder="escalate_after (ISO)"
+                            value={coSlaEscAt[t.id] ?? ""}
+                            onChange={(e) => setCoSlaEscAt((m) => ({ ...m, [t.id]: e.target.value }))}
+                          />
+                          <input
+                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                            placeholder="sla_policy"
+                            value={coSlaPol[t.id] ?? ""}
+                            onChange={(e) => setCoSlaPol((m) => ({ ...m, [t.id]: e.target.value }))}
+                          />
+                          <input
+                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
+                            placeholder="priority"
+                            value={coSlaPrio[t.id] ?? ""}
+                            onChange={(e) => setCoSlaPrio((m) => ({ ...m, [t.id]: e.target.value }))}
+                          />
+                          <div className="flex gap-2">
+                            <input
+                              className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-xs"
+                              placeholder="status_reason"
+                              value={coSlaReason[t.id] ?? ""}
+                              onChange={(e) => setCoSlaReason((m) => ({ ...m, [t.id]: e.target.value }))}
+                            />
+                            <button
+                              type="button"
+                              className="rounded border border-line px-2 py-1 text-xs text-gray-300"
+                              onClick={async () => {
+                                setCoErr(null);
+                                try {
+                                  const maybeIso = (v: string) => {
+                                    const t = v.trim();
+                                    return t ? t : undefined;
+                                  };
+                                  const p = (coSlaPrio[t.id] ?? "").trim();
+                                  const prio = p ? Number(p) : undefined;
+                                  const r = await fetch(`${api}/api/company/tasks/${t.id}/sla`, {
+                                    method: "PATCH",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                      due_at: maybeIso(coSlaDueAt[t.id] ?? ""),
+                                      escalate_after: maybeIso(coSlaEscAt[t.id] ?? ""),
+                                      sla_policy: (coSlaPol[t.id] ?? "").trim() || undefined,
+                                      status_reason: (coSlaReason[t.id] ?? "").trim() || undefined,
+                                      priority: Number.isFinite(prio as number) ? prio : undefined,
+                                    }),
+                                  });
+                                  const j = await r.json();
+                                  if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                                  await loadCompanyOs();
+                                } catch (e) {
+                                  setCoErr(e instanceof Error ? e.message : String(e));
+                                }
+                              }}
+                            >
+                              Save SLA
+                            </button>
+                          </div>
+                        </div>
                       </li>
                     ))}
                     {!coTasks.length && <li className="px-3 py-4 text-gray-600">No tasks.</li>}
