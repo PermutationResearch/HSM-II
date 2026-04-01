@@ -52,6 +52,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = ConsoleState::new(home.clone(), company_db);
+    if let Some(pool) = state.company_db.clone() {
+        hyper_stigmergy::company_os::start_automation_worker(pool);
+        tracing::info!("Company OS automation worker started");
+    }
     let app = console_router(state);
 
     let addr: SocketAddr = format!("{}:{}", args.bind_host, args.listen_port).parse()?;

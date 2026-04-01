@@ -1,0 +1,27 @@
+schema_version: 1
+id: property_management_ops_v1
+vertical: property_management
+display_name: Property Management Ops
+description: Tenant communications and maintenance triage with governance-first controls.
+kpi_gates:
+  - id: kpi_maintenance_triage
+    label: Maintenance triage SLA defined
+    required: true
+    evidence_hint: Define emergency vs normal maintenance SLA.
+    keyword_any: ["maintenance", "emergency", "same day", "24h"]
+  - id: kpi_tenant_comms
+    label: Tenant communication cadence defined
+    required: true
+    evidence_hint: Set cadence or acknowledgement standards.
+    keyword_any: ["tenant", "acknowledge", "follow-up", "response"]
+risk_gates:
+  - id: risk_legal_housing
+    label: Legal/fair-housing escalation defined
+    required: true
+    evidence_hint: Specify when to escalate legal/fair-housing issues.
+    keyword_any: ["legal", "fair housing", "counsel", "escalate"]
+  - id: risk_financial_changes
+    label: Financial change approvals documented
+    required: true
+    evidence_hint: Define approval for financial updates/refunds.
+    keyword_any: ["approve", "owner", "refund", "budget"]

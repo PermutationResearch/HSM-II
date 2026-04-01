@@ -11,6 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use hyper_stigmergy::company_os::onboarding_contracts::{
+    evaluate_gate_results, find_contract, load_contracts_hot,
+};
 use hyper_stigmergy::personal::{validate_pack_yaml_file, BusinessPack};
 
 fn starters_root() -> PathBuf {
@@ -65,29 +68,6 @@ enum Cmd {
         #[arg(long)]
         transcript: String,
     },
-}
-
-fn required_gate_keywords(contract: &str) -> Vec<(&'static str, Vec<&'static str>)> {
-    match contract.trim().to_ascii_lowercase().as_str() {
-        "ecommerce_ops_v1" => vec![
-            ("kpi_reply_speed", vec!["1h", "reply", "response", "same day"]),
-            ("kpi_refund_sla", vec!["refund", "chargeback", "24h", "same day"]),
-            ("risk_refund_guardrail", vec!["refund", "approve", "finance", "threshold"]),
-            ("risk_legal_guardrail", vec!["legal", "chargeback", "escalate", "owner"]),
-        ],
-        "property_management_ops_v1" => vec![
-            ("kpi_maintenance_triage", vec!["maintenance", "emergency", "same day", "24h"]),
-            ("kpi_tenant_comms", vec!["tenant", "acknowledge", "follow-up", "response"]),
-            ("risk_legal_housing", vec!["legal", "fair housing", "counsel", "escalate"]),
-            ("risk_financial_changes", vec!["approve", "owner", "refund", "budget"]),
-        ],
-        _ => vec![
-            ("kpi_sla", vec!["urgent", "same day", "24h", "sla"]),
-            ("kpi_backlog", vec!["per day", "daily", "weekly", "throughput"]),
-            ("risk_approver", vec!["approve", "manager", "owner", "finance"]),
-            ("risk_restricted_actions", vec!["legal", "budget", "refund", "blocked"]),
-        ],
-    }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
@@ -176,19 +156,21 @@ fn main() -> anyhow::Result<()> {
             contract,
             transcript,
         } => {
-            let t = transcript.to_ascii_lowercase();
-            let gates = required_gate_keywords(&contract);
+            let contracts = load_contracts_hot()?;
+            let selected = find_contract(&contracts, &contract, "");
+            let kpi = evaluate_gate_results(&transcript, &selected.kpi_gates);
+            let risk = evaluate_gate_results(&transcript, &selected.risk_gates);
             let mut missing = Vec::new();
-            println!("Contract: {contract}");
-            for (id, kws) in gates {
-                let ok = kws.iter().any(|k| t.contains(k));
+            println!("Contract: {} ({})", selected.id, selected.display_name);
+            for g in kpi.iter().chain(risk.iter()) {
+                let ok = g.satisfied;
                 println!(
                     "  - {}: {}",
-                    id,
+                    g.id,
                     if ok { "OK" } else { "MISSING" }
                 );
-                if !ok {
-                    missing.push(id.to_string());
+                if g.required && !ok {
+                    missing.push(g.id.clone());
                 }
             }
             if !missing.is_empty() {

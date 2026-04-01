@@ -3,11 +3,12 @@
 //! Enable with `HSM_COMPANY_OS_DATABASE_URL=postgres://...`. Migrations in `migrations/` run on startup.
 
 mod bundle;
+pub mod onboarding_contracts;
 mod spend;
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -15,12 +16,16 @@ pub use bundle::{export_bundle, import_bundle as run_import_bundle, CompanyBundl
 pub use spend::spawn_record_llm_spend;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json as SqlxJson;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::console::ConsoleState;
+use self::onboarding_contracts::{
+    evaluate_gate_results, find_contract, load_contracts_hot, OnboardingGateResult,
+};
 
 /// Connect pool and run migrations when `HSM_COMPANY_OS_DATABASE_URL` is set and non-empty.
 pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
@@ -84,6 +89,54 @@ pub fn router() -> Router<ConsoleState> {
             get(list_tasks).post(create_task),
         )
         .route(
+            "/api/company/companies/:company_id/spawn-rules",
+            get(list_spawn_rules).post(create_spawn_rule),
+        )
+        .route(
+            "/api/company/companies/:company_id/tasks/:task_id/spawn-subagents",
+            post(spawn_subagent_tasks),
+        )
+        .route(
+            "/api/company/companies/:company_id/tasks/:task_id/handoffs",
+            get(list_task_handoffs).post(post_task_handoff),
+        )
+        .route(
+            "/api/company/task-handoffs/:handoff_id/review",
+            post(review_task_handoff),
+        )
+        .route(
+            "/api/company/companies/:company_id/improvement-runs",
+            get(list_improvement_runs).post(create_improvement_run),
+        )
+        .route(
+            "/api/company/improvement-runs/:run_id/decision",
+            post(decide_improvement_run),
+        )
+        .route(
+            "/api/company/contracts/versions",
+            get(list_contract_versions).post(create_contract_version),
+        )
+        .route(
+            "/api/company/contracts/versions/:version_id/status",
+            patch(patch_contract_version_status),
+        )
+        .route(
+            "/api/company/connectors/presets",
+            get(list_connector_presets).post(upsert_connector_preset),
+        )
+        .route(
+            "/api/company/companies/:company_id/go-live-checklist",
+            get(list_go_live_checklist).post(post_go_live_checklist_item),
+        )
+        .route(
+            "/api/company/companies/:company_id/go-live-checklist/seed",
+            post(seed_go_live_checklist),
+        )
+        .route(
+            "/api/company/go-live-checklist/:item_id/complete",
+            post(complete_go_live_checklist_item),
+        )
+        .route(
             "/api/company/companies/:company_id/tasks/queue",
             get(list_task_queue),
         )
@@ -91,6 +144,235 @@ pub fn router() -> Router<ConsoleState> {
         .route("/api/company/tasks/:task_id/decision", post(post_task_decision))
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
+}
+
+fn hash_idem_payload(v: &Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(v.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+async fn register_idempotency(
+    pool: &PgPool,
+    company_id: Uuid,
+    scope: &str,
+    idempotency_key: &str,
+    payload: &Value,
+) -> Result<bool, sqlx::Error> {
+    let request_hash = hash_idem_payload(payload);
+    let inserted = sqlx::query_scalar::<_, i64>(
+        r#"INSERT INTO request_idempotency (company_id, scope, idempotency_key, request_hash)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (company_id, scope, idempotency_key) DO NOTHING
+           RETURNING 1"#,
+    )
+    .bind(company_id)
+    .bind(scope)
+    .bind(idempotency_key)
+    .bind(request_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(inserted.is_some())
+}
+
+pub fn start_automation_worker(pool: PgPool) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = automation_tick(&pool).await {
+                tracing::warn!(target: "hsm_company_automation", "automation tick failed: {e}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
+}
+
+async fn automation_tick(pool: &PgPool) -> Result<(), sqlx::Error> {
+    enqueue_sla_escalation_jobs(pool).await?;
+    process_due_automation_jobs(pool).await?;
+    run_auto_revert_checks(pool).await?;
+    Ok(())
+}
+
+async fn enqueue_sla_escalation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
+        r#"SELECT id, company_id
+           FROM tasks
+           WHERE escalate_after IS NOT NULL
+             AND escalate_after <= NOW()
+             AND state NOT IN ('done','closed','cancelled')
+           ORDER BY escalate_after ASC
+           LIMIT 50"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    for (task_id, company_id) in rows {
+        let idem = format!("sla-escalation:{task_id}");
+        let _ = sqlx::query(
+            r#"INSERT INTO automation_jobs
+               (company_id, kind, status, payload, idempotency_key, max_attempts, next_run_at)
+               VALUES ($1,'sla_escalation','pending',$2,$3,5,NOW())
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(company_id)
+        .bind(SqlxJson(json!({ "task_id": task_id })))
+        .bind(idem)
+        .execute(pool)
+        .await;
+    }
+    Ok(())
+}
+
+async fn process_due_automation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let jobs = sqlx::query_as::<_, (Uuid, Uuid, String, SqlxJson<Value>, i32, i32)>(
+        r#"SELECT id, company_id, kind, payload, attempts, max_attempts
+           FROM automation_jobs
+           WHERE status = 'pending' AND next_run_at <= NOW()
+           ORDER BY next_run_at ASC
+           LIMIT 20"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (job_id, company_id, kind, payload, attempts, max_attempts) in jobs {
+        let _ = sqlx::query(
+            "UPDATE automation_jobs SET status = 'running', updated_at = NOW() WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await;
+
+        let run_res = match kind.as_str() {
+            "sla_escalation" => run_sla_escalation_job(pool, company_id, &payload.0).await,
+            _ => Ok(()),
+        };
+
+        match run_res {
+            Ok(_) => {
+                let _ = sqlx::query(
+                    "UPDATE automation_jobs SET status = 'done', updated_at = NOW() WHERE id = $1",
+                )
+                .bind(job_id)
+                .execute(pool)
+                .await;
+            }
+            Err(e) => {
+                let next_attempt = attempts + 1;
+                if next_attempt >= max_attempts {
+                    let _ = sqlx::query(
+                        r#"INSERT INTO automation_dead_letters (company_id, job_id, kind, payload, error, attempts)
+                           VALUES ($1,$2,$3,$4,$5,$6)"#,
+                    )
+                    .bind(company_id)
+                    .bind(job_id)
+                    .bind(&kind)
+                    .bind(payload.clone())
+                    .bind(e.clone())
+                    .bind(next_attempt)
+                    .execute(pool)
+                    .await;
+                    let _ = sqlx::query(
+                        "UPDATE automation_jobs SET status = 'dead_letter', attempts = $2, last_error = $3, updated_at = NOW() WHERE id = $1",
+                    )
+                    .bind(job_id)
+                    .bind(next_attempt)
+                    .bind(e)
+                    .execute(pool)
+                    .await;
+                } else {
+                    let backoff_sec = (2_i64).pow(next_attempt as u32).min(300);
+                    let _ = sqlx::query(
+                        r#"UPDATE automation_jobs
+                           SET status = 'pending',
+                               attempts = $2,
+                               last_error = $3,
+                               next_run_at = NOW() + ($4::bigint * INTERVAL '1 second'),
+                               updated_at = NOW()
+                           WHERE id = $1"#,
+                    )
+                    .bind(job_id)
+                    .bind(next_attempt)
+                    .bind(e)
+                    .bind(backoff_sec)
+                    .execute(pool)
+                    .await;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_sla_escalation_job(pool: &PgPool, company_id: Uuid, payload: &Value) -> Result<(), String> {
+    let Some(task_id) = payload
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return Err("payload.task_id missing".to_string());
+    };
+    sqlx::query(
+        r#"UPDATE tasks
+           SET state = CASE WHEN state = 'open' THEN 'waiting_admin' ELSE state END,
+               status_reason = COALESCE(status_reason, 'auto:sla_escalation'),
+               updated_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1,'automation_worker','sla_escalation','task',$2,$3,'warn')"#,
+    )
+    .bind(company_id)
+    .bind(task_id.to_string())
+    .bind(SqlxJson(json!({"source":"scheduler"})))
+    .execute(pool)
+    .await;
+    Ok(())
+}
+
+async fn run_auto_revert_checks(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, Option<f64>, SqlxJson<Value>)>(
+        r#"SELECT id, company_id, max_regression_pct::float8 as max_regression_pct, metrics_meta
+           FROM improvement_runs
+           WHERE status = 'promoted'
+           ORDER BY updated_at DESC
+           LIMIT 50"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    for (run_id, company_id, max_regression, metrics) in rows {
+        let threshold = max_regression.unwrap_or(5.0);
+        let current = metrics
+            .0
+            .get("current_regression_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        if current > threshold {
+            let reason = format!("auto-revert: regression {:.2}% > {:.2}%", current, threshold);
+            let _ = sqlx::query(
+                r#"UPDATE improvement_runs
+                   SET status = 'reverted', decision_reason = $2, decided_by = 'automation_worker', decided_at = NOW(), updated_at = NOW()
+                   WHERE id = $1"#,
+            )
+            .bind(run_id)
+            .bind(&reason)
+            .execute(pool)
+            .await;
+            let _ = sqlx::query(
+                r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, decision, severity)
+                   VALUES ($1,'automation_worker','improvement_auto_revert','improvement_run',$2,$3,'reverted','warn')"#,
+            )
+            .bind(company_id)
+            .bind(run_id.to_string())
+            .bind(SqlxJson(json!({ "reason": reason, "current_regression_pct": current, "threshold_pct": threshold })))
+            .execute(pool)
+            .await;
+        }
+    }
+    Ok(())
 }
 
 /// Same as [`compute_goal_ancestry`] but on an open transaction (import path).
@@ -338,6 +620,8 @@ struct TaskRow {
     specification: Option<String>,
     state: String,
     owner_persona: Option<String>,
+    parent_task_id: Option<Uuid>,
+    spawned_by_rule_id: Option<Uuid>,
     checked_out_by: Option<String>,
     checked_out_until: Option<chrono::DateTime<chrono::Utc>>,
     priority: i32,
@@ -353,7 +637,7 @@ async fn list_tasks(
     };
     let rows = sqlx::query_as::<_, TaskRow>(
         r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                  owner_persona, checked_out_by, checked_out_until, priority, created_at::text
+                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text
            FROM tasks WHERE company_id = $1 ORDER BY priority DESC, created_at"#,
     )
     .bind(company_id)
@@ -377,6 +661,10 @@ struct CreateTaskBody {
     primary_goal_id: Option<Uuid>,
     #[serde(default)]
     owner_persona: Option<String>,
+    #[serde(default)]
+    parent_task_id: Option<Uuid>,
+    #[serde(default)]
+    spawned_by_rule_id: Option<Uuid>,
 }
 
 async fn compute_goal_ancestry(
@@ -490,10 +778,10 @@ async fn create_task(
     }
 
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, owner_persona)
-           VALUES ($1, $2, $3, $4, $5, $6)
+        r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, owner_persona, parent_task_id, spawned_by_rule_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
     )
     .bind(company_id)
     .bind(&body.primary_goal_id)
@@ -501,6 +789,8 @@ async fn create_task(
     .bind(&title)
     .bind(&body.specification)
     .bind(&body.owner_persona)
+    .bind(&body.parent_task_id)
+    .bind(&body.spawned_by_rule_id)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -704,6 +994,7 @@ struct PostTaskDecisionBody {
 
 async fn post_task_decision(
     State(st): State<ConsoleState>,
+    headers: HeaderMap,
     Path(task_id): Path<Uuid>,
     Json(body): Json<PostTaskDecisionBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -735,7 +1026,7 @@ async fn post_task_decision(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
     )
     .bind(task_id)
     .bind(next_state)
@@ -751,6 +1042,24 @@ async fn post_task_decision(
     let Some(task) = task else {
         return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
     };
+    if let Some(k) = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let payload = json!({
+            "task_id": task_id,
+            "decision_mode": decision,
+            "reason": reason,
+        });
+        let ok = register_idempotency(pool, task.company_id, "task_decision", k, &payload)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        if !ok {
+            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+        }
+    }
 
     let actor = if body.actor.trim().is_empty() {
         "admin"
@@ -812,7 +1121,7 @@ async fn checkout_task(
            WHERE id = $3
              AND (checked_out_by IS NULL OR checked_out_until < NOW())
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
     )
     .bind(&agent)
     .bind(body.ttl_sec)
@@ -857,7 +1166,7 @@ async fn release_task(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, checked_out_by, checked_out_until, priority, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -887,6 +1196,943 @@ async fn release_task(
       .execute(pool)
       .await;
     Ok(Json(json!({ "task": t })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct SpawnRuleRow {
+    id: Uuid,
+    company_id: Uuid,
+    trigger_state: String,
+    title_pattern: Option<String>,
+    owner_persona: Option<String>,
+    max_subtasks: i32,
+    subagent_persona: String,
+    handoff_contract: SqlxJson<Value>,
+    review_contract: SqlxJson<Value>,
+    active: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct CreateSpawnRuleBody {
+    #[serde(default = "default_trigger_state_open")]
+    trigger_state: String,
+    #[serde(default)]
+    title_pattern: Option<String>,
+    #[serde(default)]
+    owner_persona: Option<String>,
+    #[serde(default = "default_max_subtasks")]
+    max_subtasks: i32,
+    subagent_persona: String,
+    #[serde(default)]
+    handoff_contract: Value,
+    #[serde(default)]
+    review_contract: Value,
+}
+
+fn default_trigger_state_open() -> String {
+    "open".to_string()
+}
+
+fn default_max_subtasks() -> i32 {
+    3
+}
+
+async fn list_spawn_rules(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, SpawnRuleRow>(
+        r#"SELECT id, company_id, trigger_state, title_pattern, owner_persona, max_subtasks, subagent_persona,
+                  handoff_contract, review_contract, active, created_at::text, updated_at::text
+           FROM task_spawn_rules
+           WHERE company_id = $1
+           ORDER BY active DESC, created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "rules": rows })))
+}
+
+async fn create_spawn_rule(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateSpawnRuleBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let persona = body.subagent_persona.trim().to_string();
+    if persona.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "subagent_persona required" })),
+        ));
+    }
+    if body.max_subtasks < 1 || body.max_subtasks > 20 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "max_subtasks must be 1..20" })),
+        ));
+    }
+    let row = sqlx::query_as::<_, SpawnRuleRow>(
+        r#"INSERT INTO task_spawn_rules
+           (company_id, trigger_state, title_pattern, owner_persona, max_subtasks, subagent_persona, handoff_contract, review_contract, active)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
+           RETURNING id, company_id, trigger_state, title_pattern, owner_persona, max_subtasks, subagent_persona,
+                     handoff_contract, review_contract, active, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(body.trigger_state.trim().to_ascii_lowercase())
+    .bind(body.title_pattern.as_ref())
+    .bind(body.owner_persona.as_ref())
+    .bind(body.max_subtasks)
+    .bind(persona)
+    .bind(SqlxJson(body.handoff_contract))
+    .bind(SqlxJson(body.review_contract))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok((StatusCode::CREATED, Json(json!({ "rule": row }))))
+}
+
+#[derive(Deserialize)]
+struct SpawnSubagentsBody {
+    #[serde(default)]
+    actor: String,
+}
+
+async fn spawn_subagent_tasks(
+    State(st): State<ConsoleState>,
+    headers: HeaderMap,
+    Path((company_id, task_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SpawnSubagentsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let parent = sqlx::query_as::<_, TaskRow>(
+        r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
+                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text
+           FROM tasks WHERE id = $1 AND company_id = $2"#,
+    )
+    .bind(task_id)
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(parent) = parent else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+    };
+    let mut kbytes = [0u8; 8];
+    kbytes.copy_from_slice(&task_id.as_bytes()[..8]);
+    let lock_key = i64::from_be_bytes(kbytes);
+    let got_lock: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    if !got_lock {
+        return Err((StatusCode::CONFLICT, Json(json!({"error":"task spawn already in progress"}))));
+    }
+    if let Some(k) = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let ok = register_idempotency(
+            pool,
+            company_id,
+            "spawn_subagents",
+            k,
+            &json!({ "task_id": task_id }),
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        if !ok {
+            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+        }
+    }
+
+    let rules = sqlx::query_as::<_, SpawnRuleRow>(
+        r#"SELECT id, company_id, trigger_state, title_pattern, owner_persona, max_subtasks, subagent_persona,
+                  handoff_contract, review_contract, active, created_at::text, updated_at::text
+           FROM task_spawn_rules WHERE company_id = $1 AND active = true ORDER BY created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let mut created: Vec<TaskRow> = Vec::new();
+    for r in rules {
+        if r.trigger_state != parent.state.to_ascii_lowercase() {
+            continue;
+        }
+        if let Some(tp) = &r.title_pattern {
+            if !parent.title.to_ascii_lowercase().contains(&tp.to_ascii_lowercase()) {
+                continue;
+            }
+        }
+        if let Some(owner) = &r.owner_persona {
+            if parent.owner_persona.as_deref().unwrap_or("").to_ascii_lowercase()
+                != owner.to_ascii_lowercase()
+            {
+                continue;
+            }
+        }
+        for i in 0..r.max_subtasks {
+            let title = format!("{} · {} #{:02}", parent.title, r.subagent_persona, i + 1);
+            let row = sqlx::query_as::<_, TaskRow>(
+                r#"INSERT INTO tasks
+                   (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, parent_task_id, spawned_by_rule_id, priority)
+                   VALUES ($1,$2,$3,$4,$5,'open',$6,$7,$8,$9)
+                   RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
+                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, created_at::text"#,
+            )
+            .bind(company_id)
+            .bind(parent.primary_goal_id)
+            .bind(SqlxJson(parent.goal_ancestry.clone()))
+            .bind(title)
+            .bind(parent.specification.clone())
+            .bind(r.subagent_persona.clone())
+            .bind(task_id)
+            .bind(r.id)
+            .bind(parent.priority)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+            created.push(row);
+        }
+    }
+    let actor = if body.actor.trim().is_empty() {
+        "spawn_engine"
+    } else {
+        body.actor.trim()
+    };
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1,$2,'task_spawn_subagents','task',$3,$4,'info')"#,
+    )
+    .bind(company_id)
+    .bind(actor)
+    .bind(task_id.to_string())
+    .bind(SqlxJson(json!({ "spawned_count": created.len() })))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({ "spawned": created, "count": created.len() })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct TaskHandoffRow {
+    id: Uuid,
+    company_id: Uuid,
+    task_id: Uuid,
+    from_agent: String,
+    to_agent: String,
+    handoff_contract: SqlxJson<Value>,
+    review_contract: SqlxJson<Value>,
+    status: String,
+    notes: Option<String>,
+    created_at: String,
+    reviewed_at: Option<chrono::DateTime<chrono::Utc>>,
+    reviewed_by: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PostTaskHandoffBody {
+    from_agent: String,
+    to_agent: String,
+    #[serde(default)]
+    handoff_contract: Value,
+    #[serde(default)]
+    review_contract: Value,
+    #[serde(default)]
+    notes: String,
+}
+
+async fn list_task_handoffs(
+    State(st): State<ConsoleState>,
+    Path((company_id, task_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, TaskHandoffRow>(
+        r#"SELECT id, company_id, task_id, from_agent, to_agent, handoff_contract, review_contract, status, notes,
+                  created_at::text, reviewed_at, reviewed_by
+           FROM task_handoffs
+           WHERE company_id = $1 AND task_id = $2
+           ORDER BY created_at DESC"#,
+    )
+    .bind(company_id)
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "handoffs": rows })))
+}
+
+async fn post_task_handoff(
+    State(st): State<ConsoleState>,
+    Path((company_id, task_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<PostTaskHandoffBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.from_agent.trim().is_empty() || body.to_agent.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "from_agent and to_agent required"}))));
+    }
+    let row = sqlx::query_as::<_, TaskHandoffRow>(
+        r#"INSERT INTO task_handoffs
+           (company_id, task_id, from_agent, to_agent, handoff_contract, review_contract, status, notes)
+           VALUES ($1,$2,$3,$4,$5,$6,'pending_review',$7)
+           RETURNING id, company_id, task_id, from_agent, to_agent, handoff_contract, review_contract, status, notes,
+                     created_at::text, reviewed_at, reviewed_by"#,
+    )
+    .bind(company_id)
+    .bind(task_id)
+    .bind(body.from_agent.trim())
+    .bind(body.to_agent.trim())
+    .bind(SqlxJson(body.handoff_contract))
+    .bind(SqlxJson(body.review_contract))
+    .bind(body.notes.trim())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(json!({ "handoff": row }))))
+}
+
+#[derive(Deserialize)]
+struct ReviewTaskHandoffBody {
+    decision: String,
+    reviewer: String,
+    #[serde(default)]
+    notes: String,
+}
+
+async fn review_task_handoff(
+    State(st): State<ConsoleState>,
+    Path(handoff_id): Path<Uuid>,
+    Json(body): Json<ReviewTaskHandoffBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let decision = body.decision.trim().to_ascii_lowercase();
+    let next = match decision.as_str() {
+        "accept" | "accepted" => "accepted",
+        "reject" | "rejected" => "rejected",
+        _ => {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"decision must be accept|reject"}))));
+        }
+    };
+    let row = sqlx::query_as::<_, TaskHandoffRow>(
+        r#"UPDATE task_handoffs
+           SET status = $2, reviewed_at = NOW(), reviewed_by = $3, notes = COALESCE(NULLIF($4,''), notes)
+           WHERE id = $1
+           RETURNING id, company_id, task_id, from_agent, to_agent, handoff_contract, review_contract, status, notes,
+                     created_at::text, reviewed_at, reviewed_by"#,
+    )
+    .bind(handoff_id)
+    .bind(next)
+    .bind(body.reviewer.trim())
+    .bind(body.notes.trim())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(h) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"handoff not found"}))));
+    };
+    Ok(Json(json!({ "handoff": h })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct ImprovementRunRow {
+    id: Uuid,
+    company_id: Uuid,
+    title: String,
+    scope: String,
+    baseline_meta: SqlxJson<Value>,
+    candidate_meta: SqlxJson<Value>,
+    gate_contract: SqlxJson<Value>,
+    metrics_meta: SqlxJson<Value>,
+    status: String,
+    decision_reason: Option<String>,
+    decided_by: Option<String>,
+    decided_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct CreateImprovementRunBody {
+    title: String,
+    scope: String,
+    #[serde(default)]
+    baseline_meta: Value,
+    #[serde(default)]
+    candidate_meta: Value,
+    #[serde(default)]
+    gate_contract: Value,
+    #[serde(default)]
+    metrics_meta: Value,
+}
+
+async fn list_improvement_runs(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, ImprovementRunRow>(
+        r#"SELECT id, company_id, title, scope, baseline_meta, candidate_meta, gate_contract, metrics_meta, status,
+                  decision_reason, decided_by, decided_at, created_at::text, updated_at::text
+           FROM improvement_runs WHERE company_id = $1 ORDER BY created_at DESC LIMIT 200"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "runs": rows })))
+}
+
+async fn create_improvement_run(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateImprovementRunBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.title.trim().is_empty() || body.scope.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"title and scope required"}))));
+    }
+    let row = sqlx::query_as::<_, ImprovementRunRow>(
+        r#"INSERT INTO improvement_runs
+           (company_id, title, scope, baseline_meta, candidate_meta, gate_contract, metrics_meta, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'proposed')
+           RETURNING id, company_id, title, scope, baseline_meta, candidate_meta, gate_contract, metrics_meta, status,
+                     decision_reason, decided_by, decided_at, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(body.title.trim())
+    .bind(body.scope.trim())
+    .bind(SqlxJson(body.baseline_meta))
+    .bind(SqlxJson(body.candidate_meta))
+    .bind(SqlxJson(body.gate_contract))
+    .bind(SqlxJson(body.metrics_meta))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(json!({ "run": row }))))
+}
+
+#[derive(Deserialize)]
+struct DecideImprovementRunBody {
+    decision: String,
+    actor: String,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn decide_improvement_run(
+    State(st): State<ConsoleState>,
+    headers: HeaderMap,
+    Path(run_id): Path<Uuid>,
+    Json(body): Json<DecideImprovementRunBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let decision = body.decision.trim().to_ascii_lowercase();
+    let next = match decision.as_str() {
+        "promote" | "promoted" => "promoted",
+        "revert" | "reverted" => "reverted",
+        _ => {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"decision must be promote|revert"}))));
+        }
+    };
+    let existing = sqlx::query_as::<_, ImprovementRunRow>(
+        r#"SELECT id, company_id, title, scope, baseline_meta, candidate_meta, gate_contract, metrics_meta, status,
+                  decision_reason, decided_by, decided_at, created_at::text, updated_at::text
+           FROM improvement_runs WHERE id = $1"#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(current) = existing else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"improvement run not found"}))));
+    };
+    if let Some(k) = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let payload = json!({ "run_id": run_id, "decision": next, "actor": body.actor.trim() });
+        let ok = register_idempotency(pool, current.company_id, "improvement_decision", k, &payload)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        if !ok {
+            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+        }
+    }
+    if next == "promoted" {
+        let gate = &current.gate_contract.0;
+        let metrics = &current.metrics_meta.0;
+        let min_samples = gate
+            .get("min_eval_samples")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let eval_samples = metrics
+            .get("eval_samples")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if eval_samples < min_samples {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: min_eval_samples"}))));
+        }
+        let max_reg = gate
+            .get("max_regression_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0);
+        let regression = metrics
+            .get("current_regression_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        if regression > max_reg {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: regression threshold"}))));
+        }
+        let requires_reviewer = gate
+            .get("high_risk_requires_reviewer")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let risk = current
+            .candidate_meta
+            .0
+            .get("risk_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("low")
+            .to_ascii_lowercase();
+        if requires_reviewer && (risk == "high" || risk == "critical") && body.actor.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: reviewer required for high risk"}))));
+        }
+    }
+    let rationale = if body.reason.trim().is_empty() {
+        if next == "promoted" {
+            format!("Promoted run '{}' after gates passed.", current.title)
+        } else {
+            format!("Reverted run '{}' due to risk/performance decision.", current.title)
+        }
+    } else {
+        body.reason.trim().to_string()
+    };
+    let row = sqlx::query_as::<_, ImprovementRunRow>(
+        r#"UPDATE improvement_runs
+           SET status = $2, decision_reason = $3, decided_by = $4, decided_at = NOW(), updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, title, scope, baseline_meta, candidate_meta, gate_contract, metrics_meta, status,
+                     decision_reason, decided_by, decided_at, created_at::text, updated_at::text"#,
+    )
+    .bind(run_id)
+    .bind(next)
+    .bind(rationale)
+    .bind(body.actor.trim())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(run) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"improvement run not found"}))));
+    };
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, decision, severity)
+           VALUES ($1,$2,'improvement_decision','improvement_run',$3,$4,$5,'info')"#,
+    )
+    .bind(run.company_id)
+    .bind(body.actor.trim())
+    .bind(run.id.to_string())
+    .bind(SqlxJson(json!({ "status": run.status, "reason": run.decision_reason })))
+    .bind(run.status.clone())
+    .execute(pool)
+    .await;
+    Ok(Json(json!({ "run": run })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct ContractVersionRow {
+    id: Uuid,
+    contract_id: String,
+    version: String,
+    status: String,
+    schema: SqlxJson<Value>,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct CreateContractVersionBody {
+    contract_id: String,
+    version: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    schema: Value,
+}
+
+#[derive(Deserialize)]
+struct PatchContractVersionStatusBody {
+    status: String,
+}
+
+async fn list_contract_versions(
+    State(st): State<ConsoleState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, ContractVersionRow>(
+        r#"SELECT id, contract_id, version, status, schema, created_at::text
+           FROM onboarding_contract_versions
+           ORDER BY contract_id, created_at DESC"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "versions": rows })))
+}
+
+async fn create_contract_version(
+    State(st): State<ConsoleState>,
+    Json(body): Json<CreateContractVersionBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let cid = body.contract_id.trim();
+    let ver = body.version.trim();
+    if cid.is_empty() || ver.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"contract_id and version required"}))));
+    }
+    let status = body
+        .status
+        .as_deref()
+        .unwrap_or("active")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(status.as_str(), "active" | "deprecated" | "sunset") {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"status must be active|deprecated|sunset"}))));
+    }
+    let row = sqlx::query_as::<_, ContractVersionRow>(
+        r#"INSERT INTO onboarding_contract_versions (contract_id, version, status, schema)
+           VALUES ($1,$2,$3,$4)
+           RETURNING id, contract_id, version, status, schema, created_at::text"#,
+    )
+    .bind(cid)
+    .bind(ver)
+    .bind(status)
+    .bind(SqlxJson(body.schema))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(json!({ "version": row }))))
+}
+
+async fn patch_contract_version_status(
+    State(st): State<ConsoleState>,
+    Path(version_id): Path<Uuid>,
+    Json(body): Json<PatchContractVersionStatusBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let next = body.status.trim().to_ascii_lowercase();
+    if !matches!(next.as_str(), "active" | "deprecated" | "sunset") {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"status must be active|deprecated|sunset"}))));
+    }
+    let row = sqlx::query_as::<_, ContractVersionRow>(
+        r#"UPDATE onboarding_contract_versions
+           SET status = $2
+           WHERE id = $1
+           RETURNING id, contract_id, version, status, schema, created_at::text"#,
+    )
+    .bind(version_id)
+    .bind(next)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(v) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"contract version not found"}))));
+    };
+    Ok(Json(json!({ "version": v })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct ConnectorPresetRow {
+    id: Uuid,
+    vertical: String,
+    connector_provider: String,
+    allowed_actions: SqlxJson<Value>,
+    blocked_actions: SqlxJson<Value>,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct UpsertConnectorPresetBody {
+    vertical: String,
+    connector_provider: String,
+    #[serde(default)]
+    allowed_actions: Value,
+    #[serde(default)]
+    blocked_actions: Value,
+}
+
+async fn list_connector_presets(
+    State(st): State<ConsoleState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, ConnectorPresetRow>(
+        r#"SELECT id, vertical, connector_provider, allowed_actions, blocked_actions, created_at::text
+           FROM connector_permission_presets
+           ORDER BY vertical, connector_provider"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "presets": rows })))
+}
+
+async fn upsert_connector_preset(
+    State(st): State<ConsoleState>,
+    Json(body): Json<UpsertConnectorPresetBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let vertical = body.vertical.trim().to_ascii_lowercase();
+    let provider = body.connector_provider.trim().to_ascii_lowercase();
+    if vertical.is_empty() || provider.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"vertical and connector_provider required"}))));
+    }
+    let row = sqlx::query_as::<_, ConnectorPresetRow>(
+        r#"INSERT INTO connector_permission_presets (vertical, connector_provider, allowed_actions, blocked_actions)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (vertical, connector_provider) DO UPDATE
+           SET allowed_actions = EXCLUDED.allowed_actions,
+               blocked_actions = EXCLUDED.blocked_actions
+           RETURNING id, vertical, connector_provider, allowed_actions, blocked_actions, created_at::text"#,
+    )
+    .bind(vertical)
+    .bind(provider)
+    .bind(SqlxJson(body.allowed_actions))
+    .bind(SqlxJson(body.blocked_actions))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(json!({ "preset": row }))))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct GoLiveChecklistRow {
+    id: Uuid,
+    company_id: Uuid,
+    item_key: String,
+    item_label: String,
+    required: bool,
+    completed: bool,
+    completed_by: Option<String>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    notes: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct PostGoLiveChecklistBody {
+    item_key: String,
+    item_label: String,
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+async fn list_go_live_checklist(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, GoLiveChecklistRow>(
+        r#"SELECT id, company_id, item_key, item_label, required, completed, completed_by, completed_at, notes,
+                  created_at::text, updated_at::text
+           FROM company_go_live_checklists
+           WHERE company_id = $1
+           ORDER BY required DESC, created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "checklist": rows })))
+}
+
+async fn post_go_live_checklist_item(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<PostGoLiveChecklistBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.item_key.trim().is_empty() || body.item_label.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"item_key and item_label required"}))));
+    }
+    let row = sqlx::query_as::<_, GoLiveChecklistRow>(
+        r#"INSERT INTO company_go_live_checklists
+           (company_id, item_key, item_label, required, notes)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (company_id, item_key) DO UPDATE
+           SET item_label = EXCLUDED.item_label,
+               required = EXCLUDED.required,
+               notes = EXCLUDED.notes,
+               updated_at = NOW()
+           RETURNING id, company_id, item_key, item_label, required, completed, completed_by, completed_at, notes,
+                     created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(body.item_key.trim())
+    .bind(body.item_label.trim())
+    .bind(body.required.unwrap_or(true))
+    .bind(body.notes.as_deref())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(json!({ "item": row }))))
+}
+
+#[derive(Deserialize)]
+struct CompleteGoLiveChecklistBody {
+    actor: String,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Deserialize)]
+struct SeedGoLiveChecklistBody {
+    vertical: String,
+    #[serde(default)]
+    actor: String,
+}
+
+async fn complete_go_live_checklist_item(
+    State(st): State<ConsoleState>,
+    Path(item_id): Path<Uuid>,
+    Json(body): Json<CompleteGoLiveChecklistBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let row = sqlx::query_as::<_, GoLiveChecklistRow>(
+        r#"UPDATE company_go_live_checklists
+           SET completed = true,
+               completed_by = $2,
+               completed_at = NOW(),
+               notes = CASE WHEN $3 = '' THEN notes ELSE $3 END,
+               updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, item_key, item_label, required, completed, completed_by, completed_at, notes,
+                     created_at::text, updated_at::text"#,
+    )
+    .bind(item_id)
+    .bind(body.actor.trim())
+    .bind(body.notes.trim())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some(item) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"checklist item not found"}))));
+    };
+    Ok(Json(json!({ "item": item })))
+}
+
+fn go_live_template(vertical: &str) -> Vec<(&'static str, &'static str)> {
+    match vertical.trim().to_ascii_lowercase().as_str() {
+        "ecommerce" => vec![
+            ("contracts_signed", "Customer terms and refund policy approved"),
+            ("refund_guardrail", "Refund thresholds and approvers configured"),
+            ("channel_integrations", "Shopify/helpdesk/email connectors verified"),
+            ("handoff_queue_ready", "Handoff review queue staffed"),
+        ],
+        "property_management" => vec![
+            ("legal_escalation", "Legal/fair-housing escalation path approved"),
+            ("maintenance_sla", "Emergency/standard maintenance SLA configured"),
+            ("tenant_comms_policy", "Tenant communication templates approved"),
+            ("incident_runbook", "Incident and escalation runbook reviewed"),
+        ],
+        _ => vec![
+            ("owner_signoff", "Owner sign-off on policy and risk settings"),
+            ("approval_matrix", "Approval matrix configured and tested"),
+            ("connector_smoke_test", "Core connectors smoke-tested"),
+            ("ops_oncall", "Admin on-call and escalation contact assigned"),
+        ],
+    }
+}
+
+async fn seed_go_live_checklist(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<SeedGoLiveChecklistBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let items = go_live_template(&body.vertical);
+    for (key, label) in items {
+        let _ = sqlx::query(
+            r#"INSERT INTO company_go_live_checklists (company_id, item_key, item_label, required)
+               VALUES ($1,$2,$3,true)
+               ON CONFLICT (company_id, item_key) DO NOTHING"#,
+        )
+        .bind(company_id)
+        .bind(key)
+        .bind(label)
+        .execute(pool)
+        .await;
+    }
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1,$2,'go_live_checklist_seed','company',$3,$4,'info')"#,
+    )
+    .bind(company_id)
+    .bind(if body.actor.trim().is_empty() { "admin_ui" } else { body.actor.trim() })
+    .bind(company_id.to_string())
+    .bind(SqlxJson(json!({ "vertical": body.vertical })))
+    .execute(pool)
+    .await;
+    list_go_live_checklist(State(st), Path(company_id)).await
 }
 
 #[derive(Deserialize, Default)]
@@ -1447,210 +2693,32 @@ struct OnboardingApplyRequest {
     display_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct OnboardingGate {
-    id: String,
-    label: String,
-    required: bool,
-    evidence_hint: String,
-    keyword_any: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct OnboardingPackContract {
-    id: String,
-    vertical: String,
-    display_name: String,
-    description: String,
-    kpi_gates: Vec<OnboardingGate>,
-    risk_gates: Vec<OnboardingGate>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct OnboardingGateResult {
-    id: String,
-    label: String,
-    required: bool,
-    satisfied: bool,
-    evidence_hint: String,
-}
-
 #[derive(Debug, Deserialize)]
 struct ValidateOnboardingPackBody {
     pack_contract_id: String,
     transcript: String,
 }
 
-fn onboarding_pack_contracts() -> Vec<OnboardingPackContract> {
-    vec![
-        OnboardingPackContract {
-            id: "generic_smb_core_v1".to_string(),
-            vertical: "generic_smb".to_string(),
-            display_name: "Generic SMB Core".to_string(),
-            description: "General-purpose service operations baseline with approval and SLA controls.".to_string(),
-            kpi_gates: vec![
-                OnboardingGate {
-                    id: "kpi_sla".to_string(),
-                    label: "Response SLA tiers defined".to_string(),
-                    required: true,
-                    evidence_hint: "Define urgent/same-day/24h lanes.".to_string(),
-                    keyword_any: vec!["urgent".into(), "same day".into(), "24h".into(), "sla".into()],
-                },
-                OnboardingGate {
-                    id: "kpi_backlog".to_string(),
-                    label: "Backlog throughput target".to_string(),
-                    required: true,
-                    evidence_hint: "State expected daily/weekly throughput.".to_string(),
-                    keyword_any: vec!["per day".into(), "daily".into(), "weekly".into(), "throughput".into()],
-                },
-            ],
-            risk_gates: vec![
-                OnboardingGate {
-                    id: "risk_approver".to_string(),
-                    label: "Approver role designated".to_string(),
-                    required: true,
-                    evidence_hint: "Who approves sensitive actions?".to_string(),
-                    keyword_any: vec!["approve".into(), "manager".into(), "owner".into(), "finance".into()],
-                },
-                OnboardingGate {
-                    id: "risk_restricted_actions".to_string(),
-                    label: "Restricted actions listed".to_string(),
-                    required: true,
-                    evidence_hint: "List actions AI must block or escalate.".to_string(),
-                    keyword_any: vec!["legal".into(), "budget".into(), "refund".into(), "blocked".into()],
-                },
-            ],
-        },
-        OnboardingPackContract {
-            id: "ecommerce_ops_v1".to_string(),
-            vertical: "ecommerce".to_string(),
-            display_name: "Ecommerce Ops".to_string(),
-            description: "Order, support, and refund supervision contract for ecommerce teams.".to_string(),
-            kpi_gates: vec![
-                OnboardingGate {
-                    id: "kpi_reply_speed".to_string(),
-                    label: "Customer reply-time target defined".to_string(),
-                    required: true,
-                    evidence_hint: "Set first-reply target (e.g. 1h).".to_string(),
-                    keyword_any: vec!["1h".into(), "reply".into(), "response".into(), "same day".into()],
-                },
-                OnboardingGate {
-                    id: "kpi_refund_sla".to_string(),
-                    label: "Refund decision SLA defined".to_string(),
-                    required: true,
-                    evidence_hint: "Define refund handling window.".to_string(),
-                    keyword_any: vec!["refund".into(), "chargeback".into(), "24h".into(), "same day".into()],
-                },
-            ],
-            risk_gates: vec![
-                OnboardingGate {
-                    id: "risk_refund_guardrail".to_string(),
-                    label: "Refund threshold and approver defined".to_string(),
-                    required: true,
-                    evidence_hint: "Specify refund approval threshold and approver.".to_string(),
-                    keyword_any: vec!["refund".into(), "approve".into(), "finance".into(), "threshold".into()],
-                },
-                OnboardingGate {
-                    id: "risk_legal_guardrail".to_string(),
-                    label: "Legal escalation documented".to_string(),
-                    required: true,
-                    evidence_hint: "Ensure legal/chargeback escalation path exists.".to_string(),
-                    keyword_any: vec!["legal".into(), "chargeback".into(), "escalate".into(), "owner".into()],
-                },
-            ],
-        },
-        OnboardingPackContract {
-            id: "property_management_ops_v1".to_string(),
-            vertical: "property_management".to_string(),
-            display_name: "Property Management Ops".to_string(),
-            description: "Tenant communications and maintenance triage with governance-first controls.".to_string(),
-            kpi_gates: vec![
-                OnboardingGate {
-                    id: "kpi_maintenance_triage".to_string(),
-                    label: "Maintenance triage SLA defined".to_string(),
-                    required: true,
-                    evidence_hint: "Define emergency vs normal maintenance SLA.".to_string(),
-                    keyword_any: vec!["maintenance".into(), "emergency".into(), "same day".into(), "24h".into()],
-                },
-                OnboardingGate {
-                    id: "kpi_tenant_comms".to_string(),
-                    label: "Tenant communication cadence defined".to_string(),
-                    required: true,
-                    evidence_hint: "Set cadence or acknowledgement standards.".to_string(),
-                    keyword_any: vec!["tenant".into(), "acknowledge".into(), "follow-up".into(), "response".into()],
-                },
-            ],
-            risk_gates: vec![
-                OnboardingGate {
-                    id: "risk_legal_housing".to_string(),
-                    label: "Legal/fair-housing escalation defined".to_string(),
-                    required: true,
-                    evidence_hint: "Specify when to escalate legal/fair-housing issues.".to_string(),
-                    keyword_any: vec!["legal".into(), "fair housing".into(), "counsel".into(), "escalate".into()],
-                },
-                OnboardingGate {
-                    id: "risk_financial_changes".to_string(),
-                    label: "Financial change approvals documented".to_string(),
-                    required: true,
-                    evidence_hint: "Define approval for financial updates/refunds.".to_string(),
-                    keyword_any: vec!["approve".into(), "owner".into(), "refund".into(), "budget".into()],
-                },
-            ],
-        },
-    ]
-}
-
-fn pack_for_vertical(vertical: &str) -> OnboardingPackContract {
-    let v = vertical.trim().to_ascii_lowercase();
-    let all = onboarding_pack_contracts();
-    all.iter()
-        .find(|p| p.vertical == v || p.id == v)
-        .cloned()
-        .unwrap_or_else(|| all[0].clone())
-}
-
-fn find_pack_contract(pack_contract_id: &str, vertical_hint: &str) -> OnboardingPackContract {
-    let id = pack_contract_id.trim().to_ascii_lowercase();
-    if !id.is_empty() {
-        if let Some(p) = onboarding_pack_contracts()
-            .into_iter()
-            .find(|p| p.id.to_ascii_lowercase() == id)
-        {
-            return p;
-        }
-    }
-    pack_for_vertical(vertical_hint)
-}
-
-fn evaluate_gate_results(transcript_lc: &str, gates: &[OnboardingGate]) -> Vec<OnboardingGateResult> {
-    gates.iter()
-        .map(|g| {
-            let satisfied = g
-                .keyword_any
-                .iter()
-                .any(|kw| !kw.trim().is_empty() && transcript_lc.contains(&kw.to_ascii_lowercase()));
-            OnboardingGateResult {
-                id: g.id.clone(),
-                label: g.label.clone(),
-                required: g.required,
-                satisfied,
-                evidence_hint: g.evidence_hint.clone(),
-            }
-        })
-        .collect()
-}
-
 async fn list_onboarding_pack_contracts() -> Json<Value> {
-    Json(json!({ "contracts": onboarding_pack_contracts() }))
+    match load_contracts_hot() {
+        Ok(contracts) => Json(json!({ "contracts": contracts })),
+        Err(e) => Json(json!({ "contracts": [], "error": e.to_string() })),
+    }
 }
 
 async fn validate_onboarding_pack_contract(
     Json(body): Json<ValidateOnboardingPackBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let transcript = body.transcript.trim().to_ascii_lowercase();
-    let pack = find_pack_contract(&body.pack_contract_id, "");
-    let kpi = evaluate_gate_results(&transcript, &pack.kpi_gates);
-    let risk = evaluate_gate_results(&transcript, &pack.risk_gates);
+    let contracts = load_contracts_hot().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let transcript = body.transcript.trim();
+    let pack = find_contract(&contracts, &body.pack_contract_id, "");
+    let kpi = evaluate_gate_results(transcript, &pack.kpi_gates);
+    let risk = evaluate_gate_results(transcript, &pack.risk_gates);
     let unsatisfied_required: Vec<String> = kpi
         .iter()
         .chain(risk.iter())
@@ -1742,7 +2810,14 @@ async fn generate_onboarding_draft(
         });
 
     let (industry, mut workflows, mut rules) = template_defaults(&selected_vertical);
-    let selected_pack = find_pack_contract(
+    let contracts = load_contracts_hot().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let selected_pack = find_contract(
+        &contracts,
         req.pack_contract_id.as_deref().unwrap_or(""),
         &selected_vertical,
     );
@@ -1791,8 +2866,8 @@ async fn generate_onboarding_draft(
     if workflows.is_empty() {
         missing.push("workflows".to_string());
     }
-    let kpi_gates = evaluate_gate_results(&t, &selected_pack.kpi_gates);
-    let risk_gates = evaluate_gate_results(&t, &selected_pack.risk_gates);
+    let kpi_gates = evaluate_gate_results(transcript, &selected_pack.kpi_gates);
+    let risk_gates = evaluate_gate_results(transcript, &selected_pack.risk_gates);
     for g in kpi_gates.iter().chain(risk_gates.iter()) {
         if g.required && !g.satisfied {
             missing.push(format!("gate:{}", g.id));

@@ -1,0 +1,27 @@
+schema_version: 1
+id: generic_smb_core_v1
+vertical: generic_smb
+display_name: Generic SMB Core
+description: General-purpose service operations baseline with approval and SLA controls.
+kpi_gates:
+  - id: kpi_sla
+    label: Response SLA tiers defined
+    required: true
+    evidence_hint: Define urgent/same-day/24h lanes.
+    keyword_any: ["urgent", "same day", "24h", "sla"]
+  - id: kpi_backlog
+    label: Backlog throughput target
+    required: true
+    evidence_hint: State expected daily/weekly throughput.
+    keyword_any: ["per day", "daily", "weekly", "throughput"]
+risk_gates:
+  - id: risk_approver
+    label: Approver role designated
+    required: true
+    evidence_hint: Who approves sensitive actions?
+    keyword_any: ["approve", "manager", "owner", "finance"]
+  - id: risk_restricted_actions
+    label: Restricted actions listed
+    required: true
+    evidence_hint: List actions AI must block or escalate.
+    keyword_any: ["legal", "budget", "refund", "blocked"]

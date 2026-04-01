@@ -5,6 +5,7 @@ import { OnboardingWizard, OnboardDraft } from "./components/OnboardingWizard";
 import { PolicyQueuePanel, QueueView } from "./components/PolicyQueuePanel";
 import { TaskListPanel } from "./components/TaskListPanel";
 import { GoalGovernancePanel } from "./components/GoalGovernancePanel";
+import { OrchestrationPanels } from "./components/OrchestrationPanels";
 
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -72,6 +73,8 @@ type TaskRow = {
   status_reason?: string | null;
   priority?: number;
   decision_mode?: "auto" | "admin_required" | "blocked" | string;
+  parent_task_id?: string | null;
+  spawned_by_rule_id?: string | null;
 };
 type GoalRowUi = {
   id: string;
@@ -826,6 +829,15 @@ export default function ConsolePage() {
                   setCoSlaPrio={setCoSlaPrio}
                   coSlaReason={coSlaReason}
                   setCoSlaReason={setCoSlaReason}
+                  setCoErr={setCoErr}
+                  loadCompanyOs={async () => {
+                    await loadCompanyOs();
+                  }}
+                />
+                <OrchestrationPanels
+                  api={api}
+                  companyId={coSel}
+                  tasks={coTasks}
                   setCoErr={setCoErr}
                   loadCompanyOs={async () => {
                     await loadCompanyOs();

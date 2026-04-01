@@ -1,0 +1,27 @@
+schema_version: 1
+id: ecommerce_ops_v1
+vertical: ecommerce
+display_name: Ecommerce Ops
+description: Order, support, and refund supervision contract for ecommerce teams.
+kpi_gates:
+  - id: kpi_reply_speed
+    label: Customer reply-time target defined
+    required: true
+    evidence_hint: Set first-reply target (e.g. 1h).
+    keyword_any: ["1h", "reply", "response", "same day"]
+  - id: kpi_refund_sla
+    label: Refund decision SLA defined
+    required: true
+    evidence_hint: Define refund handling window.
+    keyword_any: ["refund", "chargeback", "24h", "same day"]
+risk_gates:
+  - id: risk_refund_guardrail
+    label: Refund threshold and approver defined
+    required: true
+    evidence_hint: Specify refund approval threshold and approver.
+    keyword_any: ["refund", "approve", "finance", "threshold"]
+  - id: risk_legal_guardrail
+    label: Legal escalation documented
+    required: true
+    evidence_hint: Ensure legal/chargeback escalation path exists.
+    keyword_any: ["legal", "chargeback", "escalate", "owner"]
