@@ -1,6 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { OnboardingWizard, OnboardDraft } from "./components/OnboardingWizard";
+import { PolicyQueuePanel, QueueView } from "./components/PolicyQueuePanel";
+import { TaskListPanel } from "./components/TaskListPanel";
+import { GoalGovernancePanel } from "./components/GoalGovernancePanel";
 
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -95,31 +99,6 @@ type PolicyRule = {
   amount_min?: number | null;
   amount_max?: number | null;
   decision_mode: "auto" | "admin_required" | "blocked" | string;
-};
-type QueueView = "all" | "overdue" | "atrisk" | "waiting_admin" | "pending_approvals" | "blocked";
-type OnboardWorkflow = {
-  title: string;
-  owner_role: string;
-  priority: string;
-  sla_target: string;
-  approval: string;
-};
-type OnboardPolicy = {
-  action_type: string;
-  risk_level: string;
-  decision_mode: string;
-  amount_min?: number | null;
-  amount_max?: number | null;
-  approver_role: string;
-};
-type OnboardDraft = {
-  company_name: string;
-  industry: string;
-  vertical_template: string;
-  workflows: OnboardWorkflow[];
-  policy_rules: OnboardPolicy[];
-  missing_critical_items: string[];
-  confidence_by_field: Record<string, number>;
 };
 
 export default function ConsolePage() {
@@ -510,259 +489,30 @@ export default function ConsolePage() {
           </>
         )}
         {view === "onboard" && (
-          <>
-            <h1 className="mb-2 text-lg font-medium text-white">Onboarding wizard</h1>
-            <p className="mb-4 max-w-3xl text-sm text-gray-500">
-              Chat-driven intake converts business language into draft workflows, policy rules, SLA defaults,
-              and ownership. Review, quick-edit, then approve all.
-            </p>
-            {obApplyMsg && (
-              <div className="mb-4 rounded border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
-                {obApplyMsg}
-              </div>
-            )}
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <select
-                className="rounded border border-line bg-panel px-2 py-1 text-sm text-gray-200"
-                value={obVertical}
-                onChange={(e) => setObVertical(e.target.value)}
-              >
-                <option value="generic_smb">generic_smb</option>
-                <option value="ecommerce">ecommerce</option>
-                <option value="marketing">marketing</option>
-                <option value="property_management">property_management</option>
-              </select>
-              <button
-                type="button"
-                className="rounded border border-line px-3 py-1 text-sm text-gray-300"
-                onClick={async () => {
-                  if (!obTranscript.length) return;
-                  setErr(null);
-                  setObLoading(true);
-                  try {
-                    const r = await fetch(`${api}/api/company/onboarding/draft`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        transcript: obTranscript.join("\n"),
-                        vertical_template: obVertical,
-                        company_name: obDraft?.company_name ?? "",
-                      }),
-                    });
-                    const j = await r.json();
-                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                    setObDraft((j as { draft: OnboardDraft }).draft);
-                  } catch (e) {
-                    setErr(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setObLoading(false);
-                  }
-                }}
-              >
-                Refresh draft
-              </button>
-            </div>
-            <div className="mb-4 grid gap-4 md:grid-cols-2">
-              <div className="rounded border border-line bg-panel p-3">
-                <div className="mb-2 text-xs uppercase text-gray-500">Interview</div>
-                <div className="mb-2 max-h-[220px] space-y-1 overflow-auto rounded border border-line bg-ink/40 p-2 text-xs text-gray-300">
-                  {obTranscript.map((m, i) => (
-                    <div key={i}>- {m}</div>
-                  ))}
-                  {!obTranscript.length && <div className="text-gray-600">No answers yet.</div>}
-                </div>
-                <textarea
-                  className="mb-2 min-h-[80px] w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                  placeholder="Tell us how your business works day-to-day..."
-                  value={obInput}
-                  onChange={(e) => setObInput(e.target.value)}
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-                    disabled={obLoading}
-                    onClick={async () => {
-                      const msg = obInput.trim();
-                      if (!msg) return;
-                      const next = [...obTranscript, msg];
-                      setObTranscript(next);
-                      setObInput("");
-                      setErr(null);
-                      setObLoading(true);
-                      try {
-                        const r = await fetch(`${api}/api/company/onboarding/draft`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            transcript: next.join("\n"),
-                            vertical_template: obVertical,
-                            company_name: obDraft?.company_name ?? "",
-                          }),
-                        });
-                        const j = await r.json();
-                        if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                        setObDraft((j as { draft: OnboardDraft }).draft);
-                      } catch (e) {
-                        setErr(e instanceof Error ? e.message : String(e));
-                      } finally {
-                        setObLoading(false);
-                      }
-                    }}
-                  >
-                    {obLoading ? "Thinking..." : "Add answer"}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded border border-line px-3 py-1 text-sm text-gray-400"
-                    onClick={() => {
-                      setObTranscript([]);
-                      setObInput("");
-                      setObDraft(null);
-                      setObApplyMsg(null);
-                    }}
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-              <div className="rounded border border-line bg-panel p-3">
-                <div className="mb-2 text-xs uppercase text-gray-500">Progressive summary</div>
-                {!obDraft ? (
-                  <div className="text-sm text-gray-600">Start the interview to generate a draft.</div>
-                ) : (
-                  <>
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="Company name"
-                      value={obDraft.company_name}
-                      onChange={(e) =>
-                        setObDraft((d) => (d ? { ...d, company_name: e.target.value } : d))
-                      }
-                    />
-                    <div className="mb-2 text-xs text-gray-500">
-                      template: {obDraft.vertical_template} · industry: {obDraft.industry}
-                    </div>
-                    <div className="mb-2 text-xs text-gray-400">
-                      Missing critical:{" "}
-                      {obDraft.missing_critical_items.length
-                        ? obDraft.missing_critical_items.join(", ")
-                        : "none"}
-                    </div>
-                    <div className="mb-2 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1 text-xs text-amber-200">
-                      Next question: {obNextQuestion}
-                    </div>
-                    <div className="mb-2 rounded border border-line bg-ink/40 p-2">
-                      <div className="mb-1 text-xs uppercase text-gray-500">Confidence by field</div>
-                      <ul className="space-y-1 text-xs text-gray-400">
-                        {Object.entries(obDraft.confidence_by_field ?? {}).map(([k, v]) => (
-                          <li key={k}>
-                            {k}: {(v * 100).toFixed(0)}%
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-            {obDraft && (
-              <div className="mb-4 rounded border border-line bg-panel p-3">
-                <div className="mb-2 text-xs uppercase text-gray-500">Review + quick edits</div>
-                <div className="mb-2 text-xs text-gray-400">
-                  Workflows
-                </div>
-                <div className="mb-3 space-y-2">
-                  {obDraft.workflows.map((w, i) => (
-                    <div key={i} className="grid gap-2 md:grid-cols-5">
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                        value={w.title}
-                        onChange={(e) =>
-                          setObDraft((d) =>
-                            d
-                              ? {
-                                  ...d,
-                                  workflows: d.workflows.map((x, ix) =>
-                                    ix === i ? { ...x, title: e.target.value } : x
-                                  ),
-                                }
-                              : d
-                          )
-                        }
-                      />
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                        value={w.owner_role}
-                        onChange={(e) =>
-                          setObDraft((d) =>
-                            d
-                              ? {
-                                  ...d,
-                                  workflows: d.workflows.map((x, ix) =>
-                                    ix === i ? { ...x, owner_role: e.target.value } : x
-                                  ),
-                                }
-                              : d
-                          )
-                        }
-                      />
-                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.priority} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, priority: e.target.value } : x) }) : d)} />
-                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.sla_target} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, sla_target: e.target.value } : x) }) : d)} />
-                      <input className="rounded border border-line bg-ink px-2 py-1 text-xs" value={w.approval} onChange={(e) => setObDraft((d) => d ? ({ ...d, workflows: d.workflows.map((x, ix) => ix === i ? { ...x, approval: e.target.value } : x) }) : d)} />
-                    </div>
-                  ))}
-                </div>
-                <div className="mb-2 text-xs text-gray-400">Policy rules</div>
-                <div className="mb-3 max-h-[220px] space-y-1 overflow-auto text-xs text-gray-400">
-                  {obDraft.policy_rules.map((r, i) => (
-                    <div key={i} className="rounded border border-line bg-ink/40 px-2 py-1">
-                      {r.action_type} · {r.risk_level} · {r.decision_mode} · approver {r.approver_role}
-                    </div>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="rounded bg-accent/20 px-3 py-1 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={obApplyLoading || (obDraft.missing_critical_items?.length ?? 0) > 0}
-                  onClick={async () => {
-                    if (!obDraft) return;
-                    setErr(null);
-                    setObApplyMsg(null);
-                    setObApplyLoading(true);
-                    try {
-                      const r = await fetch(`${api}/api/company/onboarding/apply`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ draft: obDraft }),
-                      });
-                      const j = await r.json();
-                      if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                      const cid = (j as { company_id?: string }).company_id;
-                      setObApplyMsg(`Applied onboarding draft${cid ? ` · company_id ${cid}` : ""}.`);
-                      if (cid) {
-                        setCoSel(cid);
-                        setView("company");
-                        await loadCompanyOs(cid);
-                      }
-                    } catch (e) {
-                      setErr(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setObApplyLoading(false);
-                    }
-                  }}
-                >
-                  {obApplyLoading ? "Applying..." : "Approve all"}
-                </button>
-                {!!obDraft.missing_critical_items.length && (
-                  <div className="mt-2 text-xs text-amber-300">
-                    Approve all is blocked until missing critical items are resolved:{" "}
-                    {obDraft.missing_critical_items.join(", ")}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
+          <OnboardingWizard
+            api={api}
+            obVertical={obVertical}
+            setObVertical={setObVertical}
+            obInput={obInput}
+            setObInput={setObInput}
+            obTranscript={obTranscript}
+            setObTranscript={setObTranscript}
+            obLoading={obLoading}
+            setObLoading={setObLoading}
+            obDraft={obDraft}
+            setObDraft={setObDraft}
+            obApplyLoading={obApplyLoading}
+            setObApplyLoading={setObApplyLoading}
+            obApplyMsg={obApplyMsg}
+            setObApplyMsg={setObApplyMsg}
+            obNextQuestion={obNextQuestion}
+            setErr={setErr}
+            onApplySuccess={async (cid) => {
+              setCoSel(cid);
+              setView("company");
+              await loadCompanyOs(cid);
+            }}
+          />
         )}
         {view === "company" && (
           <>
@@ -954,458 +704,68 @@ export default function ConsolePage() {
                   </div>
                 </div>
 
-                <div className="mb-4 grid gap-4 md:grid-cols-2">
-                  <div className="rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">Policy rules</div>
-                    <div className="mb-2 grid grid-cols-2 gap-2">
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        placeholder="action_type"
-                        value={coPolicyAction}
-                        onChange={(e) => setCoPolicyAction(e.target.value)}
-                      />
-                      <select
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        value={coPolicyRisk}
-                        onChange={(e) => setCoPolicyRisk(e.target.value)}
-                      >
-                        <option value="low">low</option>
-                        <option value="medium">medium</option>
-                        <option value="high">high</option>
-                        <option value="critical">critical</option>
-                      </select>
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        placeholder="amount_min (optional)"
-                        value={coPolicyAmtMin}
-                        onChange={(e) => setCoPolicyAmtMin(e.target.value)}
-                      />
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        placeholder="amount_max (optional)"
-                        value={coPolicyAmtMax}
-                        onChange={(e) => setCoPolicyAmtMax(e.target.value)}
-                      />
-                    </div>
-                    <div className="mb-2 flex flex-wrap gap-2">
-                      <select
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        value={coPolicyDecision}
-                        onChange={(e) => setCoPolicyDecision(e.target.value)}
-                      >
-                        <option value="auto">auto</option>
-                        <option value="admin_required">admin_required</option>
-                        <option value="blocked">blocked</option>
-                      </select>
-                      <button
-                        type="button"
-                        className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-                        onClick={async () => {
-                          if (!coSel) return;
-                          setCoErr(null);
-                          try {
-                            const numOrUndef = (v: string) => {
-                              const t = v.trim();
-                              if (!t) return undefined;
-                              const n = Number(t);
-                              return Number.isFinite(n) ? n : undefined;
-                            };
-                            const r = await fetch(`${api}/api/company/companies/${coSel}/policies/rules`, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                action_type: coPolicyAction.trim(),
-                                risk_level: coPolicyRisk.trim(),
-                                amount_min: numOrUndef(coPolicyAmtMin),
-                                amount_max: numOrUndef(coPolicyAmtMax),
-                                decision_mode: coPolicyDecision.trim(),
-                              }),
-                            });
-                            const j = await r.json();
-                            if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                            await loadCompanyOs();
-                          } catch (e) {
-                            setCoErr(e instanceof Error ? e.message : String(e));
-                          }
-                        }}
-                      >
-                        Add rule
-                      </button>
-                    </div>
-                    <div className="mb-2 flex flex-wrap gap-2">
-                      <input
-                        className="rounded border border-line bg-ink px-2 py-1 text-sm"
-                        placeholder="evaluate amount (optional)"
-                        value={coEvalAmount}
-                        onChange={(e) => setCoEvalAmount(e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        className="rounded border border-line px-3 py-1 text-sm text-gray-300"
-                        onClick={async () => {
-                          if (!coSel) return;
-                          setCoErr(null);
-                          setCoPolicyEvalRes(null);
-                          try {
-                            const t = coEvalAmount.trim();
-                            const amount = t ? Number(t) : undefined;
-                            const r = await fetch(`${api}/api/company/companies/${coSel}/policies/evaluate`, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                action_type: coPolicyAction.trim(),
-                                risk_level: coPolicyRisk.trim(),
-                                amount: Number.isFinite(amount as number) ? amount : undefined,
-                              }),
-                            });
-                            const j = await r.json();
-                            if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                            setCoPolicyEvalRes(JSON.stringify(j, null, 2));
-                          } catch (e) {
-                            setCoErr(e instanceof Error ? e.message : String(e));
-                          }
-                        }}
-                      >
-                        Evaluate
-                      </button>
-                    </div>
-                    {coPolicyEvalRes && (
-                      <pre className="mb-2 max-h-[180px] overflow-auto rounded border border-line bg-ink p-2 font-mono text-[11px] text-gray-400">
-                        {coPolicyEvalRes}
-                      </pre>
-                    )}
-                    <ul className="max-h-[180px] space-y-1 overflow-auto text-xs text-gray-400">
-                      {coPolicyRules.map((r) => (
-                        <li key={r.id} className="rounded border border-line bg-ink/50 px-2 py-1">
-                          {r.action_type} · {r.risk_level} · {r.decision_mode}
-                          {(r.amount_min ?? r.amount_max) !== undefined
-                            ? ` · [${r.amount_min ?? "-inf"} .. ${r.amount_max ?? "+inf"}]`
-                            : ""}
-                        </li>
-                      ))}
-                      {!coPolicyRules.length && <li className="text-gray-600">No policy rules yet.</li>}
-                    </ul>
-                  </div>
+                <PolicyQueuePanel
+                  api={api}
+                  coSel={coSel}
+                  coPolicyAction={coPolicyAction}
+                  setCoPolicyAction={setCoPolicyAction}
+                  coPolicyRisk={coPolicyRisk}
+                  setCoPolicyRisk={setCoPolicyRisk}
+                  coPolicyAmtMin={coPolicyAmtMin}
+                  setCoPolicyAmtMin={setCoPolicyAmtMin}
+                  coPolicyAmtMax={coPolicyAmtMax}
+                  setCoPolicyAmtMax={setCoPolicyAmtMax}
+                  coPolicyDecision={coPolicyDecision}
+                  setCoPolicyDecision={setCoPolicyDecision}
+                  coEvalAmount={coEvalAmount}
+                  setCoEvalAmount={setCoEvalAmount}
+                  coPolicyEvalRes={coPolicyEvalRes}
+                  setCoPolicyEvalRes={setCoPolicyEvalRes}
+                  coPolicyRules={coPolicyRules}
+                  coQueueView={coQueueView}
+                  setCoQueueView={setCoQueueView}
+                  coQueueTasks={coQueueTasks}
+                  coDecisionReason={coDecisionReason}
+                  setCoDecisionReason={setCoDecisionReason}
+                  coCheckoutAgent={coCheckoutAgent}
+                  setCoErr={setCoErr}
+                  loadCompanyOs={async () => {
+                    await loadCompanyOs();
+                  }}
+                  loadQueueView={loadQueueView}
+                />
 
-                  <div className="rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">Queue views</div>
-                    <div className="mb-2 flex flex-wrap gap-2">
-                      {(["all", "overdue", "atrisk", "pending_approvals", "blocked"] as QueueView[]).map((v) => (
-                        <button
-                          key={v}
-                          type="button"
-                          className={`rounded border px-2 py-1 text-xs ${
-                            coQueueView === v ? "border-accent bg-accent/10 text-accent" : "border-line text-gray-400"
-                          }`}
-                          onClick={async () => {
-                            setCoQueueView(v);
-                            try {
-                              await loadQueueView(v);
-                            } catch (e) {
-                              setCoErr(e instanceof Error ? e.message : String(e));
-                            }
-                          }}
-                        >
-                          {v}
-                        </button>
-                      ))}
-                    </div>
-                    <ul className="max-h-[220px] space-y-1 overflow-auto text-xs text-gray-400">
-                      {coQueueTasks.map((t) => (
-                        <li key={t.id} className="rounded border border-line bg-ink/50 px-2 py-1">
-                          <div className="mb-1 flex items-center justify-between gap-2">
-                            <span>
-                              {t.title} · {t.state}
-                              {t.priority !== undefined ? ` · p${t.priority}` : ""}
-                              {t.due_at ? ` · due ${t.due_at}` : ""}
-                            </span>
-                            <span
-                              className={`rounded px-2 py-0.5 text-[10px] ${
-                                (t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")) === "blocked"
-                                  ? "bg-red-900/40 text-red-300"
-                                  : (t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")) === "admin_required"
-                                  ? "bg-amber-900/40 text-amber-300"
-                                  : "bg-emerald-900/40 text-emerald-300"
-                              }`}
-                            >
-                              {((t.decision_mode ?? (t.state === "waiting_admin" ? "admin_required" : t.state === "blocked" ? "blocked" : "auto")).toUpperCase())}
-                            </span>
-                          </div>
-                          {(coQueueView === "pending_approvals" || t.state === "waiting_admin") && (
-                            <div className="flex items-center gap-2">
-                              <input
-                                className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-[11px]"
-                                placeholder="reason (optional)"
-                                value={coDecisionReason[t.id] ?? ""}
-                                onChange={(e) => setCoDecisionReason((m) => ({ ...m, [t.id]: e.target.value }))}
-                              />
-                              <button
-                                type="button"
-                                className="rounded border border-emerald-700 px-2 py-1 text-[11px] text-emerald-300"
-                                onClick={async () => {
-                                  setCoErr(null);
-                                  try {
-                                    const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
-                                      method: "POST",
-                                      headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({
-                                        decision_mode: "auto",
-                                        actor: coCheckoutAgent.trim() || "admin",
-                                        reason: coDecisionReason[t.id] ?? "",
-                                      }),
-                                    });
-                                    const j = await r.json();
-                                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                    await loadCompanyOs();
-                                  } catch (e) {
-                                    setCoErr(e instanceof Error ? e.message : String(e));
-                                  }
-                                }}
-                              >
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded border border-red-800 px-2 py-1 text-[11px] text-red-300"
-                                onClick={async () => {
-                                  setCoErr(null);
-                                  try {
-                                    const r = await fetch(`${api}/api/company/tasks/${t.id}/decision`, {
-                                      method: "POST",
-                                      headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({
-                                        decision_mode: "blocked",
-                                        actor: coCheckoutAgent.trim() || "admin",
-                                        reason: coDecisionReason[t.id] ?? "",
-                                      }),
-                                    });
-                                    const j = await r.json();
-                                    if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                    await loadCompanyOs();
-                                  } catch (e) {
-                                    setCoErr(e instanceof Error ? e.message : String(e));
-                                  }
-                                }}
-                              >
-                                Block
-                              </button>
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                      {!coQueueTasks.length && <li className="text-gray-600">No queue tasks in this view.</li>}
-                    </ul>
-                  </div>
-                </div>
-
-                <div className="mb-4 grid gap-4 md:grid-cols-2">
-                  <div className="rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">New goal</div>
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="title"
-                      value={coNewGoalTitle}
-                      onChange={(e) => setCoNewGoalTitle(e.target.value)}
-                    />
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 font-mono text-[11px]"
-                      placeholder="parent goal UUID (optional)"
-                      value={coNewGoalParent}
-                      onChange={(e) => setCoNewGoalParent(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-                      onClick={async () => {
-                        setCoErr(null);
-                        try {
-                          const pid = coNewGoalParent.trim();
-                          const r = await fetch(`${api}/api/company/companies/${coSel}/goals`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              title: coNewGoalTitle.trim(),
-                              parent_goal_id: pid || undefined,
-                            }),
-                          });
-                          const j = await r.json();
-                          if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                          setCoNewGoalTitle("");
-                          setCoNewGoalParent("");
-                          await loadCompanyOs();
-                        } catch (e) {
-                          setCoErr(e instanceof Error ? e.message : String(e));
-                        }
-                      }}
-                    >
-                      Add goal
-                    </button>
-                  </div>
-
-                  <div className="rounded border border-line bg-panel p-3">
-                    <div className="mb-2 text-xs uppercase text-gray-500">Log governance event</div>
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="actor"
-                      value={coGovActor}
-                      onChange={(e) => setCoGovActor(e.target.value)}
-                    />
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="action"
-                      value={coGovAction}
-                      onChange={(e) => setCoGovAction(e.target.value)}
-                    />
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                      placeholder="subject_type (e.g. company, task)"
-                      value={coGovSubjT}
-                      onChange={(e) => setCoGovSubjT(e.target.value)}
-                    />
-                    <input
-                      className="mb-2 w-full rounded border border-line bg-ink px-2 py-1 font-mono text-[11px]"
-                      placeholder="subject_id (UUID)"
-                      value={coGovSubjId}
-                      onChange={(e) => setCoGovSubjId(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
-                      onClick={async () => {
-                        setCoErr(null);
-                        try {
-                          const r = await fetch(`${api}/api/company/companies/${coSel}/governance/events`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              actor: coGovActor.trim(),
-                              action: coGovAction.trim(),
-                              subject_type: coGovSubjT.trim(),
-                              subject_id: coGovSubjId.trim(),
-                              payload: {},
-                            }),
-                          });
-                          const j = await r.json();
-                          if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                          await loadCompanyOs();
-                        } catch (e) {
-                          setCoErr(e instanceof Error ? e.message : String(e));
-                        }
-                      }}
-                    >
-                      Append event
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mb-4 rounded border border-line bg-panel">
-                  <div className="border-b border-line px-3 py-2 text-xs uppercase text-gray-500">
-                    Goals (tree)
-                  </div>
-                  <ul className="divide-y divide-line">
-                    {coGoalsSorted.map((g) => {
-                      const depth = coGoalDepth.get(g.id) ?? 0;
-                      return (
-                        <li key={g.id} className="px-3 py-2 text-sm" style={{ paddingLeft: 12 + depth * 14 }}>
-                          <div className="flex flex-wrap items-baseline justify-between gap-2">
-                            <div>
-                              <span className="font-medium text-gray-200">{g.title}</span>
-                              <span className="ml-2 text-xs text-gray-500">{g.status}</span>
-                            </div>
-                            <button
-                              type="button"
-                              className="text-xs text-accent hover:underline"
-                              onClick={() => {
-                                setCoEditGoal(g.id);
-                                setCoEditGoalTitle(g.title);
-                                setCoEditGoalStatus(g.status);
-                                setCoEditGoalParent(g.parent_goal_id ? String(g.parent_goal_id) : "");
-                              }}
-                            >
-                              Edit
-                            </button>
-                          </div>
-                          {coEditGoal === g.id && (
-                            <div className="mt-2 space-y-2 rounded border border-line bg-ink/50 p-2">
-                              <input
-                                className="w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                                value={coEditGoalTitle}
-                                onChange={(e) => setCoEditGoalTitle(e.target.value)}
-                              />
-                              <input
-                                className="w-full rounded border border-line bg-ink px-2 py-1 text-sm"
-                                placeholder="status"
-                                value={coEditGoalStatus}
-                                onChange={(e) => setCoEditGoalStatus(e.target.value)}
-                              />
-                              <input
-                                className="w-full rounded border border-line bg-ink px-2 py-1 font-mono text-[11px]"
-                                placeholder="parent goal UUID (empty = root)"
-                                value={coEditGoalParent}
-                                onChange={(e) => setCoEditGoalParent(e.target.value)}
-                              />
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  className="rounded bg-accent/20 px-2 py-1 text-xs text-accent"
-                                  onClick={async () => {
-                                    setCoErr(null);
-                                    try {
-                                      const p = coEditGoalParent.trim();
-                                      const r = await fetch(
-                                        `${api}/api/company/companies/${coSel}/goals/${g.id}`,
-                                        {
-                                          method: "PATCH",
-                                          headers: { "Content-Type": "application/json" },
-                                          body: JSON.stringify({
-                                            title: coEditGoalTitle.trim(),
-                                            status: coEditGoalStatus.trim(),
-                                            parent_goal_id: p || null,
-                                          }),
-                                        }
-                                      );
-                                      const j = await r.json();
-                                      if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                      setCoEditGoal(null);
-                                      await loadCompanyOs();
-                                    } catch (e) {
-                                      setCoErr(e instanceof Error ? e.message : String(e));
-                                    }
-                                  }}
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded px-2 py-1 text-xs text-gray-500 hover:text-gray-300"
-                                  onClick={() => setCoEditGoal(null)}
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </li>
-                      );
-                    })}
-                    {!coGoalsSorted.length && <li className="px-3 py-4 text-gray-600">No goals.</li>}
-                  </ul>
-                </div>
-
-                <div className="mb-4 rounded border border-line bg-panel">
-                  <div className="border-b border-line px-3 py-2 text-xs uppercase text-gray-500">
-                    Governance log
-                  </div>
-                  <ul className="max-h-[240px] divide-y divide-line overflow-auto">
-                    {coGovernance.map((ev) => (
-                      <li key={ev.id} className="px-3 py-2 font-mono text-[11px] text-gray-400">
-                        <span className="text-gray-500">{ev.created_at}</span> · {ev.actor} · {ev.action}{" "}
-                        · {ev.subject_type}/{ev.subject_id}
-                      </li>
-                    ))}
-                    {!coGovernance.length && <li className="px-3 py-4 text-gray-600">No events.</li>}
-                  </ul>
-                </div>
+                <GoalGovernancePanel
+                  api={api}
+                  coSel={coSel}
+                  coErrSetter={setCoErr}
+                  loadCompanyOs={async () => {
+                    await loadCompanyOs();
+                  }}
+                  coNewGoalTitle={coNewGoalTitle}
+                  setCoNewGoalTitle={setCoNewGoalTitle}
+                  coNewGoalParent={coNewGoalParent}
+                  setCoNewGoalParent={setCoNewGoalParent}
+                  coGovActor={coGovActor}
+                  setCoGovActor={setCoGovActor}
+                  coGovAction={coGovAction}
+                  setCoGovAction={setCoGovAction}
+                  coGovSubjT={coGovSubjT}
+                  setCoGovSubjT={setCoGovSubjT}
+                  coGovSubjId={coGovSubjId}
+                  setCoGovSubjId={setCoGovSubjId}
+                  coGoalsSorted={coGoalsSorted}
+                  coGoalDepth={coGoalDepth}
+                  coEditGoal={coEditGoal}
+                  setCoEditGoal={setCoEditGoal}
+                  coEditGoalTitle={coEditGoalTitle}
+                  setCoEditGoalTitle={setCoEditGoalTitle}
+                  coEditGoalStatus={coEditGoalStatus}
+                  setCoEditGoalStatus={setCoEditGoalStatus}
+                  coEditGoalParent={coEditGoalParent}
+                  setCoEditGoalParent={setCoEditGoalParent}
+                  coGovernance={coGovernance}
+                />
 
                 <div className="mb-4 flex flex-wrap gap-4">
                   <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-3">
@@ -1451,177 +811,26 @@ export default function ConsolePage() {
                     </button>
                   </div>
                 </div>
-                <div className="rounded border border-line bg-panel">
-                  <div className="border-b border-line px-3 py-2 text-xs uppercase text-gray-500">Tasks</div>
-                  <ul className="divide-y divide-line">
-                    {coTasks.map((t) => (
-                      <li key={t.id} className="px-3 py-2 text-sm">
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <div className="font-medium text-gray-200">{t.title}</div>
-                            <div className="text-xs text-gray-500">
-                              {t.state}
-                              {" · "}
-                              <span
-                                className={`inline-block rounded px-1.5 py-0.5 ${
-                                  (t.state === "blocked")
-                                    ? "bg-red-900/40 text-red-300"
-                                    : (t.state === "waiting_admin")
-                                    ? "bg-amber-900/40 text-amber-300"
-                                    : "bg-emerald-900/40 text-emerald-300"
-                                }`}
-                              >
-                                {(t.state === "blocked" ? "BLOCKED" : t.state === "waiting_admin" ? "ADMIN_REQUIRED" : "AUTO")}
-                              </span>
-                              {t.owner_persona ? ` · ${t.owner_persona}` : ""}
-                              {t.checked_out_by ? ` · out: ${t.checked_out_by}` : ""}
-                              {t.checked_out_until
-                                ? ` · until ${String(t.checked_out_until)}`
-                                : ""}
-                              {t.due_at ? ` · due ${String(t.due_at)}` : ""}
-                              {t.sla_policy ? ` · SLA ${t.sla_policy}` : ""}
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 gap-2">
-                            <button
-                              type="button"
-                              className="rounded border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent hover:bg-accent/20"
-                              onClick={async () => {
-                                setCoErr(null);
-                                try {
-                                  const r = await fetch(`${api}/api/company/tasks/${t.id}/checkout`, {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      agent_ref: coCheckoutAgent.trim() || "agent",
-                                    }),
-                                  });
-                                  const j = await r.json();
-                                  if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                  await loadCompanyOs();
-                                } catch (e) {
-                                  setCoErr(e instanceof Error ? e.message : String(e));
-                                }
-                              }}
-                            >
-                              Check out
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded border border-line px-2 py-1 text-xs text-gray-400 hover:bg-white/5"
-                              onClick={async () => {
-                                setCoErr(null);
-                                try {
-                                  const r = await fetch(`${api}/api/company/tasks/${t.id}/release`, {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      actor: coCheckoutAgent.trim() || "console",
-                                    }),
-                                  });
-                                  const j = await r.json();
-                                  if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                  await loadCompanyOs();
-                                } catch (e) {
-                                  setCoErr(e instanceof Error ? e.message : String(e));
-                                }
-                              }}
-                            >
-                              Release
-                            </button>
-                          </div>
-                        </div>
-                        {t.specification && (
-                          <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-gray-500">
-                            {t.specification}
-                          </pre>
-                        )}
-                        {coLatestTaskDecision.get(t.id) && (
-                          <div className="mt-2">
-                            <span className="inline-flex items-center gap-1 rounded border border-line bg-ink/60 px-2 py-0.5 text-[10px] text-gray-400">
-                              {(() => {
-                                const ev = coLatestTaskDecision.get(t.id)!;
-                                const p = (ev.payload ?? {}) as { decision_mode?: string; reason?: string };
-                                const d = (p.decision_mode ?? "").toUpperCase() || "DECISION";
-                                const rs = (p.reason ?? "").trim();
-                                const reasonPart = rs ? ` · ${rs}` : "";
-                                return `last ${d} by ${ev.actor} · ${ev.created_at}${reasonPart}`;
-                              })()}
-                            </span>
-                          </div>
-                        )}
-                        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-5">
-                          <input
-                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                            placeholder="due_at (ISO)"
-                            value={coSlaDueAt[t.id] ?? ""}
-                            onChange={(e) => setCoSlaDueAt((m) => ({ ...m, [t.id]: e.target.value }))}
-                          />
-                          <input
-                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                            placeholder="escalate_after (ISO)"
-                            value={coSlaEscAt[t.id] ?? ""}
-                            onChange={(e) => setCoSlaEscAt((m) => ({ ...m, [t.id]: e.target.value }))}
-                          />
-                          <input
-                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                            placeholder="sla_policy"
-                            value={coSlaPol[t.id] ?? ""}
-                            onChange={(e) => setCoSlaPol((m) => ({ ...m, [t.id]: e.target.value }))}
-                          />
-                          <input
-                            className="rounded border border-line bg-ink px-2 py-1 text-xs"
-                            placeholder="priority"
-                            value={coSlaPrio[t.id] ?? ""}
-                            onChange={(e) => setCoSlaPrio((m) => ({ ...m, [t.id]: e.target.value }))}
-                          />
-                          <div className="flex gap-2">
-                            <input
-                              className="min-w-0 flex-1 rounded border border-line bg-ink px-2 py-1 text-xs"
-                              placeholder="status_reason"
-                              value={coSlaReason[t.id] ?? ""}
-                              onChange={(e) => setCoSlaReason((m) => ({ ...m, [t.id]: e.target.value }))}
-                            />
-                            <button
-                              type="button"
-                              className="rounded border border-line px-2 py-1 text-xs text-gray-300"
-                              onClick={async () => {
-                                setCoErr(null);
-                                try {
-                                  const maybeIso = (v: string) => {
-                                    const t = v.trim();
-                                    return t ? t : undefined;
-                                  };
-                                  const p = (coSlaPrio[t.id] ?? "").trim();
-                                  const prio = p ? Number(p) : undefined;
-                                  const r = await fetch(`${api}/api/company/tasks/${t.id}/sla`, {
-                                    method: "PATCH",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      due_at: maybeIso(coSlaDueAt[t.id] ?? ""),
-                                      escalate_after: maybeIso(coSlaEscAt[t.id] ?? ""),
-                                      sla_policy: (coSlaPol[t.id] ?? "").trim() || undefined,
-                                      status_reason: (coSlaReason[t.id] ?? "").trim() || undefined,
-                                      priority: Number.isFinite(prio as number) ? prio : undefined,
-                                    }),
-                                  });
-                                  const j = await r.json();
-                                  if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                                  await loadCompanyOs();
-                                } catch (e) {
-                                  setCoErr(e instanceof Error ? e.message : String(e));
-                                }
-                              }}
-                            >
-                              Save SLA
-                            </button>
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                    {!coTasks.length && <li className="px-3 py-4 text-gray-600">No tasks.</li>}
-                  </ul>
-                </div>
+                <TaskListPanel
+                  api={api}
+                  coTasks={coTasks}
+                  coCheckoutAgent={coCheckoutAgent}
+                  coLatestTaskDecision={coLatestTaskDecision}
+                  coSlaDueAt={coSlaDueAt}
+                  setCoSlaDueAt={setCoSlaDueAt}
+                  coSlaEscAt={coSlaEscAt}
+                  setCoSlaEscAt={setCoSlaEscAt}
+                  coSlaPol={coSlaPol}
+                  setCoSlaPol={setCoSlaPol}
+                  coSlaPrio={coSlaPrio}
+                  setCoSlaPrio={setCoSlaPrio}
+                  coSlaReason={coSlaReason}
+                  setCoSlaReason={setCoSlaReason}
+                  setCoErr={setCoErr}
+                  loadCompanyOs={async () => {
+                    await loadCompanyOs();
+                  }}
+                />
               </>
             )}
           </>

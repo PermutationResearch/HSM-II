@@ -43,6 +43,11 @@ pub fn router() -> Router<ConsoleState> {
     Router::new()
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
+        .route("/api/company/onboarding/contracts", get(list_onboarding_pack_contracts))
+        .route(
+            "/api/company/onboarding/contracts/validate",
+            post(validate_onboarding_pack_contract),
+        )
         .route("/api/company/onboarding/draft", post(generate_onboarding_draft))
         .route("/api/company/onboarding/apply", post(apply_onboarding_draft))
         .route("/api/company/companies", get(list_companies).post(create_company))
@@ -1413,8 +1418,11 @@ struct OnboardingDraft {
     company_name: String,
     industry: String,
     vertical_template: String,
+    pack_contract_id: String,
     workflows: Vec<OnboardWorkflowDraft>,
     policy_rules: Vec<OnboardPolicyDraft>,
+    kpi_gates: Vec<OnboardingGateResult>,
+    risk_gates: Vec<OnboardingGateResult>,
     missing_critical_items: Vec<String>,
     confidence_by_field: std::collections::BTreeMap<String, f64>,
 }
@@ -1424,6 +1432,8 @@ struct OnboardingDraftRequest {
     transcript: String,
     #[serde(default)]
     vertical_template: Option<String>,
+    #[serde(default)]
+    pack_contract_id: Option<String>,
     #[serde(default)]
     company_name: Option<String>,
 }
@@ -1435,6 +1445,226 @@ struct OnboardingApplyRequest {
     slug: Option<String>,
     #[serde(default)]
     display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardingGate {
+    id: String,
+    label: String,
+    required: bool,
+    evidence_hint: String,
+    keyword_any: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardingPackContract {
+    id: String,
+    vertical: String,
+    display_name: String,
+    description: String,
+    kpi_gates: Vec<OnboardingGate>,
+    risk_gates: Vec<OnboardingGate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OnboardingGateResult {
+    id: String,
+    label: String,
+    required: bool,
+    satisfied: bool,
+    evidence_hint: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidateOnboardingPackBody {
+    pack_contract_id: String,
+    transcript: String,
+}
+
+fn onboarding_pack_contracts() -> Vec<OnboardingPackContract> {
+    vec![
+        OnboardingPackContract {
+            id: "generic_smb_core_v1".to_string(),
+            vertical: "generic_smb".to_string(),
+            display_name: "Generic SMB Core".to_string(),
+            description: "General-purpose service operations baseline with approval and SLA controls.".to_string(),
+            kpi_gates: vec![
+                OnboardingGate {
+                    id: "kpi_sla".to_string(),
+                    label: "Response SLA tiers defined".to_string(),
+                    required: true,
+                    evidence_hint: "Define urgent/same-day/24h lanes.".to_string(),
+                    keyword_any: vec!["urgent".into(), "same day".into(), "24h".into(), "sla".into()],
+                },
+                OnboardingGate {
+                    id: "kpi_backlog".to_string(),
+                    label: "Backlog throughput target".to_string(),
+                    required: true,
+                    evidence_hint: "State expected daily/weekly throughput.".to_string(),
+                    keyword_any: vec!["per day".into(), "daily".into(), "weekly".into(), "throughput".into()],
+                },
+            ],
+            risk_gates: vec![
+                OnboardingGate {
+                    id: "risk_approver".to_string(),
+                    label: "Approver role designated".to_string(),
+                    required: true,
+                    evidence_hint: "Who approves sensitive actions?".to_string(),
+                    keyword_any: vec!["approve".into(), "manager".into(), "owner".into(), "finance".into()],
+                },
+                OnboardingGate {
+                    id: "risk_restricted_actions".to_string(),
+                    label: "Restricted actions listed".to_string(),
+                    required: true,
+                    evidence_hint: "List actions AI must block or escalate.".to_string(),
+                    keyword_any: vec!["legal".into(), "budget".into(), "refund".into(), "blocked".into()],
+                },
+            ],
+        },
+        OnboardingPackContract {
+            id: "ecommerce_ops_v1".to_string(),
+            vertical: "ecommerce".to_string(),
+            display_name: "Ecommerce Ops".to_string(),
+            description: "Order, support, and refund supervision contract for ecommerce teams.".to_string(),
+            kpi_gates: vec![
+                OnboardingGate {
+                    id: "kpi_reply_speed".to_string(),
+                    label: "Customer reply-time target defined".to_string(),
+                    required: true,
+                    evidence_hint: "Set first-reply target (e.g. 1h).".to_string(),
+                    keyword_any: vec!["1h".into(), "reply".into(), "response".into(), "same day".into()],
+                },
+                OnboardingGate {
+                    id: "kpi_refund_sla".to_string(),
+                    label: "Refund decision SLA defined".to_string(),
+                    required: true,
+                    evidence_hint: "Define refund handling window.".to_string(),
+                    keyword_any: vec!["refund".into(), "chargeback".into(), "24h".into(), "same day".into()],
+                },
+            ],
+            risk_gates: vec![
+                OnboardingGate {
+                    id: "risk_refund_guardrail".to_string(),
+                    label: "Refund threshold and approver defined".to_string(),
+                    required: true,
+                    evidence_hint: "Specify refund approval threshold and approver.".to_string(),
+                    keyword_any: vec!["refund".into(), "approve".into(), "finance".into(), "threshold".into()],
+                },
+                OnboardingGate {
+                    id: "risk_legal_guardrail".to_string(),
+                    label: "Legal escalation documented".to_string(),
+                    required: true,
+                    evidence_hint: "Ensure legal/chargeback escalation path exists.".to_string(),
+                    keyword_any: vec!["legal".into(), "chargeback".into(), "escalate".into(), "owner".into()],
+                },
+            ],
+        },
+        OnboardingPackContract {
+            id: "property_management_ops_v1".to_string(),
+            vertical: "property_management".to_string(),
+            display_name: "Property Management Ops".to_string(),
+            description: "Tenant communications and maintenance triage with governance-first controls.".to_string(),
+            kpi_gates: vec![
+                OnboardingGate {
+                    id: "kpi_maintenance_triage".to_string(),
+                    label: "Maintenance triage SLA defined".to_string(),
+                    required: true,
+                    evidence_hint: "Define emergency vs normal maintenance SLA.".to_string(),
+                    keyword_any: vec!["maintenance".into(), "emergency".into(), "same day".into(), "24h".into()],
+                },
+                OnboardingGate {
+                    id: "kpi_tenant_comms".to_string(),
+                    label: "Tenant communication cadence defined".to_string(),
+                    required: true,
+                    evidence_hint: "Set cadence or acknowledgement standards.".to_string(),
+                    keyword_any: vec!["tenant".into(), "acknowledge".into(), "follow-up".into(), "response".into()],
+                },
+            ],
+            risk_gates: vec![
+                OnboardingGate {
+                    id: "risk_legal_housing".to_string(),
+                    label: "Legal/fair-housing escalation defined".to_string(),
+                    required: true,
+                    evidence_hint: "Specify when to escalate legal/fair-housing issues.".to_string(),
+                    keyword_any: vec!["legal".into(), "fair housing".into(), "counsel".into(), "escalate".into()],
+                },
+                OnboardingGate {
+                    id: "risk_financial_changes".to_string(),
+                    label: "Financial change approvals documented".to_string(),
+                    required: true,
+                    evidence_hint: "Define approval for financial updates/refunds.".to_string(),
+                    keyword_any: vec!["approve".into(), "owner".into(), "refund".into(), "budget".into()],
+                },
+            ],
+        },
+    ]
+}
+
+fn pack_for_vertical(vertical: &str) -> OnboardingPackContract {
+    let v = vertical.trim().to_ascii_lowercase();
+    let all = onboarding_pack_contracts();
+    all.iter()
+        .find(|p| p.vertical == v || p.id == v)
+        .cloned()
+        .unwrap_or_else(|| all[0].clone())
+}
+
+fn find_pack_contract(pack_contract_id: &str, vertical_hint: &str) -> OnboardingPackContract {
+    let id = pack_contract_id.trim().to_ascii_lowercase();
+    if !id.is_empty() {
+        if let Some(p) = onboarding_pack_contracts()
+            .into_iter()
+            .find(|p| p.id.to_ascii_lowercase() == id)
+        {
+            return p;
+        }
+    }
+    pack_for_vertical(vertical_hint)
+}
+
+fn evaluate_gate_results(transcript_lc: &str, gates: &[OnboardingGate]) -> Vec<OnboardingGateResult> {
+    gates.iter()
+        .map(|g| {
+            let satisfied = g
+                .keyword_any
+                .iter()
+                .any(|kw| !kw.trim().is_empty() && transcript_lc.contains(&kw.to_ascii_lowercase()));
+            OnboardingGateResult {
+                id: g.id.clone(),
+                label: g.label.clone(),
+                required: g.required,
+                satisfied,
+                evidence_hint: g.evidence_hint.clone(),
+            }
+        })
+        .collect()
+}
+
+async fn list_onboarding_pack_contracts() -> Json<Value> {
+    Json(json!({ "contracts": onboarding_pack_contracts() }))
+}
+
+async fn validate_onboarding_pack_contract(
+    Json(body): Json<ValidateOnboardingPackBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let transcript = body.transcript.trim().to_ascii_lowercase();
+    let pack = find_pack_contract(&body.pack_contract_id, "");
+    let kpi = evaluate_gate_results(&transcript, &pack.kpi_gates);
+    let risk = evaluate_gate_results(&transcript, &pack.risk_gates);
+    let unsatisfied_required: Vec<String> = kpi
+        .iter()
+        .chain(risk.iter())
+        .filter(|g| g.required && !g.satisfied)
+        .map(|g| g.id.clone())
+        .collect();
+    let ok_to_apply = unsatisfied_required.is_empty();
+    Ok(Json(json!({
+        "pack_contract": pack,
+        "kpi_gates": kpi,
+        "risk_gates": risk,
+        "unsatisfied_required_gates": unsatisfied_required,
+        "ok_to_apply": ok_to_apply
+    })))
 }
 
 fn template_defaults(vertical: &str) -> (&'static str, Vec<OnboardWorkflowDraft>, Vec<OnboardPolicyDraft>) {
@@ -1512,6 +1742,10 @@ async fn generate_onboarding_draft(
         });
 
     let (industry, mut workflows, mut rules) = template_defaults(&selected_vertical);
+    let selected_pack = find_pack_contract(
+        req.pack_contract_id.as_deref().unwrap_or(""),
+        &selected_vertical,
+    );
 
     if t.contains("refund") {
         rules.push(OnboardPolicyDraft {
@@ -1557,6 +1791,13 @@ async fn generate_onboarding_draft(
     if workflows.is_empty() {
         missing.push("workflows".to_string());
     }
+    let kpi_gates = evaluate_gate_results(&t, &selected_pack.kpi_gates);
+    let risk_gates = evaluate_gate_results(&t, &selected_pack.risk_gates);
+    for g in kpi_gates.iter().chain(risk_gates.iter()) {
+        if g.required && !g.satisfied {
+            missing.push(format!("gate:{}", g.id));
+        }
+    }
 
     let mut conf = std::collections::BTreeMap::new();
     conf.insert("company_name".to_string(), if company_name.is_empty() { 0.2 } else { 0.95 });
@@ -1569,8 +1810,11 @@ async fn generate_onboarding_draft(
         company_name,
         industry: industry.to_string(),
         vertical_template: selected_vertical,
+        pack_contract_id: selected_pack.id,
         workflows,
         policy_rules: rules,
+        kpi_gates,
+        risk_gates,
         missing_critical_items: missing,
         confidence_by_field: conf,
     };
@@ -1585,6 +1829,17 @@ async fn apply_onboarding_draft(
         return Err(no_db());
     };
     let d = req.draft;
+    let unsatisfied_required = d
+        .kpi_gates
+        .iter()
+        .chain(d.risk_gates.iter())
+        .any(|g| g.required && !g.satisfied);
+    if unsatisfied_required {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot apply draft: required KPI/risk gates are not satisfied" })),
+        ));
+    }
     let display_name = req
         .display_name
         .as_deref()

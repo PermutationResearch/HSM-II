@@ -56,6 +56,38 @@ enum Cmd {
         to: PathBuf,
     },
     ListStarters,
+    /// Validate onboarding KPI/risk gates for a pack contract.
+    ValidateOnboardingContract {
+        /// Contract id (e.g. generic_smb_core_v1, ecommerce_ops_v1, property_management_ops_v1)
+        #[arg(long)]
+        contract: String,
+        /// Transcript text to evaluate.
+        #[arg(long)]
+        transcript: String,
+    },
+}
+
+fn required_gate_keywords(contract: &str) -> Vec<(&'static str, Vec<&'static str>)> {
+    match contract.trim().to_ascii_lowercase().as_str() {
+        "ecommerce_ops_v1" => vec![
+            ("kpi_reply_speed", vec!["1h", "reply", "response", "same day"]),
+            ("kpi_refund_sla", vec!["refund", "chargeback", "24h", "same day"]),
+            ("risk_refund_guardrail", vec!["refund", "approve", "finance", "threshold"]),
+            ("risk_legal_guardrail", vec!["legal", "chargeback", "escalate", "owner"]),
+        ],
+        "property_management_ops_v1" => vec![
+            ("kpi_maintenance_triage", vec!["maintenance", "emergency", "same day", "24h"]),
+            ("kpi_tenant_comms", vec!["tenant", "acknowledge", "follow-up", "response"]),
+            ("risk_legal_housing", vec!["legal", "fair housing", "counsel", "escalate"]),
+            ("risk_financial_changes", vec!["approve", "owner", "refund", "budget"]),
+        ],
+        _ => vec![
+            ("kpi_sla", vec!["urgent", "same day", "24h", "sla"]),
+            ("kpi_backlog", vec!["per day", "daily", "weekly", "throughput"]),
+            ("risk_approver", vec!["approve", "manager", "owner", "finance"]),
+            ("risk_restricted_actions", vec!["legal", "budget", "refund", "blocked"]),
+        ],
+    }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
@@ -138,6 +170,31 @@ fn main() -> anyhow::Result<()> {
             if !report.ok() {
                 std::process::exit(1);
             }
+            return Ok(());
+        }
+        Cmd::ValidateOnboardingContract {
+            contract,
+            transcript,
+        } => {
+            let t = transcript.to_ascii_lowercase();
+            let gates = required_gate_keywords(&contract);
+            let mut missing = Vec::new();
+            println!("Contract: {contract}");
+            for (id, kws) in gates {
+                let ok = kws.iter().any(|k| t.contains(k));
+                println!(
+                    "  - {}: {}",
+                    id,
+                    if ok { "OK" } else { "MISSING" }
+                );
+                if !ok {
+                    missing.push(id.to_string());
+                }
+            }
+            if !missing.is_empty() {
+                anyhow::bail!("required onboarding gates missing: {}", missing.join(", "));
+            }
+            println!("OK: all required onboarding gates satisfied.");
             return Ok(());
         }
     }
