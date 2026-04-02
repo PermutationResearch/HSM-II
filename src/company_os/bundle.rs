@@ -15,6 +15,9 @@ pub struct CompanyExport {
     pub hsmii_home: Option<String>,
     #[serde(default)]
     pub issue_key_prefix: Option<String>,
+    /// Company-wide LLM context (Markdown); optional for older bundles.
+    #[serde(default)]
+    pub context_markdown: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,8 +79,8 @@ pub struct ImportRequest {
 }
 
 pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBundle> {
-    let row: (Uuid, String, String, Option<String>, String) = sqlx::query_as(
-        "SELECT id, slug, display_name, hsmii_home, issue_key_prefix FROM companies WHERE id = $1",
+    let row: (Uuid, String, String, Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT id, slug, display_name, hsmii_home, issue_key_prefix, context_markdown FROM companies WHERE id = $1",
     )
     .bind(company_id)
     .fetch_optional(pool)
@@ -166,6 +169,7 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
             display_name: row.2,
             hsmii_home: row.3,
             issue_key_prefix: Some(row.4),
+            context_markdown: row.5,
         },
         goals: goals
             .into_iter()
@@ -226,13 +230,14 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         .map(str::to_string)
         .unwrap_or_else(|| super::derive_issue_key_prefix(&slug));
     let company_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix)
-           VALUES ($1, $2, $3, $4) RETURNING id"#,
+        r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix, context_markdown)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
     )
     .bind(&slug)
     .bind(req.company.display_name.trim())
     .bind(&req.company.hsmii_home)
     .bind(&prefix)
+    .bind(&req.company.context_markdown)
     .fetch_one(&mut *tx)
     .await
     .context("insert company")?;

@@ -1,0 +1,123 @@
+{
+  "kind": "hsm.sop_reference.v1",
+  "title": "Customer complaint — AI SOP + human escalation",
+  "summary": "Intake and triage run as algorithmic steps (tasks + governance log); resolution closes the loop; escalation raises decision_mode and queue views.",
+  "phases": [
+    {
+      "id": "intake",
+      "name": "Intake",
+      "actor": "ai",
+      "sop_logic": "Parse channel (email/chat/ticket). Classify: product area, severity (1=low, 2=medium, 3=high/legal/safety). Detect PII; redact in stored spec.",
+      "actions": [
+        "Create task: title Complaint · {source_id}, state open, owner_persona complaint_router_ai",
+        "Append specification: raw summary + classification JSON"
+      ],
+      "company_os": [
+        "POST /api/company/companies/{company_id}/tasks",
+        "POST /api/company/companies/{company_id}/governance/events — action complaint_intake"
+      ]
+    },
+    {
+      "id": "triage",
+      "name": "Triage & policy gate",
+      "actor": "both",
+      "sop_logic": "Evaluate policy_rules for action_type (e.g. refund_message, account_change). decision_mode auto → draft reply; admin_required → waiting_admin; blocked → stop automation.",
+      "actions": [
+        "POST /policies/evaluate with risk_level + amount if applicable",
+        "PATCH task decision or POST /tasks/{id}/decision to set decision_mode",
+        "If auto: attach SOP snippet to task spec for the drafting agent"
+      ],
+      "company_os": [
+        "POST /api/company/companies/{company_id}/policies/evaluate",
+        "POST /api/company/tasks/{task_id}/decision"
+      ],
+      "resolution": "If auto and low risk: proceed to respond.",
+      "escalation": "If admin_required or blocked: task state waiting_admin or blocked; appears in Inbox queue tabs."
+    },
+    {
+      "id": "respond",
+      "name": "AI draft + human send (SOP)",
+      "actor": "both",
+      "sop_logic": "AI generates reply from task spec + MEMORY/business pack; human approves send OR edits. Anti-sycophancy optional on customer-facing text.",
+      "actions": [
+        "checkout_task for drafting agent",
+        "Human review → release_task; log governance response_approved or response_edited",
+        "POST governance customer_outbound_logged with channel + template id"
+      ],
+      "company_os": [
+        "POST /api/company/tasks/{task_id}/checkout",
+        "POST /api/company/tasks/{task_id}/release",
+        "POST /api/company/companies/{company_id}/governance/events"
+      ],
+      "resolution": "After send: task state in_progress → done (or closed) per your state machine.",
+      "escalation": "If customer replies with escalation cues → bump severity; re-run triage."
+    },
+    {
+      "id": "close",
+      "name": "Resolution",
+      "actor": "human",
+      "sop_logic": "Confirm customer satisfied or ticket timed out. Record outcome code (resolved, partial, churn_risk).",
+      "actions": [
+        "Update task state to done/closed",
+        "Governance: complaint_resolved with payload { outcome, minutes_to_resolve }"
+      ],
+      "company_os": [
+        "Task update via console or future PATCH task state API",
+        "POST .../governance/events"
+      ],
+      "resolution": "Terminal success path."
+    },
+    {
+      "id": "escalate",
+      "name": "Escalation path",
+      "actor": "human",
+      "sop_logic": "Parallel to respond: severity 3, legal threat, fraud, or policy blocked → senior owner, SLA shorten, optional spawn subtask for legal_review.",
+      "actions": [
+        "Set priority + SLA fields (PATCH .../tasks/{id}/sla)",
+        "spawn-subagents or handoff to legal_ops persona per spawn-rules",
+        "Queue view pending_approvals / waiting_admin for board"
+      ],
+      "company_os": [
+        "PATCH /api/company/tasks/{task_id}/sla",
+        "POST .../tasks/{task_id}/spawn-subagents",
+        "GET .../tasks/queue?view=waiting_admin"
+      ],
+      "escalation": "Human must clear decision_mode or reassign owner_persona."
+    }
+  ],
+  "interaction_log": {
+    "description": "Every material step should emit governance_events (and optionally run-telemetry on the active task) so leadership sees the algorithm, not only the final email.",
+    "suggested_events": [
+      {
+        "action": "complaint_intake",
+        "subject_type": "task",
+        "subject_hint": "new task id",
+        "payload_summary": "{ source, severity, product_area }"
+      },
+      {
+        "action": "policy_evaluated",
+        "subject_type": "task",
+        "subject_hint": "task id",
+        "payload_summary": "{ action_type, decision_mode, risk_level }"
+      },
+      {
+        "action": "customer_outbound_logged",
+        "subject_type": "task",
+        "subject_hint": "task id",
+        "payload_summary": "{ channel, template_id, redacted: true }"
+      },
+      {
+        "action": "complaint_escalated",
+        "subject_type": "task",
+        "subject_hint": "task id",
+        "payload_summary": "{ reason, new_owner? }"
+      },
+      {
+        "action": "complaint_resolved",
+        "subject_type": "task",
+        "subject_hint": "task id",
+        "payload_summary": "{ outcome }"
+      }
+    ]
+  }
+}

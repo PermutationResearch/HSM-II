@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
+import {
+  EXAMPLE_WORKFORCE_AGENT_PRESETS,
+  type ExampleWorkforceAgentPreset,
+  type ExampleWorkforceAgentSource,
+  exampleWorkforceAgentNames,
+} from "@/app/lib/example-company-agents";
+
 export type CoAgentRow = {
   id: string;
   name: string;
@@ -17,8 +24,11 @@ export type CoAgentRow = {
   sort_order: number;
 };
 
-/** Example ids; also merged with personas seen on tasks (parent passes those). */
-const EXAMPLE_AGENT_IDS = ["property_admin", "billing_clerk", "ops_lead", "concierge"] as const;
+const PRESET_SOURCE_LABEL: Record<ExampleWorkforceAgentSource, string> = {
+  paperclip: "Paperclip template roster",
+  hermes: "Hermes bridge",
+  sop: "SOP demo personas",
+};
 
 type Props = {
   api: string;
@@ -67,15 +77,37 @@ export function CompanyAgentsPanel({
     [suggestedAgentIds]
   );
 
+  const exampleNames = useMemo(() => exampleWorkforceAgentNames(), []);
+
+  const presetsBySource = useMemo(() => {
+    const m: Record<ExampleWorkforceAgentSource, ExampleWorkforceAgentPreset[]> = {
+      paperclip: [],
+      hermes: [],
+      sop: [],
+    };
+    for (const p of EXAMPLE_WORKFORCE_AGENT_PRESETS) m[p.source].push(p);
+    return m;
+  }, []);
+
   const mergedIdSuggestions = useMemo(() => {
     const set = new Set<string>();
-    for (const x of EXAMPLE_AGENT_IDS) set.add(x);
+    for (const x of exampleNames) set.add(x);
     for (const x of suggestedAgentIds) {
       const t = x.trim();
       if (t) set.add(t);
     }
     return [...set].sort((a, b) => a.localeCompare(b));
-  }, [suggestedAgentIds]);
+  }, [exampleNames, suggestedAgentIds]);
+
+  const applyExamplePreset = useCallback((p: ExampleWorkforceAgentPreset) => {
+    setNewName(p.name);
+    setNewRole(p.role);
+    setNewTitle(p.title ?? "");
+    setNewBriefing(p.briefing ?? "");
+    setNewCapabilities(p.capabilities ?? "");
+    setNewAdapterType(p.adapter_type ?? "");
+    setNewAdapterJson(JSON.stringify(p.adapter_config ?? {}, null, 2));
+  }, []);
 
   const reload = useCallback(async () => {
     await loadCompanyOs();
@@ -155,7 +187,9 @@ export function CompanyAgentsPanel({
           <code className="text-xs text-accent">owner_persona</code> or the name used at checkout (letters, digits,{" "}
           <code className="text-xs">_</code>, <code className="text-xs">-</code> only).{" "}
           <strong className="text-gray-400">Role</strong> is separate — <code className="text-xs">worker</code>,{" "}
-          <code className="text-xs">manager</code>, etc. describe place in the org chart, not the id.
+          <code className="text-xs">manager</code>, etc. describe place in the org chart, not the id. Presets below
+          mirror Paperclip onboarding roles, Hermes <code className="text-xs">adapter_type=hermes</code> workers, and
+          SOP examples in the catalog.
         </p>
 
         {!creating ? (
@@ -174,6 +208,35 @@ export function CompanyAgentsPanel({
                 <option key={id} value={id} />
               ))}
             </datalist>
+            <div className="mb-3">
+              <label className="mb-1 block text-xs text-gray-500">
+                Example roster preset <span className="text-gray-600">(fills form — Paperclip / Hermes / SOP)</span>
+              </label>
+              <select
+                className="w-full max-w-md rounded-lg border border-line bg-ink px-3 py-2 text-sm text-gray-200"
+                value=""
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (!v) return;
+                  const preset = EXAMPLE_WORKFORCE_AGENT_PRESETS.find((p) => p.name === v);
+                  if (preset) applyExamplePreset(preset);
+                  e.currentTarget.value = "";
+                }}
+                aria-label="Apply example workforce preset"
+              >
+                <option value="">— Choose preset —</option>
+                {(["paperclip", "hermes", "sop"] as const).map((src) => (
+                  <optgroup key={src} label={PRESET_SOURCE_LABEL[src]}>
+                    {presetsBySource[src].map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                        {p.title ? ` — ${p.title}` : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
             <div className="mb-3">
               <label className="mb-1 block text-xs text-gray-500">
                 Start from a suggestion <span className="text-gray-600">(optional)</span>
@@ -255,7 +318,7 @@ export function CompanyAgentsPanel({
               />
               <input
                 className="rounded-lg border border-line bg-ink px-3 py-2 font-mono text-sm"
-                placeholder="Adapter type (e.g. ollama, claude_local)"
+                placeholder="Adapter type (e.g. hermes, ollama, claude_local)"
                 value={newAdapterType}
                 onChange={(e) => setNewAdapterType(e.target.value)}
               />
@@ -359,6 +422,7 @@ function AgentEditorRow({
   const [status, setStatus] = useState(agent.status);
   const [sortOrder, setSortOrder] = useState(String(agent.sort_order));
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     setRole(agent.role);
@@ -427,6 +491,30 @@ function AgentEditorRow({
       setCoErr(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const removeAgent = async () => {
+    if (
+      !window.confirm(
+        `Remove workforce agent "${agent.name}" from this company?\n\nDirect reports move to the top of the org (their manager link is cleared). Tasks that still reference this name as owner_persona are unchanged.`
+      )
+    ) {
+      return;
+    }
+    setCoErr(null);
+    setRemoving(true);
+    try {
+      const r = await fetch(`${api}/api/company/companies/${companyId}/agents/${agent.id}`, {
+        method: "DELETE",
+      });
+      const j = (await r.json()) as { error?: string };
+      if (!r.ok) throw new Error(j.error ?? r.statusText);
+      await onSaved();
+    } catch (e) {
+      setCoErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -540,14 +628,30 @@ function AgentEditorRow({
               />
             </label>
           </div>
-          <button
-            type="button"
-            disabled={saving}
-            className="mt-3 rounded-full bg-white px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
-            onClick={() => void save()}
-          >
-            {saving ? "Saving…" : "Save changes"}
-          </button>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={saving || removing}
+              className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
+              onClick={() => void save()}
+            >
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+            <button
+              type="button"
+              disabled={saving || removing}
+              className="rounded-full border border-red-900/60 bg-red-950/40 px-4 py-2 text-sm text-red-200 hover:bg-red-950/60 disabled:opacity-50"
+              onClick={() => void removeAgent()}
+            >
+              {removing ? "Removing…" : "Remove from roster"}
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] text-gray-600">
+            <strong className="text-gray-400">Finish without deleting:</strong> set Status to{" "}
+            <code className="text-gray-500">paused</code> or <code className="text-gray-500">terminated</code> — the
+            row stays for audit; <code className="text-gray-500">terminated</code> hides the agent from the org chart.
+            LLM checkout only resolves <code className="text-gray-500">active</code> agents.
+          </p>
         </div>
       ) : null}
     </li>

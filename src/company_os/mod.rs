@@ -4,6 +4,7 @@
 
 mod agents;
 mod bundle;
+mod paperclip_import;
 pub mod onboarding_contracts;
 mod spend;
 
@@ -27,6 +28,9 @@ use crate::console::ConsoleState;
 use self::onboarding_contracts::{
     evaluate_gate_results, find_contract, load_contracts_hot, OnboardingGateResult,
 };
+
+/// Max size for `companies.context_markdown` (POST/PATCH body).
+const MAX_COMPANY_CONTEXT_MARKDOWN_BYTES: usize = 512 * 1024;
 
 /// Connect pool and run migrations when `HSM_COMPANY_OS_DATABASE_URL` is set and non-empty.
 pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
@@ -58,6 +62,20 @@ pub fn router() -> Router<ConsoleState> {
         .route("/api/company/onboarding/draft", post(generate_onboarding_draft))
         .route("/api/company/onboarding/apply", post(apply_onboarding_draft))
         .route("/api/company/companies", get(list_companies).post(create_company))
+        .route(
+            "/api/company/companies/:company_id/api-catalog",
+            get(company_api_catalog),
+        )
+        .route(
+            "/api/company/companies/:company_id",
+            get(get_company)
+                .patch(patch_company)
+                .delete(delete_company),
+        )
+        .route(
+            "/api/company/companies/:company_id/import-paperclip-home",
+            post(import_paperclip_home),
+        )
         .route(
             "/api/company/companies/:company_id/export",
             get(export_company_json),
@@ -448,7 +466,8 @@ async fn list_companies(
         return Err(no_db());
     };
     let rows = sqlx::query_as::<_, CompanyRow>(
-        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix, created_at::text
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
            FROM companies ORDER BY display_name"#,
     )
     .fetch_all(pool)
@@ -462,13 +481,359 @@ async fn list_companies(
     Ok(Json(json!({ "companies": rows })))
 }
 
-#[derive(sqlx::FromRow, Serialize)]
+async fn get_company(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let row = sqlx::query_as::<_, CompanyRow>(
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
+           FROM companies WHERE id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(c) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+    };
+    Ok(Json(json!({ "company": c })))
+}
+
+#[derive(Deserialize, Default)]
+struct PatchCompanyBody {
+    #[serde(default)]
+    display_name: Option<String>,
+    /// `None` = omit field; `Some(None)` = clear; `Some(Some(s))` = set.
+    #[serde(default)]
+    hsmii_home: Option<Option<String>>,
+    #[serde(default)]
+    context_markdown: Option<Option<String>>,
+}
+
+async fn patch_company(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<PatchCompanyBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let current = sqlx::query_as::<_, CompanyRow>(
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
+           FROM companies WHERE id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(mut c) = current else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+    };
+
+    if let Some(d) = &body.display_name {
+        let d = d.trim();
+        if d.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "display_name cannot be empty" })),
+            ));
+        }
+        c.display_name = d.to_string();
+    }
+    if let Some(h) = body.hsmii_home {
+        c.hsmii_home = h.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    }
+    if let Some(cm) = body.context_markdown {
+        if let Some(ref text) = cm {
+            if text.len() > MAX_COMPANY_CONTEXT_MARKDOWN_BYTES {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "context_markdown exceeds max {} bytes",
+                            MAX_COMPANY_CONTEXT_MARKDOWN_BYTES
+                        )
+                    })),
+                ));
+            }
+        }
+        c.context_markdown = cm.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    }
+
+    let updated = sqlx::query_as::<_, CompanyRow>(
+        r#"UPDATE companies SET
+               display_name = $2,
+               hsmii_home = $3,
+               context_markdown = $4,
+               updated_at = now()
+           WHERE id = $1
+           RETURNING id, slug, display_name, hsmii_home, issue_key_prefix,
+                     context_markdown, created_at::text"#,
+    )
+    .bind(company_id)
+    .bind(&c.display_name)
+    .bind(&c.hsmii_home)
+    .bind(&c.context_markdown)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "company": updated })))
+}
+
+#[derive(Deserialize)]
+struct DeleteCompanyQuery {
+    /// Must equal `companies.slug` for this id (typo guard).
+    confirm_slug: String,
+}
+
+async fn delete_company(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Query(q): Query<DeleteCompanyQuery>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let confirm = q.confirm_slug.trim();
+    if confirm.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "query parameter confirm_slug required; must match the workspace slug exactly",
+                "example": format!("/api/company/companies/{company_id}?confirm_slug=my-workspace-slug"),
+            })),
+        ));
+    }
+    let row: Option<(String,)> = sqlx::query_as("SELECT slug FROM companies WHERE id = $1")
+        .bind(company_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    let Some((slug,)) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+    };
+    if slug != confirm {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "confirm_slug does not match this workspace",
+                "slug": slug,
+            })),
+        ));
+    }
+    let res = sqlx::query("DELETE FROM companies WHERE id = $1")
+        .bind(company_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    if res.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "deleted_id": company_id,
+            "deleted_slug": slug,
+        })),
+    ))
+}
+
+async fn import_paperclip_home(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    paperclip_import::import_paperclip_pack(pool, company_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })
+}
+
+/// Static catalog of Company OS HTTP routes. `{company_id}` / `{task_id}` are placeholders.
+fn company_os_api_catalog_endpoints() -> Value {
+    json!([
+        { "scope": "company", "methods": ["GET", "PATCH", "DELETE"], "path": "/api/company/companies/{company_id}?confirm_slug=", "summary": "Company record; PATCH updates context_markdown, display_name, hsmii_home; DELETE removes workspace and cascades (confirm_slug must match slug)" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/api-catalog", "summary": "Discovery: this list + company" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/import-paperclip-home", "summary": "Import Paperclip pack agents from hsmii_home/agents and skills index into context" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/export", "summary": "Export bundle JSON" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/spend/summary", "summary": "Spend rollup" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/governance/events", "summary": "List / append governance events" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/policies/rules", "summary": "Policy rules" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/policies/evaluate", "summary": "Evaluate policy for an action" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/goals", "summary": "Goals tree" },
+        { "scope": "company", "methods": ["PATCH"], "path": "/api/company/companies/{company_id}/goals/{goal_id}", "summary": "Update goal" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/tasks", "summary": "List / create tasks" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/tasks/queue", "summary": "Filtered task queue (tabs)" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/spawn-rules", "summary": "Spawn rules" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/tasks/{task_id}/spawn-subagents", "summary": "Spawn subtasks from rules" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/tasks/{task_id}/handoffs", "summary": "Task handoffs" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/improvement-runs", "summary": "Improvement runs" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/go-live-checklist", "summary": "Go-live checklist" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/go-live-checklist/seed", "summary": "Seed checklist items" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/agents", "summary": "Workforce agents registry" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/org", "summary": "Org chart" },
+        { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/agents/{agent_id}", "summary": "Update or delete agent row (delete clears direct reports’ manager link)" },
+        { "scope": "task", "methods": ["PATCH"], "path": "/api/company/tasks/{task_id}/sla", "summary": "Task SLA fields" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/decision", "summary": "Policy decision on task" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/checkout", "summary": "Lease task to an agent ref" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/release", "summary": "Release checkout" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/run-telemetry", "summary": "Append run snapshot / log tail" },
+        { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context_markdown + workforce agent profile" },
+        { "scope": "global", "methods": ["GET"], "path": "/api/company/health", "summary": "Postgres connectivity" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/import", "summary": "Import company bundle" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/{handoff_id}/review", "summary": "Review handoff" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/improvement-runs/{run_id}/decision", "summary": "Decision on improvement run" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/go-live-checklist/{item_id}/complete", "summary": "Complete checklist item" }
+    ])
+}
+
+async fn company_api_catalog(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let row = sqlx::query_as::<_, CompanyRow>(
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
+           FROM companies WHERE id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(c) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+    };
+    Ok(Json(json!({
+        "api_version": "1",
+        "kind": "company-os.company-api",
+        "description": "This workspace is a namespaced HTTP API. All company-scoped routes live under /api/company/companies/{company_id}/…; task-scoped routes use /api/company/tasks/{task_id}/… (tasks carry their own company_id).",
+        "company": c,
+        "base_path": format!("/api/company/companies/{company_id}"),
+        "interface_model": company_os_interface_model(),
+        "endpoints": company_os_api_catalog_endpoints(),
+    })))
+}
+
+/// Product thesis for agents and integrators: company-as-algorithm, API-first, funnel as control surface.
+fn company_os_interface_model() -> Value {
+    json!({
+        "version": 2,
+        "thesis": [
+            "The primary interface to a company is an API consumed by agents; people connect to the company through those agents.",
+            "The funnel is an algorithm: who controls the funnel shapes operational reality; algorithmic mediation means consensus is not automatic—govern who manages which decision points.",
+            "The company is a graph of algorithms (policies, tasks, goals, spawn rules, handoffs, spend, SOPs); leadership transparency is documentation plus visualization of workflows.",
+            "Target: dozens of explicit decision points, every tool and branch visible—20+ algorithmic decisions across the graph, not a black box.",
+            "Humans write the rules; AIs execute within them. Prefer versioned control planes over opaque retraining (Meta-Harness direction: policy/version history as steering)."
+        ],
+        "operating_model": {
+            "ai_managed_sops": "Standard operating procedures are machine-checkable; a human layer sets intent and exceptions, a SOP layer encodes procedure, an AI execution layer runs steps within guardrails.",
+            "three_layers": {
+                "human_layer": "Sets goals, approves exceptions, owns policy change and accountability.",
+                "sop_layer": "Structured procedures, checklists, and eligibility encoded for automation.",
+                "ai_execution_layer": "Agents and jobs that call tools under permissions, triggers, and guardrails."
+            },
+            "seven_department_functions": [
+                "procurement",
+                "sales",
+                "marketing",
+                "engineering",
+                "product_management",
+                "security",
+                "security_operations_center"
+            ],
+            "note": "Departments are first-class algorithm bundles (policies + tasks + tools + metrics), not only org-chart labels."
+        },
+        "control_plane_elements": {
+            "trigger_conditions": "What starts a run, escalates, or spawns work (rules, webhooks, schedules—partially in spawn rules and jobs today).",
+            "decision_tree": "Branching outcomes from policy evaluation, task decision_mode, and governance choices.",
+            "tool_permissions": "Which identities may invoke which capabilities; maps to checkout, policy rules, and future scoped API keys.",
+            "guardrails": "Blocked / admin_required modes, budgets, SLA escalation, improvement-run gates.",
+            "success_metrics": "Spend rollups, task throughput, improvement metrics—extend per department bundle.",
+            "version_history": "Immutable governance events + export bundles; explicit versioning of rules/contracts preferred over silent model retraining."
+        },
+        "meta_harness": {
+            "principle": "Control replaces retraining: steer behavior with documented rule and contract versions rather than only updating weights.",
+            "direction": "Tie Meta-Harness-style loops to versioned artifacts (policies, SOPs, handoff contracts) and auditable decisions."
+        },
+        "decision_surface_today": {
+            "policy_rules": "risk bands and decision_mode (auto / admin_required / blocked) per action type",
+            "task_decisions": "POST /tasks/{id}/decision updates decision_mode with actor + reason",
+            "task_states_and_queue": "queue views (overdue, waiting_admin, pending_approvals, blocked, …)",
+            "checkout_and_sla": "checkout lease, SLA patch, escalation jobs",
+            "governance_events": "append-only audit stream for human and system actions",
+            "improvement_runs_and_handoffs": "contracted review loops",
+            "spend_summary": "cost visibility; budget fields on workforce agents",
+            "company_context_markdown": "PATCH /companies/{id} with context_markdown (e.g. declaration excerpts, fee tables); GET /tasks/{task_id}/llm-context prepends it before the matched workforce agent profile"
+        },
+        "transparency_today": [
+            "This api-catalog and endpoint list",
+            "GET export bundle and governance events",
+            "Task list + goal tree + (UI) console charts",
+            "Run telemetry snapshots on tasks"
+        ],
+        "north_star": {
+            "department_algorithm_bundles": "Each of the seven functions has a defined policy+task+tool+metric surface in the API.",
+            "decision_point_inventory": "Enumerate 20+ decision types with owners and endpoints.",
+            "workflow_graph": "Live graph visualization of the company algorithm",
+            "sop_as_code": "SOPs versioned alongside policies; AI execution only inside declared permissions"
+        }
+    })
+}
+
+#[derive(sqlx::FromRow, Serialize, Clone)]
 struct CompanyRow {
     id: Uuid,
     slug: String,
     display_name: String,
     hsmii_home: Option<String>,
     issue_key_prefix: String,
+    context_markdown: Option<String>,
     created_at: String,
 }
 
@@ -499,7 +864,8 @@ async fn create_company(
     let row: Result<CompanyRow, sqlx::Error> = sqlx::query_as::<_, CompanyRow>(
         r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, slug, display_name, hsmii_home, issue_key_prefix, created_at::text"#,
+           RETURNING id, slug, display_name, hsmii_home, issue_key_prefix,
+                     context_markdown, created_at::text"#,
     )
     .bind(&slug)
     .bind(&display_name)

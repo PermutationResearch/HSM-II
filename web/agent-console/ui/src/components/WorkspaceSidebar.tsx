@@ -1,10 +1,16 @@
 "use client";
 
-import { Bot, ChevronDown, FolderKanban, Inbox, LayoutDashboard, Plus, Sparkles } from "lucide-react";
+import { Bot, ChevronDown, FolderKanban, Inbox, LayoutDashboard, Loader2, Plus, Sparkles, Trash2 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { CompaniesShItem } from "../hooks/useCompaniesShCatalog";
-import { companiesShInstallPath, isPaperclipPack } from "../hooks/useCompaniesShCatalog";
+import {
+  companiesShInstallPath,
+  findCompanyByPackFolder,
+  findExistingCompanyForCatalogPack,
+  isPaperclipPack,
+  slugBaseFromCatalogItem,
+} from "../hooks/useCompaniesShCatalog";
 import { cn } from "../lib/utils";
 
 /** Matches `NavId` in app/page.tsx — keep in sync when adding views */
@@ -23,7 +29,7 @@ export type WorkspaceConsoleView =
 export type WorkspaceSidebarProps = {
   workspaceLabel: string;
   workspaceInitial: string;
-  companies: { id: string; display_name: string }[];
+  companies: { id: string; display_name: string; slug: string; hsmii_home?: string | null }[];
   selectedCompanyId: string | null;
   onSelectCompany: (id: string) => void;
   view: WorkspaceConsoleView;
@@ -31,13 +37,20 @@ export type WorkspaceSidebarProps = {
   dashboardLiveCount: number;
   inboxCount: number;
   projects: { id: string; name: string }[];
-  agents: { id: string; name: string; liveCount: number }[];
+  /** `id` = persona string (task owner / checkout); `registryAgentId` when this row exists in workforce roster */
+  agents: { id: string; name: string; liveCount: number; registryAgentId: string | null }[];
   /** Highlighted agent from sidebar — matches task `owner_persona` / `checked_out_by` */
   selectedAgentPersona?: string | null;
   /** Opens Inbox & tasks scoped to that persona (tasks + governance) */
   onSelectAgent?: (persona: string) => void;
+  /** DELETE roster row; only shown when `registryAgentId` is set (task-only names have no row to delete) */
+  onDeleteRegistryAgent?: (registryAgentId: string, personaId: string) => void;
+  /** Jump to workforce form (e.g. Team & roles tab) */
+  onAddRegistryAgent?: () => void;
   onNewIssue: () => void;
   onOpenOnboarding?: () => void;
+  /** Permanently remove a workspace from Company OS (tasks, agents, goals cascade). */
+  onDeleteCompany?: (company: { id: string; slug: string; display_name: string }) => Promise<void>;
   apiBase: string;
   /** [companies.sh](https://companies.sh/) open directory — pre-seed Company OS workspaces */
   catalog?: {
@@ -145,15 +158,20 @@ export function WorkspaceSidebar({
   agents,
   selectedAgentPersona = null,
   onSelectAgent,
+  onDeleteRegistryAgent,
+  onAddRegistryAgent,
   onNewIssue,
   onOpenOnboarding,
+  onDeleteCompany,
   apiBase,
   catalog,
   onCreateFromCatalog,
 }: WorkspaceSidebarProps) {
   const [coOpen, setCoOpen] = useState(false);
   const [workspaceSearch, setWorkspaceSearch] = useState("");
-  const [catalogCreating, setCatalogCreating] = useState<string | null>(null);
+  /** `owner/repo/slug` while install + import runs for that pack */
+  const [catalogCreatingPath, setCatalogCreatingPath] = useState<string | null>(null);
+  const [deletingCompanyId, setDeletingCompanyId] = useState<string | null>(null);
   const [projOpen, setProjOpen] = useState(true);
   const [agOpen, setAgOpen] = useState(true);
   const [devOpen, setDevOpen] = useState(false);
@@ -223,19 +241,24 @@ export function WorkspaceSidebar({
               <div className="max-h-[min(60vh,380px)] overflow-y-auto">
                 {filteredLocal.length > 0 ? (
                   <>
-                    <div className="px-2 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-[#666666]">
-                      Your companies
+                    <div className="px-2 py-1.5">
+                      <div className="font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-[#666666]">
+                        Your companies
+                      </div>
+                      <p className="mt-1 font-mono text-[9px] uppercase leading-snug tracking-[0.06em] text-[#555555]">
+                        Row = switch · Slug = id · Trash = del db only
+                      </p>
                     </div>
                     <ul className="pb-2">
                       {filteredLocal.map((c) => (
-                        <li key={c.id}>
+                        <li key={c.id} className="flex items-stretch border-b border-[#1a1a1a] last:border-b-0">
                           <button
                             type="button"
                             className={cn(
-                              "w-full px-3 py-2 text-left text-sm transition-colors duration-200 ease-out",
+                              "min-w-0 flex-1 px-3 py-2 text-left text-sm transition-colors duration-200 ease-out",
                               selectedCompanyId === c.id
-                                ? "border-l-2 border-[#D71921] bg-[#1A1A1A] text-white"
-                                : "text-[#999999] hover:bg-[#1A1A1A]"
+                                ? "border-l-2 border-[#5B9BF6] bg-[#1A1A1A] text-[#E8E8E8]"
+                                : "text-[#999999] hover:bg-[#1A1A1A] hover:text-[#E8E8E8]"
                             )}
                             onClick={() => {
                               onSelectCompany(c.id);
@@ -243,8 +266,53 @@ export function WorkspaceSidebar({
                               setWorkspaceSearch("");
                             }}
                           >
-                            {c.display_name}
+                            <span className="block truncate font-sans text-[13px] font-medium leading-tight">
+                              {c.display_name}
+                            </span>
+                            <span className="mt-1 flex min-w-0 items-baseline gap-1 truncate">
+                              <span className="shrink-0 font-mono text-[8px] font-semibold uppercase tracking-[0.12em] text-[#666666]">
+                                Id
+                              </span>
+                              <span className="min-w-0 truncate font-mono text-[9px] uppercase tracking-[0.06em] text-[#888888]">
+                                {c.slug}
+                              </span>
+                            </span>
                           </button>
+                          {onDeleteCompany ? (
+                            <button
+                              type="button"
+                              title={`Remove from database: ${c.display_name} (${c.slug})`}
+                              aria-label={`Delete workspace ${c.display_name}`}
+                              disabled={deletingCompanyId === c.id}
+                              className={cn(
+                                "flex w-11 shrink-0 flex-col items-center justify-center gap-0.5 text-[#666666] transition-colors duration-200 ease-out hover:bg-[#2a1212] hover:text-[#D71921]",
+                                deletingCompanyId === c.id && "cursor-wait opacity-50"
+                              )}
+                              onClick={async (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setDeletingCompanyId(c.id);
+                                try {
+                                  await onDeleteCompany({
+                                    id: c.id,
+                                    slug: c.slug,
+                                    display_name: c.display_name,
+                                  });
+                                } finally {
+                                  setDeletingCompanyId(null);
+                                }
+                              }}
+                            >
+                              {deletingCompanyId === c.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin stroke-[1.5]" aria-hidden />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5 stroke-[1.5]" aria-hidden />
+                              )}
+                              <span className="font-mono text-[7px] font-semibold uppercase tracking-[0.14em]">
+                                {deletingCompanyId === c.id ? "…" : "Del"}
+                              </span>
+                            </button>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -269,6 +337,12 @@ export function WorkspaceSidebar({
                         >
                           open directory
                         </a>
+                        <span className="mt-1 block font-normal normal-case tracking-normal text-[#484848]">
+                          With{" "}
+                          <code className="text-[#666666]">HSM_COMPANY_PACK_INSTALL_ROOT</code> on the Next server, picking
+                          a pack runs <code className="text-[#666666]">npx companies.sh add owner/repo/slug</code> there
+                          and links <code className="text-[#666666]">hsmii_home</code>.
+                        </span>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1">
                         <button
@@ -314,6 +388,15 @@ export function WorkspaceSidebar({
                           paperclipai/companies →
                         </a>
                       </div>
+                      {directoryScope === "paperclip" ? (
+                        <p className="mt-2 rounded-md border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-2.5 py-2 font-mono text-[10px] leading-snug text-[#9ecbff]">
+                          <strong className="font-semibold text-[#c8e1ff]">Important:</strong> each template run installs
+                          files (when <code className="text-[#79b8ff]">HSM_COMPANY_PACK_INSTALL_ROOT</code> is set) and{" "}
+                          <strong className="text-[#c8e1ff]">imports every agent</strong> into Team &amp; roles and{" "}
+                          <strong className="text-[#c8e1ff]">indexes pack skills</strong> into company context. Keep the
+                          menu open until the row stops spinning.
+                        </p>
+                      ) : null}
                     </div>
                     {catalog.loading ? (
                       <p className="px-3 py-2 font-mono text-xs text-[#666666]">[LOADING DIRECTORY…]</p>
@@ -323,7 +406,11 @@ export function WorkspaceSidebar({
                       <ul className="pb-2">
                         {filteredCatalog.slice(0, 80).map((it) => {
                           const path = companiesShInstallPath(it);
-                          const busy = catalogCreating === it.slug;
+                          const busy = catalogCreatingPath === path;
+                          const packBase = slugBaseFromCatalogItem(it);
+                          const existingWs =
+                            findExistingCompanyForCatalogPack(companies, packBase) ??
+                            findCompanyByPackFolder(companies, it.slug);
                           return (
                             <li key={`${it.repo}/${it.slug}`}>
                               <button
@@ -334,24 +421,51 @@ export function WorkspaceSidebar({
                                   "hover:bg-[#1A1A1A]"
                                 )}
                                 onClick={async () => {
+                                  if (existingWs) {
+                                    // Already have a local company for this pack — just select it
+                                    onSelectCompany(existingWs.id);
+                                    setCoOpen(false);
+                                    setWorkspaceSearch("");
+                                    // Still trigger createFromCatalog so it re-runs import
+                                    // for agents/skills, but don't block the UI on it
+                                    if (onCreateFromCatalog) {
+                                      onCreateFromCatalog(it).catch(() => {});
+                                    }
+                                    return;
+                                  }
                                   if (!onCreateFromCatalog) return;
-                                  setCatalogCreating(it.slug);
+                                  setCatalogCreatingPath(path);
                                   try {
                                     await onCreateFromCatalog(it);
                                     setCoOpen(false);
                                     setWorkspaceSearch("");
                                   } finally {
-                                    setCatalogCreating(null);
+                                    setCatalogCreatingPath(null);
                                   }
                                 }}
                               >
                                 <div className="flex flex-wrap items-center gap-1.5">
+                                  {busy ? (
+                                    <Loader2
+                                      className="h-3.5 w-3.5 shrink-0 animate-spin text-[#58a6ff]"
+                                      aria-hidden
+                                    />
+                                  ) : null}
                                   <span className="text-sm text-[#E8E8E8]">{it.name}</span>
                                   {isPaperclipPack(it) ? (
                                     <span className="rounded border border-[#58a6ff]/35 bg-[#58a6ff]/10 px-1.5 py-px font-mono text-[9px] font-semibold uppercase tracking-wide text-[#58a6ff]">
                                       Paperclip
                                     </span>
                                   ) : null}
+                                  {existingWs ? (
+                                    <span className="rounded border border-[#333333] bg-[#1A1A1A] px-1.5 py-px font-mono text-[9px] font-medium uppercase tracking-wide text-[#888888]">
+                                      Open workspace
+                                    </span>
+                                  ) : (
+                                    <span className="rounded border border-[#333333] px-1.5 py-px font-mono text-[9px] font-medium uppercase tracking-wide text-[#666666]">
+                                      Add
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="mt-0.5 font-mono text-[10px] uppercase tracking-wide text-[#666666]">
                                   {path}
@@ -378,6 +492,39 @@ export function WorkspaceSidebar({
             </div>
           ) : null}
         </div>
+
+        {companies.length > 1 ? (
+          <div className="mt-3 border-t border-[#222222] pt-2">
+            <p className="mb-1 px-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-[#666666]">
+              Your companies
+            </p>
+            <ul className="max-h-[min(7.5rem,28vh)] space-y-0.5 overflow-y-auto pr-0.5">
+              {companies.map((c) => {
+                const selected = selectedCompanyId === c.id;
+                return (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      title={`Switch to ${c.display_name}`}
+                      onClick={() => {
+                        onSelectCompany(c.id);
+                        setCoOpen(false);
+                      }}
+                      className={cn(
+                        "w-full truncate rounded py-1.5 pl-2 pr-2 text-left text-sm transition-colors duration-200 ease-out",
+                        selected
+                          ? "border-l-2 border-[#D71921] bg-[#1A1A1A] pl-[6px] text-white"
+                          : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
+                      )}
+                    >
+                      {c.display_name}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ) : null}
 
         <button
           type="button"
@@ -461,17 +608,32 @@ export function WorkspaceSidebar({
           </div>
         ) : null}
 
-        <button
-          type="button"
-          className="mb-1 mt-4 flex w-full items-center justify-between px-2 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#666666]"
-          onClick={() => setAgOpen((o) => !o)}
-        >
-          <span className="flex items-center gap-1.5">
-            <Bot className="h-3.5 w-3.5" strokeWidth={1.5} />
-            Agents
-          </span>
-          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", agOpen && "rotate-180")} />
-        </button>
+        <div className="mb-1 mt-4 flex items-center justify-between gap-1 px-2">
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center justify-between py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#666666]"
+            onClick={() => setAgOpen((o) => !o)}
+          >
+            <span className="flex items-center gap-1.5">
+              <Bot className="h-3.5 w-3.5" strokeWidth={1.5} />
+              Agents
+            </span>
+            <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", agOpen && "rotate-180")} />
+          </button>
+          {onAddRegistryAgent ? (
+            <button
+              type="button"
+              title="Add workforce agent (opens Team & roles)"
+              onClick={(e) => {
+                e.stopPropagation();
+                onAddRegistryAgent();
+              }}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[#333333] text-[#999999] transition-colors hover:border-[#5B9BF6] hover:text-[#E8E8E8]"
+            >
+              <Plus className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
+          ) : null}
+        </div>
         {agOpen ? (
           <div className="max-h-56 space-y-0.5 overflow-y-auto">
             {sortedAgents.length === 0 ? (
@@ -479,24 +641,22 @@ export function WorkspaceSidebar({
             ) : (
               <>
                 <p className="mb-1.5 px-2 font-mono text-[10px] font-normal normal-case leading-snug tracking-normal text-[#555555]">
-                  Click a name to open <span className="text-[#777777]">Inbox &amp; tasks</span> with the list limited
-                  to that persona id (task owner or checkout).
+                  Click a name to filter <span className="text-[#777777]">Inbox &amp; tasks</span>.{" "}
+                  <span className="text-[#484848]">
+                    Trash deletes the workforce roster row; names that only appear on tasks disappear when you reassign
+                    those tasks.
+                  </span>
                 </p>
                 {sortedAgents.map((a) => {
                 const active = selectedAgentPersona === a.id;
-                return (
-                  <button
-                    key={a.id}
-                    type="button"
-                    title={`Filter inbox to tasks where owner or checked-out-by is “${a.id}”`}
-                    onClick={() => onSelectAgent?.(a.id)}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
-                      active
-                        ? "bg-white text-black"
-                        : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
-                    )}
-                  >
+                const rowTone = cn(
+                  "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
+                  active
+                    ? "bg-white text-black"
+                    : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
+                );
+                const label = (
+                  <>
                     <span className="min-w-0 truncate font-mono uppercase tracking-[0.04em]">{a.name}</span>
                     {a.liveCount > 0 ? (
                       <span
@@ -510,6 +670,56 @@ export function WorkspaceSidebar({
                         {a.liveCount} live
                       </span>
                     ) : null}
+                  </>
+                );
+                if (a.registryAgentId && onDeleteRegistryAgent) {
+                  return (
+                    <div
+                      key={a.id}
+                      className={cn(
+                        "flex w-full items-stretch gap-0.5 overflow-hidden rounded-md",
+                        active ? "bg-white text-black" : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
+                      )}
+                    >
+                      <button
+                        type="button"
+                        title={`Filter inbox to tasks where owner or checked-out-by is “${a.id}”`}
+                        onClick={() => onSelectAgent?.(a.id)}
+                        className={cn(
+                          "flex min-w-0 flex-1 items-center justify-between gap-2 py-1.5 pl-3 pr-1 text-left text-[13px]",
+                          active ? "" : "rounded-l-md"
+                        )}
+                      >
+                        {label}
+                      </button>
+                      <button
+                        type="button"
+                        title="Remove this agent from the workforce roster (tasks are unchanged)"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteRegistryAgent(a.registryAgentId!, a.id);
+                        }}
+                        className={cn(
+                          "flex w-8 shrink-0 items-center justify-center rounded-r-md border-l transition-colors",
+                          active
+                            ? "border-[#DDDDDD] text-[#333333] hover:bg-[#EAEAEA]"
+                            : "border-[#222222] text-[#666666] hover:bg-[#1A1A1A] hover:text-[#D71921]"
+                        )}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    title={`Filter inbox to tasks where owner or checked-out-by is “${a.id}”`}
+                    onClick={() => onSelectAgent?.(a.id)}
+                    className={rowTone}
+                  >
+                    {label}
                   </button>
                 );
               })}

@@ -1,17 +1,60 @@
 "use client";
 
+import Link from "next/link";
+import {
+  Building2,
+  Download,
+  LayoutDashboard,
+  LayoutList,
+  Loader2,
+  MonitorDot,
+  Paperclip,
+  Plus,
+  Settings2,
+  Store,
+  Trash2,
+  Upload,
+  Users,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OnboardingWizard, OnboardDraft } from "./components/OnboardingWizard";
 import { CompanyAgentsPanel, type CoAgentRow } from "./components/CompanyAgentsPanel";
+import { CompanyContextPanel } from "./components/CompanyContextPanel";
 import { PolicyQueuePanel } from "./components/PolicyQueuePanel";
 import type { QueueView } from "./lib/inboxPlainLanguage";
 import { TaskListPanel, type TaskListDashboardFilter } from "./components/TaskListPanel";
 import { GoalGovernancePanel } from "./components/GoalGovernancePanel";
 import { OrchestrationPanels } from "./components/OrchestrationPanels";
 import { AntiSycophancyPanel } from "./components/AntiSycophancyPanel";
-import { useCompaniesShCatalog, type CompaniesShItem } from "../ui/src/hooks/useCompaniesShCatalog";
+import { CouncilSocraticPanel } from "./components/CouncilSocraticPanel";
+import { SopComposerPanel } from "./components/SopComposerPanel";
+import { PackMarketplacePanel } from "./components/PackMarketplacePanel";
+import { SopReferenceExamples } from "./components/SopReferenceExamples";
+import { sopReferenceExamples } from "./lib/sop-examples";
+import type { SopExampleDocument } from "./lib/sop-examples-types";
+import { loadCustomSops } from "./lib/sop-storage";
+import { TrailGraphView, type GraphLink, type GraphNode, type TrailGraphPayload } from "./components/TrailGraphView";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
+import {
+  useCompaniesShCatalog,
+  type CompaniesShItem,
+  slugBaseFromCatalogItem,
+  findExistingCompanyForCatalogPack,
+  findCompanyByPackFolder,
+  isPaperclipPack,
+} from "../ui/src/hooks/useCompaniesShCatalog";
 import { WorkspaceSidebar, type WorkspaceConsoleView } from "../ui/src/components/WorkspaceSidebar";
 import { Dashboard, type DashboardDrillDown } from "../ui/src/pages/Dashboard";
+import { getConsoleApiBase } from "./lib/console-api-base";
+import { cn } from "./lib/utils";
+
+const CO_WORKSPACE_TAB_ICONS = {
+  work: LayoutList,
+  packs: Store,
+  sops: Paperclip,
+  team: Users,
+  advanced: Settings2,
+} as const;
 
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -22,7 +65,6 @@ function downloadJson(filename: string, data: unknown) {
   URL.revokeObjectURL(a.href);
 }
 
-const defaultApi = "http://127.0.0.1:3847";
 
 type TrailResp = { lines: Record<string, unknown>[]; path: string };
 type Stats = {
@@ -32,13 +74,6 @@ type Stats = {
   agents_enabled: number;
   tasks_in_progress: number;
   company_os?: boolean;
-};
-
-type GraphNode = { id: string; label: string; kind: string };
-type GraphLink = { source: string; target: string; rel?: string };
-type TrailGraphPayload = {
-  source: string;
-  graph: { nodes: GraphNode[]; links: GraphLink[] };
 };
 
 type SearchResp = {
@@ -72,6 +107,7 @@ type CompanyRow = {
   display_name: string;
   hsmii_home?: string | null;
   issue_key_prefix?: string;
+  context_markdown?: string | null;
   created_at: string;
 };
 type CoHealth = { postgres_configured: boolean; postgres_ok: boolean };
@@ -122,7 +158,7 @@ type PolicyRule = {
 };
 
 export default function ConsolePage() {
-  const api = process.env.NEXT_PUBLIC_API_BASE ?? defaultApi;
+  const api = useMemo(() => getConsoleApiBase(), []);
   const [view, setView] = useState<NavId>("command");
   const [stats, setStats] = useState<Stats | null>(null);
   const [trail, setTrail] = useState<TrailResp | null>(null);
@@ -152,6 +188,9 @@ export default function ConsolePage() {
   const [coSpendOpen, setCoSpendOpen] = useState(false);
   const [coTasks, setCoTasks] = useState<TaskRow[]>([]);
   const [coErr, setCoErr] = useState<string | null>(null);
+  /** Shown after a successful Paperclip/directory import (agents + skills index). */
+  const [coPackImportOk, setCoPackImportOk] = useState<string | null>(null);
+  const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null);
   const [coNewSlug, setCoNewSlug] = useState("");
   const [coNewName, setCoNewName] = useState("");
   const [coNewTaskTitle, setCoNewTaskTitle] = useState("");
@@ -183,7 +222,9 @@ export default function ConsolePage() {
   const [coQueueView, setCoQueueView] = useState<QueueView>("all");
   const [coQueueTasks, setCoQueueTasks] = useState<TaskRow[]>([]);
   /** Splits Company OS into daily work vs team setup vs power tools. */
-  const [coWorkspaceTab, setCoWorkspaceTab] = useState<"work" | "team" | "advanced">("work");
+  const [coWorkspaceTab, setCoWorkspaceTab] = useState<"work" | "packs" | "sops" | "team" | "advanced">("work");
+  /** Workspace-scoped custom SOP templates (browser localStorage); merged into reference tabs. */
+  const [customSops, setCustomSops] = useState<SopExampleDocument[]>([]);
   const [coSlaDueAt, setCoSlaDueAt] = useState<Record<string, string>>({});
   const [coSlaEscAt, setCoSlaEscAt] = useState<Record<string, string>>({});
   const [coSlaPol, setCoSlaPol] = useState<Record<string, string>>({});
@@ -221,6 +262,14 @@ export default function ConsolePage() {
       /* ignore */
     }
   }, []);
+
+  useEffect(() => {
+    if (!coSel) {
+      setCustomSops([]);
+      return;
+    }
+    setCustomSops(loadCustomSops(coSel));
+  }, [coSel]);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -543,25 +592,225 @@ export default function ConsolePage() {
         return;
       }
       setCoErr(null);
-      let base = item.slug
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^-|-$/g, "");
-      if (!base) base = "company";
+      setCoPackImportOk(null);
+
+      const paperclip = isPaperclipPack(item);
+      const repo = (item.repo ?? "").trim();
+      const packSlug = (item.slug ?? "").trim();
+      const base = slugBaseFromCatalogItem(item);
+
+      let freshCompanies: CompanyRow[] = [];
+      try {
+        const lr = await fetch(`${api}/api/company/companies`);
+        if (!lr.ok) throw new Error(`companies ${lr.status}`);
+        const lj = (await lr.json()) as { companies?: CompanyRow[] };
+        freshCompanies = lj.companies ?? [];
+      } catch (e) {
+        setCoErr(e instanceof Error ? e.message : String(e));
+        return;
+      }
+
+      const existingRow =
+        findExistingCompanyForCatalogPack(freshCompanies, base) ??
+        findCompanyByPackFolder(freshCompanies, packSlug);
+
+      const runInstall = async (): Promise<{ home: string | null; warning: string | null }> => {
+        if (!repo || !packSlug) return { home: null, warning: null };
+        try {
+          const ir = await fetch("/api/companies-sh/install", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ repo, slug: packSlug }),
+          });
+          const raw = await ir.text();
+          let ij = {} as {
+            skipped?: boolean;
+            hsmii_home?: string | null;
+            warning?: string;
+            error?: string;
+          };
+          if (raw.trim()) {
+            try {
+              ij = JSON.parse(raw);
+            } catch {
+              return { home: null, warning: raw.slice(0, 400) || `Pack install HTTP ${ir.status}` };
+            }
+          }
+          if (!ir.ok) {
+            return { home: null, warning: ij.error ?? `Pack install HTTP ${ir.status}` };
+          }
+          if (typeof ij.hsmii_home === "string" && ij.hsmii_home.length > 0) {
+            return { home: ij.hsmii_home, warning: null };
+          }
+          return { home: null, warning: ij.warning ?? null };
+        } catch (e) {
+          return { home: null, warning: e instanceof Error ? e.message : String(e) };
+        }
+      };
+
+      const runImport = async (cid: string): Promise<boolean> => {
+        const title = paperclip ? "Paperclip template" : "Pack";
+        try {
+          const ir = await fetch(`${api}/api/company/companies/${cid}/import-paperclip-home`, {
+            method: "POST",
+          });
+          const raw = await ir.text();
+          let ij = {} as {
+            error?: string;
+            agents_inserted?: number;
+            agents_skipped_existing?: number;
+            skills_indexed?: number;
+          };
+          if (raw.trim()) {
+            try {
+              ij = JSON.parse(raw);
+            } catch {
+              setCoPackImportOk(null);
+              setCoErr(
+                !ir.ok
+                  ? `${raw.slice(0, 400)} (${title})`
+                  : `${title}: import returned non-JSON (proxy or server error).`
+              );
+              return false;
+            }
+          }
+          if (!ir.ok) {
+            setCoPackImportOk(null);
+            setCoErr(
+              typeof ij.error === "string"
+                ? `${ij.error} (${title}: hsm_console must be running; pack files must exist at hsmii_home on that host.)`
+                : `${title} import failed (${ir.status})`
+            );
+            return false;
+          }
+          setCoErr(null);
+          const inserted = ij.agents_inserted ?? 0;
+          const skipped = ij.agents_skipped_existing ?? 0;
+          const skills = ij.skills_indexed ?? 0;
+          const bits: string[] = [];
+          if (inserted > 0) {
+            bits.push(`${inserted} new agent${inserted === 1 ? "" : "s"} added to Team & roles`);
+          }
+          if (skipped > 0) {
+            bits.push(`${skipped} agent${skipped === 1 ? "" : "s"} already in roster`);
+          }
+          if (skills > 0) {
+            bits.push(`${skills} skill${skills === 1 ? "" : "s"} indexed into company context`);
+          }
+          if (bits.length === 0) {
+            setCoPackImportOk(
+              paperclip
+                ? `${title}: roster up to date. If the pack has a skills/ folder, its index was refreshed in company context.`
+                : `${title}: synced from disk (no new agents).`
+            );
+          } else {
+            setCoPackImportOk(`${title}: ${bits.join(". ")}.`);
+          }
+          return true;
+        } catch (e) {
+          setCoPackImportOk(null);
+          setCoErr(e instanceof Error ? e.message : String(e));
+          return false;
+        }
+      };
+
+      if (existingRow) {
+        let home = (existingRow.hsmii_home ?? "").trim();
+        if (!home && repo && packSlug) {
+          const { home: installed, warning } = await runInstall();
+          if (warning && !installed) {
+            setCoErr(warning);
+            setCoSel(existingRow.id);
+            await loadCompanyOs(existingRow.id);
+            return;
+          }
+          if (installed) {
+            const pr = await fetch(`${api}/api/company/companies/${existingRow.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hsmii_home: installed }),
+            });
+            const pRaw = await pr.text();
+            let pj = {} as { error?: string };
+            if (pRaw.trim()) {
+              try {
+                pj = JSON.parse(pRaw);
+              } catch {
+                setCoErr(pRaw.slice(0, 280) || `PATCH company ${pr.status}`);
+                setCoSel(existingRow.id);
+                await loadCompanyOs(existingRow.id);
+                return;
+              }
+            }
+            if (!pr.ok) {
+              setCoErr(pj.error ?? `PATCH company ${pr.status}`);
+              setCoSel(existingRow.id);
+              await loadCompanyOs(existingRow.id);
+              return;
+            }
+            home = installed;
+          }
+        }
+        let paperclipImportOk = false;
+        if (home) {
+          // Paperclip / pack: always re-run import on pick so agents + skills index stay aligned with disk.
+          paperclipImportOk = await runImport(existingRow.id);
+        } else {
+          setCoErr(
+            paperclip
+              ? "Paperclip template needs files on this machine first. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server, then pick the template again: we run npx companies.sh add, set hsmii_home, then import every agents/*/AGENTS.md and index skills/*/SKILL.md into Company OS."
+              : "No local pack folder is linked yet. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server, then use this pack again so `npx companies.sh add` can materialize `agents/` and `skills/` on disk. Import does not clone from GitHub by itself."
+          );
+        }
+        setCoSel(existingRow.id);
+        await loadCompanyOs(existingRow.id);
+        if (paperclip && paperclipImportOk) {
+          setView("company");
+          requestAnimationFrame(() => setCoWorkspaceTab("team"));
+        }
+        return;
+      }
+
+      const { home: hsmii_home, warning: installWarn } = await runInstall();
+      if (installWarn && !hsmii_home) {
+        setCoErr(installWarn);
+      }
+
       const display_name = item.name.trim() || base;
       let slug = base;
       for (let i = 0; i < 8; i++) {
         const r = await fetch(`${api}/api/company/companies`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ slug, display_name, hsmii_home: null }),
+          body: JSON.stringify({
+            slug,
+            display_name,
+            hsmii_home: hsmii_home ?? undefined,
+          }),
         });
-        const j = (await r.json()) as { company?: { id: string }; error?: string };
+        const j = (await r.json()) as {
+          company?: { id: string; hsmii_home?: string | null };
+          error?: string;
+        };
         if (r.ok && j.company?.id) {
-          setCoSel(j.company.id);
-          await loadCompanyOs(j.company.id);
+          const cid = j.company.id;
+          const home = (j.company.hsmii_home ?? "").trim();
+          let paperclipImportOk = false;
+          if (home) {
+            paperclipImportOk = await runImport(cid);
+          } else if (!installWarn) {
+            setCoErr(
+              paperclip
+                ? "Paperclip: workspace created but no pack folder yet. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js host and pick this template again to install files and import agents + skills."
+                : "Workspace created without a pack path. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server and add this pack again to install files, then import will load agents and skills."
+            );
+          }
+          setCoSel(cid);
+          await loadCompanyOs(cid);
+          if (paperclip && paperclipImportOk) {
+            setView("company");
+            requestAnimationFrame(() => setCoWorkspaceTab("team"));
+          }
           return;
         }
         if (r.status === 409) {
@@ -573,7 +822,7 @@ export default function ConsolePage() {
       }
       setCoErr("Could not create company (slug conflict).");
     },
-    [api, coHealth, loadCompanyOs]
+    [api, coHealth, loadCompanyOs, setView]
   );
 
   useEffect(() => {
@@ -605,20 +854,101 @@ export default function ConsolePage() {
   const workspaceInitial = workspaceLabel.replace(/\s+/g, "").slice(0, 1) || "W";
 
   const sidebarAgents = useMemo(() => {
-    const m = new Map<string, { id: string; name: string; liveCount: number }>();
+    const m = new Map<string, { id: string; name: string; liveCount: number; registryAgentId: string | null }>();
     for (const a of coAgents) {
       if (a.status === "terminated") continue;
-      m.set(a.name, { id: a.name, name: a.name, liveCount: 0 });
+      m.set(a.name, { id: a.name, name: a.name, liveCount: 0, registryAgentId: a.id });
     }
     for (const t of coTasks) {
       const id = (t.owner_persona ?? t.checked_out_by ?? "").trim();
       if (!id) continue;
-      if (!m.has(id)) m.set(id, { id, name: id, liveCount: 0 });
+      if (!m.has(id)) m.set(id, { id, name: id, liveCount: 0, registryAgentId: null });
       const row = m.get(id)!;
       if (t.checked_out_by || /progress|doing|active/i.test(t.state)) row.liveCount += 1;
     }
     return Array.from(m.values());
   }, [coTasks, coAgents]);
+
+  const deleteRegistryAgentFromSidebar = useCallback(
+    async (registryAgentId: string, personaId: string) => {
+      if (!coSel) return;
+      if (
+        !window.confirm(
+          `Remove workforce agent "${personaId}" from this company?\n\nDirect reports move to the top of the org (their manager link is cleared). Tasks that still reference this name as owner_persona are unchanged.`
+        )
+      ) {
+        return;
+      }
+      setCoErr(null);
+      try {
+        const r = await fetch(`${api}/api/company/companies/${coSel}/agents/${registryAgentId}`, { method: "DELETE" });
+        const j = (await r.json()) as { error?: string };
+        if (!r.ok) throw new Error(j.error ?? r.statusText);
+        setFocusAgentPersona((cur) => (cur === personaId ? null : cur));
+        await loadCompanyOs();
+      } catch (e) {
+        setCoErr(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [api, coSel, loadCompanyOs]
+  );
+
+  const openTeamRolesForAgents = useCallback(() => {
+    setView("company");
+    setCoWorkspaceTab("team");
+  }, []);
+
+  const deleteCompanyFromSidebar = useCallback(
+    async (c: { id: string; slug: string; display_name: string }) => {
+      if (!coHealth?.postgres_configured) return;
+      if (
+        !window.confirm(
+          `Delete workspace "${c.display_name}"?\n\nSlug: ${c.slug}\n\nAll tasks, goals, workforce agents, governance, and spend rows for this workspace are removed from the database. Pack files on disk (if any) are not deleted.`
+        )
+      ) {
+        return;
+      }
+      setCoErr(null);
+      setCoPackImportOk(null);
+      try {
+        const r = await fetch(
+          `${api}/api/company/companies/${encodeURIComponent(c.id)}?confirm_slug=${encodeURIComponent(c.slug)}`,
+          { method: "DELETE" }
+        );
+        const raw = await r.text();
+        let msg: string | undefined;
+        if (raw.trim()) {
+          try {
+            const j = JSON.parse(raw) as { error?: string; ok?: boolean };
+            msg = j.error;
+          } catch {
+            msg = raw.slice(0, 280);
+          }
+        }
+        if (!r.ok) {
+          if (r.status === 405) {
+            throw new Error(
+              "Server rejected DELETE (405). Restart or rebuild hsm_console so it includes DELETE /api/company/companies/{id}."
+            );
+          }
+          if (r.status === 404) {
+            throw new Error(
+              msg ||
+                "Workspace not found (already removed?). If it keeps failing, run hsm_console and restart Next after changing HSM_CONSOLE_URL."
+            );
+          }
+          throw new Error(msg || `${r.status} ${r.statusText || "Request failed"}`);
+        }
+        if (c.id === coSel) {
+          setCoSel(null);
+        }
+        await loadCompanyOs();
+      } catch (e) {
+        setCoErr(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [api, coHealth?.postgres_configured, coSel, loadCompanyOs]
+  );
 
   const dashboardLiveCount = useMemo(
     () => coTasks.filter((t) => t.checked_out_by || /progress|doing|active/i.test(t.state)).length,
@@ -675,9 +1005,15 @@ export default function ConsolePage() {
       <WorkspaceSidebar
         workspaceLabel={workspaceLabel}
         workspaceInitial={workspaceInitial}
-        companies={coCompanies.map((c) => ({ id: c.id, display_name: c.display_name }))}
+        companies={coCompanies.map((c) => ({
+          id: c.id,
+          display_name: c.display_name,
+          slug: c.slug,
+          hsmii_home: c.hsmii_home,
+        }))}
         selectedCompanyId={coSel}
         onSelectCompany={(id) => {
+          setCoPackImportOk(null);
           setCoSel(id);
           void loadCompanyOs(id);
         }}
@@ -693,11 +1029,14 @@ export default function ConsolePage() {
           setView("company");
           setCoWorkspaceTab("work");
         }}
+        onDeleteRegistryAgent={coSel ? deleteRegistryAgentFromSidebar : undefined}
+        onAddRegistryAgent={coSel ? openTeamRolesForAgents : undefined}
         onNewIssue={() => {
           setView("company");
           setCoWorkspaceTab("work");
         }}
         onOpenOnboarding={() => setView("onboard")}
+        onDeleteCompany={coHealth?.postgres_configured ? deleteCompanyFromSidebar : undefined}
         apiBase={api}
         catalog={{
           items: companiesSh.items,
@@ -714,6 +1053,14 @@ export default function ConsolePage() {
             : "min-h-screen min-w-0 flex-1 overflow-auto px-6 py-5"
         }
       >
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#30363D] bg-[#0d1117] px-3 py-2 text-sm text-[#8B949E]">
+          <span>
+            New workspace UI: dashboard, agents, issues —{" "}
+            <Link href="/workspace/dashboard" className="font-mono text-[#58a6ff] underline-offset-4 hover:underline">
+              /workspace
+            </Link>
+          </span>
+        </div>
         {err && (
           <div className="mb-4 rounded-2xl border border-[#D71921] bg-card px-3 py-2 text-sm text-[#E8E8E8]">
             <span className="font-mono text-[11px] uppercase tracking-wide text-[#D71921]">[ERROR]</span> {err} — is{" "}
@@ -758,31 +1105,41 @@ export default function ConsolePage() {
                 {coErr}
               </div>
             )}
+            {coPackImportOk && (
+              <div className="mb-4 rounded border border-emerald-900/50 bg-emerald-950/25 px-3 py-2 text-sm text-emerald-100/95">
+                {coPackImportOk}
+              </div>
+            )}
             <div className="mb-4 flex flex-wrap items-center justify-end gap-2 border-b border-[#222222] pb-4">
-              <span className="mr-auto font-mono text-[10px] uppercase tracking-[0.08em] text-[#666666]">
+              <span className="mr-auto flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-[#666666]">
+                <Paperclip className="h-3.5 w-3.5 text-[#8B949E]" aria-hidden />
                 Dashboard view
               </span>
-              <div className="inline-flex rounded-full border border-[#333333] p-0.5">
+              <div className="inline-flex gap-px rounded-md border border-[#30363D] bg-[#0d1117] p-px">
                 <button
                   type="button"
                   onClick={() => persistCommandDashboardLayout("nothing")}
-                  className={
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide transition-colors",
                     commandDashboardLayout === "nothing"
-                      ? "rounded-full bg-white px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-black"
-                      : "rounded-full px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-[#999999] transition-colors hover:text-white"
-                  }
+                      ? "bg-[#21262d] text-white ring-1 ring-white/10"
+                      : "text-[#999999] hover:bg-white/5 hover:text-white"
+                  )}
                 >
+                  <LayoutDashboard className="h-3.5 w-3.5 opacity-80" aria-hidden />
                   Overview
                 </button>
                 <button
                   type="button"
                   onClick={() => persistCommandDashboardLayout("admin")}
-                  className={
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide transition-colors",
                     commandDashboardLayout === "admin"
-                      ? "rounded-full bg-white px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-black"
-                      : "rounded-full px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-wide text-[#999999] transition-colors hover:text-white"
-                  }
+                      ? "bg-[#21262d] text-white ring-1 ring-white/10"
+                      : "text-[#999999] hover:bg-white/5 hover:text-white"
+                  )}
                 >
+                  <MonitorDot className="h-3.5 w-3.5 opacity-80" aria-hidden />
                   Admin console
                 </button>
               </div>
@@ -801,7 +1158,23 @@ export default function ConsolePage() {
             />
           </div>
         )}
-        {view === "quality" && <AntiSycophancyPanel api={api} setErr={setErr} />}
+        {view === "quality" && (
+          <div className="space-y-4">
+            <h1 className="text-xl font-medium text-white">Quality &amp; debate</h1>
+            <Tabs defaultValue="council" className="w-full">
+              <TabsList variant="line" className="mb-4 w-full max-w-xl justify-start">
+                <TabsTrigger value="council">Socratic council</TabsTrigger>
+                <TabsTrigger value="anti">Anti-sycophancy only</TabsTrigger>
+              </TabsList>
+              <TabsContent value="council" className="mt-0">
+                <CouncilSocraticPanel api={api} setErr={setErr} />
+              </TabsContent>
+              <TabsContent value="anti" className="mt-0">
+                <AntiSycophancyPanel api={api} setErr={setErr} />
+              </TabsContent>
+            </Tabs>
+          </div>
+        )}
         {view === "onboard" && (
           <OnboardingWizard
             api={api}
@@ -822,6 +1195,7 @@ export default function ConsolePage() {
             obNextQuestion={obNextQuestion}
             setErr={setErr}
             onApplySuccess={async (cid) => {
+              setCoPackImportOk(null);
               setCoSel(cid);
               setView("company");
               await loadCompanyOs(cid);
@@ -831,45 +1205,72 @@ export default function ConsolePage() {
         {view === "company" && (
           <>
             <header className="mb-6 border-b border-[#30363D] pb-5">
-              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">Inbox</p>
-              <h1 className="mt-1 text-lg font-medium tracking-tight text-white">Tasks &amp; queue</h1>
+              <p className="flex items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                <Paperclip className="h-4 w-4 text-[#58a6ff]/90" aria-hidden />
+                Company OS
+              </p>
+              <h1 className="mt-1 text-lg font-medium tracking-tight text-white">
+                {coWorkspaceTab === "work"
+                  ? "Tasks & queue"
+                  : coWorkspaceTab === "packs"
+                    ? "Pack marketplace"
+                    : coWorkspaceTab === "sops"
+                      ? "SOPs & playbooks"
+                      : coWorkspaceTab === "team"
+                        ? "Team & roles"
+                        : "Advanced"}
+              </h1>
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
-                Triage, approvals, and the full task list—same layout language as Command dashboard.
+                {coWorkspaceTab === "work"
+                  ? "Triage, approvals, and the full task list—same layout language as Command dashboard."
+                  : coWorkspaceTab === "packs"
+                    ? "Browse agent-company templates from the open directory, see what each pack is for, add a workspace, or send a new pack idea for listing."
+                    : coWorkspaceTab === "sops"
+                      ? "Author standard operating procedures: phases, escalation, and governance log templates—then implement them as tasks in this workspace."
+                      : coWorkspaceTab === "team"
+                        ? "Company context, workforce roster, personas, and org chart backing task owners."
+                        : "Backup, spend, goals, policies, orchestration, and power tools."}
               </p>
             </header>
-            {coSel ? (
-              <div className="mb-4 max-w-3xl">
-                <div className="inline-flex flex-wrap rounded-full border border-line bg-black/40 p-0.5">
-                  {(
-                    [
-                      ["work", "Tasks & queue"],
-                      ["team", "Team & roles"],
-                      ["advanced", "Advanced"],
-                    ] as const
-                  ).map(([id, label]) => (
+            <div className="mb-4 max-w-3xl">
+              <div className="inline-flex max-w-full flex-wrap gap-px rounded-md border border-[#30363D] bg-[#0d1117] p-px">
+                {(
+                  [
+                    ["work", "Tasks & queue"],
+                    ["packs", "Pack marketplace"],
+                    ["sops", "SOPs & playbooks"],
+                    ["team", "Team & roles"],
+                    ["advanced", "Advanced"],
+                  ] as const
+                ).map(([id, label]) => {
+                  const Icon = CO_WORKSPACE_TAB_ICONS[id];
+                  return (
                     <button
                       key={id}
                       type="button"
                       onClick={() => setCoWorkspaceTab(id)}
-                      className={
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
                         coWorkspaceTab === id
-                          ? "rounded-full bg-white px-3 py-1.5 text-sm font-medium text-black"
-                          : "rounded-full px-3 py-1.5 text-sm text-gray-400 transition-colors hover:text-white"
-                      }
+                          ? "bg-[#21262d] text-white ring-1 ring-[#30363d]"
+                          : "text-gray-400 hover:bg-white/[0.06] hover:text-white"
+                      )}
                     >
+                      <Icon className="h-3.5 w-3.5 shrink-0 opacity-85" aria-hidden />
                       {label}
                     </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs leading-relaxed text-gray-600">
-                  <strong className="font-medium text-gray-500">Tasks &amp; queue</strong> — create work, run the inbox,
-                  assign and close tasks.{" "}
-                  <strong className="font-medium text-gray-500">Team &amp; roles</strong> — who does what (personas,
-                  briefings). <strong className="font-medium text-gray-500">Advanced</strong> — backup, spend, goals,
-                  orchestration.
-                </p>
+                  );
+                })}
               </div>
-            ) : null}
+              <p className="mt-2 text-xs leading-relaxed text-gray-600">
+                <strong className="font-medium text-gray-500">Tasks &amp; queue</strong> — inbox and task list.{" "}
+                <strong className="font-medium text-gray-500">Pack marketplace</strong> — directory + propose new packs.{" "}
+                <strong className="font-medium text-gray-500">SOPs &amp; playbooks</strong> — design procedures and
+                materialize them. <strong className="font-medium text-gray-500">Team &amp; roles</strong> — roster and
+                company context. <strong className="font-medium text-gray-500">Advanced</strong> — backup, spend, goals,
+                orchestration.
+              </p>
+            </div>
             <details className="mb-4 max-w-2xl text-sm text-gray-500">
               <summary className="cursor-pointer select-none text-gray-500 hover:text-gray-400">
                 Technical setup (database)
@@ -884,6 +1285,11 @@ export default function ConsolePage() {
             {coErr && (
               <div className="mb-4 rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
                 {coErr}
+              </div>
+            )}
+            {coPackImportOk && (
+              <div className="mb-4 rounded border border-emerald-900/50 bg-emerald-950/25 px-3 py-2 text-sm text-emerald-100/95">
+                {coPackImportOk}
               </div>
             )}
             {coHealth && !coHealth.postgres_configured && (
@@ -912,7 +1318,7 @@ export default function ConsolePage() {
                 />
                 <button
                   type="button"
-                  className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black hover:bg-gray-200"
+                  className="inline-flex items-center gap-2 rounded-md border border-[#30363d] bg-[#21262d] px-4 py-2 text-sm font-medium text-white hover:bg-[#30363d]"
                   onClick={async () => {
                     setCoErr(null);
                     try {
@@ -931,34 +1337,114 @@ export default function ConsolePage() {
                     }
                   }}
                 >
+                  <Building2 className="h-4 w-4 opacity-90" aria-hidden />
                   Create workspace
                 </button>
               </div>
             )}
             {coCompanies.length > 0 && (
-              <div className="mb-6">
+              <div
+                className="mb-6 rounded-lg border border-[#222222] p-4 transition-[border-color] duration-200 ease-out"
+                style={{
+                  background:
+                    "linear-gradient(92deg in oklab, #000000 0%, #121212 48%, #030303 100%)",
+                }}
+              >
                 <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                  <div>
-                    <div className="mb-2 text-sm font-medium text-gray-300">Workspace</div>
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-1 flex items-center gap-2">
+                      <Building2 className="h-3.5 w-3.5 shrink-0 text-[#666666]" aria-hidden />
+                      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[#999999]">
+                        Workspace
+                      </span>
+                    </div>
+                    <p className="mb-3 max-w-2xl font-mono text-[10px] uppercase leading-relaxed tracking-[0.06em] text-[#666666]">
+                      Select name to switch · Slug is the unique id (spot duplicates) · Del removes database row only;
+                      pack files on disk stay
+                    </p>
                     <div className="flex flex-wrap gap-2">
                       {coCompanies.map((c) => (
-                        <button
+                        <div
                           key={c.id}
-                          type="button"
-                          onClick={() => setCoSel(c.id)}
-                          className={`rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                          className={cn(
+                            "group inline-flex items-stretch overflow-hidden rounded-[6px] border text-sm transition-colors duration-200 ease-out",
                             coSel === c.id
-                              ? "border-white bg-white text-black"
-                              : "border-line text-gray-300 hover:border-gray-500"
-                          }`}
+                              ? "border-[#5B9BF6]/50 bg-[#1A1A1A] text-[#E8E8E8]"
+                              : "border-[#333333] bg-[#111111] text-[#E8E8E8]/90 hover:border-[#484848] hover:bg-[#1A1A1A]"
+                          )}
                         >
-                          {c.display_name}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCoPackImportOk(null);
+                              setCoSel(c.id);
+                            }}
+                            className="inline-flex min-w-0 max-w-[220px] items-center gap-2 px-3 py-2 text-left sm:max-w-[280px]"
+                          >
+                            <Building2
+                              className={cn(
+                                "h-3.5 w-3.5 shrink-0 stroke-[1.5]",
+                                coSel === c.id ? "text-[#5B9BF6]" : "text-[#666666] group-hover:text-[#999999]"
+                              )}
+                              aria-hidden
+                            />
+                            <span className="flex min-w-0 flex-col gap-1">
+                              <span className="truncate font-sans text-[13px] font-medium leading-tight">
+                                {c.display_name}
+                              </span>
+                              <span className="flex min-w-0 items-baseline gap-1.5 truncate">
+                                <span className="shrink-0 font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[#666666]">
+                                  Id
+                                </span>
+                                <span className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.06em] text-[#888888]">
+                                  {c.slug}
+                                </span>
+                              </span>
+                            </span>
+                          </button>
+                          {coHealth?.postgres_configured ? (
+                            <button
+                              type="button"
+                              title={`Remove workspace from database: ${c.display_name} (${c.slug})`}
+                              aria-label={`Delete workspace ${c.display_name}`}
+                              disabled={deletingWorkspaceId === c.id}
+                              className={cn(
+                                "flex min-w-[44px] flex-col items-center justify-center gap-0.5 border-l border-[#333333] px-2 py-1.5 text-[#666666] transition-colors duration-200 ease-out hover:bg-[#2a1212] hover:text-[#D71921] disabled:cursor-not-allowed disabled:opacity-40",
+                                coSel === c.id && "border-[#333333]"
+                              )}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                void (async () => {
+                                  setDeletingWorkspaceId(c.id);
+                                  try {
+                                    await deleteCompanyFromSidebar({
+                                      id: c.id,
+                                      slug: c.slug,
+                                      display_name: c.display_name,
+                                    });
+                                  } finally {
+                                    setDeletingWorkspaceId(null);
+                                  }
+                                })();
+                              }}
+                            >
+                              {deletingWorkspaceId === c.id ? (
+                                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5 shrink-0 stroke-[1.5]" aria-hidden />
+                              )}
+                              <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.14em]">
+                                {deletingWorkspaceId === c.id ? "…" : "Del"}
+                              </span>
+                            </button>
+                          ) : null}
+                        </div>
                       ))}
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <label className="text-xs text-gray-500" htmlFor="co-checkout-agent">
+                    <label className="nd-label font-normal" htmlFor="co-checkout-agent">
                       Sign approvals as
                     </label>
                     <input
@@ -989,7 +1475,7 @@ export default function ConsolePage() {
                     />
                     <button
                       type="button"
-                      className="rounded-full bg-accent/20 px-3 py-1 text-sm text-accent"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-sm text-gray-200 hover:bg-[#21262d]"
                       onClick={async () => {
                         setCoErr(null);
                         try {
@@ -1008,13 +1494,24 @@ export default function ConsolePage() {
                         }
                       }}
                     >
+                      <Building2 className="h-3.5 w-3.5 opacity-80" aria-hidden />
                       Add
                     </button>
                   </div>
                 </details>
               </div>
             )}
-            {coSel && (
+            {coWorkspaceTab === "packs" ? (
+              <PackMarketplacePanel
+                items={companiesSh.items}
+                loading={companiesSh.loading}
+                error={companiesSh.error}
+                postgresConfigured={!!coHealth?.postgres_configured}
+                onCreateFromCatalog={createFromCatalog}
+                setCoErr={setCoErr}
+              />
+            ) : null}
+            {coSel ? (
               <>
                 {coWorkspaceTab === "advanced" ? (
                   <>
@@ -1022,10 +1519,18 @@ export default function ConsolePage() {
                       <summary className="cursor-pointer px-3 py-2 text-xs text-gray-500 hover:text-gray-400">
                         Backup, import &amp; export
                       </summary>
+                      <p className="border-t border-line/60 px-3 py-2 text-xs leading-relaxed text-gray-600">
+                        Each company is a namespaced API under{" "}
+                        <code className="font-mono text-[11px] text-gray-500">
+                          /api/company/companies/&lt;id&gt;/…
+                        </code>
+                        . Use <strong className="font-medium text-gray-500">API catalog</strong> to list routes for
+                        integrators.
+                      </p>
                       <div className="flex flex-wrap items-center gap-3 border-t border-line/60 px-3 py-3">
                         <button
                           type="button"
-                          className="rounded-full border border-line bg-panel px-3 py-1.5 text-sm text-gray-200 hover:bg-white/5"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-sm text-gray-200 hover:bg-[#21262d]"
                           onClick={async () => {
                             setCoErr(null);
                             try {
@@ -1038,7 +1543,27 @@ export default function ConsolePage() {
                             }
                           }}
                         >
+                          <Download className="h-3.5 w-3.5 opacity-90" aria-hidden />
                           Export JSON
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-sm text-gray-200 hover:bg-[#21262d]"
+                          title="Machine-readable list of Company OS HTTP routes for this workspace"
+                          onClick={async () => {
+                            setCoErr(null);
+                            try {
+                              const r = await fetch(`${api}/api/company/companies/${coSel}/api-catalog`);
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              downloadJson(`company-api-catalog-${coSel.slice(0, 8)}.json`, j);
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          <Download className="h-3.5 w-3.5 opacity-90" aria-hidden />
+                          Download API catalog
                         </button>
                         <input
                           ref={coImportRef}
@@ -1065,6 +1590,7 @@ export default function ConsolePage() {
                               if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
                               const nid = (j as { company_id?: string }).company_id;
                               if (nid) {
+                                setCoPackImportOk(null);
                                 setCoSel(nid);
                                 await loadCompanyOs(nid);
                               } else {
@@ -1077,9 +1603,10 @@ export default function ConsolePage() {
                         />
                         <button
                           type="button"
-                          className="rounded-full border border-line bg-panel px-3 py-1.5 text-sm text-gray-200 hover:bg-white/5"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-sm text-gray-200 hover:bg-[#21262d]"
                           onClick={() => coImportRef.current?.click()}
                         >
+                          <Upload className="h-3.5 w-3.5 opacity-90" aria-hidden />
                           Import JSON…
                         </button>
                         <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500">
@@ -1176,20 +1703,72 @@ export default function ConsolePage() {
                         />
                       </div>
                     </details>
+
                   </>
                 ) : null}
 
+                {coWorkspaceTab === "sops" ? (
+                  coSel ? (
+                    <div className="space-y-6">
+                      <SopComposerPanel
+                        apiBase={api}
+                        companyId={coSel}
+                        referenceExamples={sopReferenceExamples}
+                        onCustomSopsChanged={setCustomSops}
+                        onApplied={async () => {
+                          await loadCompanyOs();
+                        }}
+                        setCoErr={setCoErr}
+                      />
+                      <div>
+                        <h2 className="mb-2 text-sm font-semibold text-white">Reference &amp; saved library</h2>
+                        <p className="mb-4 max-w-3xl text-xs leading-relaxed text-gray-500">
+                          Built-in examples plus templates you saved for this workspace (tabs marked{" "}
+                          <span className="rounded border border-line px-1 text-[10px] text-gray-400">yours</span>). Use{" "}
+                          <strong className="font-medium text-gray-400">Implement in workspace</strong> to create
+                          playbook tasks and governance seeds.
+                        </p>
+                        <SopReferenceExamples
+                          apiBase={api}
+                          companyId={coSel}
+                          onApplied={async () => {
+                            await loadCompanyOs();
+                          }}
+                          setCoErr={setCoErr}
+                          additionalExamples={customSops}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-amber-900/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100/90">
+                      Select or create a <strong className="font-medium text-white">workspace</strong> above to author
+                      SOPs, save templates for this company, and implement playbooks.
+                    </div>
+                  )
+                ) : null}
+
                 {coWorkspaceTab === "team" ? (
-                  <CompanyAgentsPanel
-                    api={api}
-                    companyId={coSel}
-                    agents={coAgents}
-                    suggestedAgentIds={coAgentIdSuggestions}
-                    setCoErr={setCoErr}
-                    loadCompanyOs={async () => {
-                      await loadCompanyOs();
-                    }}
-                  />
+                  <>
+                    <CompanyContextPanel
+                      api={api}
+                      companyId={coSel}
+                      contextMarkdown={coCompanies.find((c) => c.id === coSel)?.context_markdown}
+                      setCoErr={setCoErr}
+                      onSaved={async () => {
+                        await loadCompanyOs();
+                      }}
+                    />
+                    <CompanyAgentsPanel
+                      api={api}
+                      companyId={coSel}
+                      agents={coAgents}
+                      suggestedAgentIds={coAgentIdSuggestions}
+                      setCoErr={setCoErr}
+                      loadCompanyOs={async () => {
+                        await loadCompanyOs();
+                      }}
+                    />
+                  </>
                 ) : null}
 
                 {coWorkspaceTab === "work" ? (
@@ -1215,7 +1794,7 @@ export default function ConsolePage() {
                         />
                         <button
                           type="button"
-                          className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black hover:bg-gray-200"
+                          className="inline-flex items-center gap-2 rounded-md border border-[#30363d] bg-[#21262d] px-4 py-2 text-sm font-medium text-white hover:bg-[#30363d]"
                           onClick={async () => {
                             setCoErr(null);
                             try {
@@ -1237,6 +1816,7 @@ export default function ConsolePage() {
                             }
                           }}
                         >
+                          <Plus className="h-4 w-4 opacity-90" aria-hidden />
                           Add to list
                         </button>
                       </div>
@@ -1378,7 +1958,13 @@ export default function ConsolePage() {
                   </>
                 ) : null}
               </>
-            )}
+            ) : coWorkspaceTab !== "packs" ? (
+              <div className="rounded-lg border border-amber-900/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100/90">
+                Select or create a <strong className="font-medium text-white">workspace</strong> above for tasks, SOPs,
+                and team tools—or open <strong className="font-medium text-white">Pack marketplace</strong> to browse
+                templates without selecting one yet.
+              </div>
+            ) : null}
           </>
         )}
         {view === "email" && (
@@ -1566,74 +2152,3 @@ function Stat({ label, value, hint }: { label: string; value: string | number; h
   );
 }
 
-function TrailGraphView({ graph }: { graph?: { nodes: GraphNode[]; links: GraphLink[] } }) {
-  const layout = useMemo(() => {
-    const nodes = graph?.nodes ?? [];
-    if (!nodes.length) return { pts: new Map<string, { x: number; y: number }>(), w: 400, h: 320 };
-
-    const w = 520;
-    const h = 420;
-    const cx = w / 2;
-    const cy = h / 2;
-    const r = Math.min(w, h) / 2 - 40;
-    const pts = new Map<string, { x: number; y: number }>();
-    nodes.forEach((n, i) => {
-      const ang = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
-      pts.set(n.id, { x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) });
-    });
-    return { pts, w, h };
-  }, [graph]);
-
-  const nodes = graph?.nodes ?? [];
-  const links = graph?.links ?? [];
-
-  if (!nodes.length) {
-    return (
-      <div className="rounded border border-line bg-panel p-8 text-center text-sm text-gray-500">
-        No hyperedge events in trail yet. Use{" "}
-        <code className="font-mono text-gray-400">record_hyperedge</code> from the agent to populate.
-      </div>
-    );
-  }
-
-  const { pts, w, h } = layout;
-
-  return (
-    <div className="rounded border border-line bg-panel p-4">
-      <svg width={w} height={h} className="mx-auto text-gray-200">
-        {links.map((L, i) => {
-          const a = pts.get(L.source);
-          const b = pts.get(L.target);
-          if (!a || !b) return null;
-          return (
-            <line
-              key={i}
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              stroke="rgba(148,163,184,0.35)"
-              strokeWidth={1}
-            />
-          );
-        })}
-        {nodes.map((n) => {
-          const p = pts.get(n.id);
-          if (!p) return null;
-          const col = n.kind === "relation" ? "#38bdf8" : "#a78bfa";
-          return (
-            <g key={n.id}>
-              <circle cx={p.x} cy={p.y} r={n.kind === "relation" ? 8 : 5} fill={col} opacity={0.9} />
-              <text x={p.x + 10} y={p.y + 4} fontSize={10} fill="#e2e8f0" className="select-none">
-                {(n.label || n.id).slice(0, 32)}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-      <div className="mt-2 text-center text-xs text-gray-600">
-        {nodes.length} nodes · {links.length} links (trail-derived)
-      </div>
-    </div>
-  );
-}

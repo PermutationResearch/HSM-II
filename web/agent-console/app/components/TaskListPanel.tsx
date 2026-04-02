@@ -240,7 +240,7 @@ export function TaskListPanel(props: Props) {
                 <button
                   type="button"
                   title="Let an agent or automation pick this up"
-                  className="rounded-full border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/20"
+                  className="rounded-full border border-primary/50 bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
                   onClick={async () => {
                     setCoErr(null);
                     try {

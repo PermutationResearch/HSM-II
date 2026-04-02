@@ -143,7 +143,7 @@ export function AntiSycophancyPanel({ api, setErr }: Props) {
           <button
             type="button"
             disabled={loading}
-            className="rounded bg-accent/25 px-4 py-2 text-sm font-medium text-accent disabled:opacity-40"
+            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
             onClick={() => void run()}
           >
             {loading ? "Running…" : "Run critique loop"}
@@ -194,7 +194,7 @@ export function AntiSycophancyPanel({ api, setErr }: Props) {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-gray-600">Run the loop to see critiques and revised output.</p>
+            <p className="text-sm text-muted-foreground">Run the loop to see critiques and revised output.</p>
           )}
         </Panel>
       </div>

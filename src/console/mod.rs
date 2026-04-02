@@ -16,7 +16,9 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::harness::{run_anti_sycophancy_loop, AntiSycophancyConfig};
+use crate::harness::{
+    run_anti_sycophancy_loop, run_council_socratic_with_anti_sycophancy, AntiSycophancyConfig,
+};
 use crate::llm::client::LlmClient;
 use crate::personal::agent_memory_pipeline::list_memory_markdown_files;
 use crate::personal::autodream;
@@ -25,6 +27,7 @@ use sqlx::PgPool;
 
 const EMAIL_DRAFT_MAX_BYTES: usize = 256 * 1024;
 const ANTI_SYC_MAX_BYTES: usize = 512 * 1024;
+const COUNCIL_SOCRATIC_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct ConsoleState {
@@ -80,6 +83,26 @@ fn default_email_simple() -> bool {
 }
 
 #[derive(Deserialize)]
+struct CouncilSocraticBody {
+    proposition: String,
+    #[serde(default)]
+    context: Option<String>,
+    /// Role ids (e.g. socratic_questioner, epistemic_critic, integrator). Empty = defaults.
+    #[serde(default)]
+    roles: Vec<String>,
+    #[serde(default = "default_council_rounds")]
+    council_rounds: u32,
+    #[serde(default)]
+    seed_directives: Vec<String>,
+    #[serde(default)]
+    anti_sycophancy_max_rounds: Option<u32>,
+}
+
+fn default_council_rounds() -> u32 {
+    1
+}
+
+#[derive(Deserialize)]
 struct AntiSycophancyBody {
     user_message: String,
     draft_response: String,
@@ -109,6 +132,10 @@ pub fn console_router(state: ConsoleState) -> Router {
         .route(
             "/api/console/anti-sycophancy",
             post(post_anti_sycophancy).layer(DefaultBodyLimit::max(ANTI_SYC_MAX_BYTES)),
+        )
+        .route(
+            "/api/console/council-socratic",
+            post(post_council_socratic).layer(DefaultBodyLimit::max(COUNCIL_SOCRATIC_MAX_BYTES)),
         )
         .merge(crate::company_os::router())
         .layer(CorsLayer::permissive())
@@ -471,6 +498,71 @@ async fn post_anti_sycophancy(
         um,
         body.context.as_deref(),
         dr,
+        &body.seed_directives,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "result": run,
+    })))
+}
+
+async fn post_council_socratic(
+    Json(body): Json<CouncilSocraticBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let prop = body.proposition.trim();
+    if prop.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "proposition is required",
+            })),
+        ));
+    }
+    if body.proposition.len() > COUNCIL_SOCRATIC_MAX_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "ok": false, "error": "proposition too large" })),
+        ));
+    }
+
+    let llm = LlmClient::new().map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "error": format!("LLM unavailable: {e}"),
+            })),
+        )
+    })?;
+
+    let mut anti_cfg = AntiSycophancyConfig::default();
+    if let Some(m) = body.anti_sycophancy_max_rounds {
+        anti_cfg.max_rounds = m.clamp(1, 6);
+    }
+
+    let roles: Vec<String> = body
+        .roles
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let run = run_council_socratic_with_anti_sycophancy(
+        Arc::new(llm),
+        anti_cfg,
+        prop,
+        body.context.as_deref(),
+        &roles,
+        body.council_rounds,
         &body.seed_directives,
     )
     .await

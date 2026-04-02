@@ -33,6 +33,60 @@ export function isPaperclipPack(item: CompaniesShItem): boolean {
   return false;
 }
 
+/** Same slug normalization as Company OS POST when adding from the directory. */
+export function slugBaseFromCatalogItem(item: CompaniesShItem): string {
+  let base = item.slug
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!base) base = "company";
+  return base;
+}
+
+/** Minimal company row for matching directory packs to local workspaces */
+export type CatalogCompanyLookup = {
+  id: string;
+  slug: string;
+  hsmii_home?: string | null;
+};
+
+/**
+ * Find a workspace already created from this pack (first click used slug `base`, retries use `base-2`, `base-3`, …).
+ */
+export function findExistingCompanyForCatalogPack(
+  companies: CatalogCompanyLookup[],
+  base: string
+): CatalogCompanyLookup | undefined {
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^${escaped}(-\\d+)?$`);
+  const matches = companies.filter((c) => re.test(c.slug));
+  if (matches.length === 0) return undefined;
+  return matches.sort((a, b) => {
+    if (a.slug === base) return -1;
+    if (b.slug === base) return 1;
+    const sa = a.slug === base ? 0 : parseInt(a.slug.slice(base.length + 1), 10) || 999;
+    const sb = b.slug === base ? 0 : parseInt(b.slug.slice(base.length + 1), 10) || 999;
+    return sa - sb;
+  })[0];
+}
+
+/** Match by installed pack folder name in hsmii_home when slug was customized. */
+export function findCompanyByPackFolder(
+  companies: CatalogCompanyLookup[],
+  packSlug: string
+): CatalogCompanyLookup | undefined {
+  const s = packSlug.trim().toLowerCase();
+  if (!s) return undefined;
+  return companies.find((c) => {
+    const h = (c.hsmii_home ?? "").trim().toLowerCase().replace(/\\/g, "/");
+    if (!h) return false;
+    const segs = h.split("/").filter(Boolean);
+    return segs.some((seg) => seg === s);
+  });
+}
+
 export function useCompaniesShCatalog() {
   const [items, setItems] = useState<CompaniesShItem[]>([]);
   const [loading, setLoading] = useState(true);

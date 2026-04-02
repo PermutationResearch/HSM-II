@@ -25,7 +25,7 @@ pub fn router() -> Router<ConsoleState> {
         .route("/api/company/companies/:company_id/org", get(org_chart))
         .route(
             "/api/company/companies/:company_id/agents/:agent_id",
-            patch(patch_agent),
+            patch(patch_agent).delete(delete_agent),
         )
         .route(
             "/api/company/tasks/:task_id/llm-context",
@@ -490,6 +490,41 @@ async fn patch_agent(
     Ok(Json(json!({ "agent": row })))
 }
 
+async fn delete_agent(
+    State(st): State<ConsoleState>,
+    Path((company_id, agent_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if !company_has_agent(pool, company_id, agent_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?
+    {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "agent not found" }))));
+    }
+    let res = sqlx::query("DELETE FROM company_agents WHERE id = $1 AND company_id = $2")
+        .bind(agent_id)
+        .bind(company_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    if res.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "agent not found" }))));
+    }
+    Ok((StatusCode::OK, Json(json!({ "deleted": true, "agent_id": agent_id }))))
+}
+
 #[derive(Serialize)]
 struct OrgNode {
     #[serde(flatten)]
@@ -610,6 +645,14 @@ pub struct AgentRunProfile {
     /// Append to system (or developer) message for the worker LLM.
     pub system_context_addon: String,
     pub system_context_addon_bytes: usize,
+}
+
+/// Markdown block prepended to task LLM context when `companies.context_markdown` is set.
+pub fn build_company_wide_context_addon(context_markdown: Option<&str>) -> String {
+    let Some(raw) = context_markdown.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    format!("## Company-wide context\n\n{raw}\n\n")
 }
 
 pub fn build_llm_system_addon(row: &CompanyAgentRow) -> String {
@@ -752,17 +795,42 @@ async fn get_task_llm_context(
                 Json(json!({ "error": e.to_string() })),
             )
         })?;
+    let company_context_markdown: Option<String> = sqlx::query_scalar(
+        "SELECT context_markdown FROM companies WHERE id = $1",
+    )
+    .bind(t.company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let company_addon = build_company_wide_context_addon(company_context_markdown.as_deref());
+    let company_context_addon_bytes = company_addon.len();
+    let combined_system_addon = format!("{company_addon}{}", profile.system_context_addon);
+    let combined_system_addon_bytes = combined_system_addon.len();
     tracing::info!(
         target: "hsm_company_agent_inject",
         task_id = %task_id,
         company_id = %t.company_id,
         endpoint = "llm_context_get",
         company_agent_row_found = profile.resolved,
+        company_context_addon_bytes,
+        combined_system_addon_bytes,
         addon_bytes = profile.system_context_addon_bytes,
         matched_as = ?profile.matched_as,
         agent_id = ?profile.agent_id,
     );
-    Ok(Json(json!({ "task_id": task_id, "agent_run_profile": profile })))
+    Ok(Json(json!({
+        "task_id": task_id,
+        "company_context_markdown": company_context_markdown,
+        "company_context_addon_bytes": company_context_addon_bytes,
+        "agent_run_profile": profile,
+        "combined_system_addon": combined_system_addon,
+        "combined_system_addon_bytes": combined_system_addon_bytes,
+    })))
 }
 
 #[derive(Serialize)]

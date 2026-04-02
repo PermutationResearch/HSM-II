@@ -10,6 +10,7 @@
 
 mod events;
 mod anti_sycophancy;
+mod council_socratic;
 mod cc_orchestrator;
 mod control_plane;
 mod approval;
@@ -24,6 +25,9 @@ pub mod types;
 pub use anti_sycophancy::{
     run_anti_sycophancy_loop, AntiSycophancyConfig, AntiSycophancyRoundLog, AntiSycophancyRunResult,
     CriticVerdict, CriticParse, sycophancy_heuristic,
+};
+pub use council_socratic::{
+    run_council_socratic_with_anti_sycophancy, CouncilRoleTurn, CouncilSocraticResult,
 };
 pub use cc_orchestrator::{
     CcAgentSlot, CcCrossReviewMode, CcDraft, CcOrchestrator, CcOrchestratorConfig, CcReview,

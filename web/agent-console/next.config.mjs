@@ -10,6 +10,7 @@ const nextConfig = {
   turbopack: {
     root: __dirname,
   },
+  // `/api/company/*` and `/api/console/*` are proxied by App Route handlers (see app/api/company, app/api/console).
 };
 
 export default nextConfig;

@@ -8,7 +8,7 @@ export function Identity({ name, size = "sm" }: { name: string; size?: "sm" | "m
   const cls = size === "sm" ? "h-6 w-6 text-[10px]" : "h-8 w-8 text-xs";
   return (
     <span
-      className={`inline-flex ${cls} shrink-0 items-center justify-center rounded-full bg-accent/20 font-medium text-accent`}
+      className={`inline-flex ${cls} shrink-0 items-center justify-center rounded-full bg-primary/20 font-medium text-primary`}
       title={name}
     >
       {initials || "?"}

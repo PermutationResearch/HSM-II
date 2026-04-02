@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, Space_Mono } from "next/font/google";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -24,12 +25,14 @@ export const metadata: Metadata = {
 /**
  * Nothing-style dark shell: Space Grotesk (UI) + Space Mono (labels / data).
  * Fonts: https://fonts.google.com — Space Grotesk, Space Mono
- * (Doto reserved for hero-only treatments; dashboard uses Grotesk display scale per skill.)
+ * Company OS + console API: same-origin `/api/company` & `/api/console` → App Router proxies to `HSM_CONSOLE_URL` (see `app/api/company/[[...path]]/route.ts` and `app/api/console/[[...path]]/route.ts`).
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${spaceGrotesk.variable} ${spaceMono.variable}`}>
-      <body className="min-h-screen font-sans antialiased">{children}</body>
+      <body className="min-h-screen font-sans antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
