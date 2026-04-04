@@ -16,7 +16,12 @@ impl Scheduler {
         Self::default()
     }
 
-    pub fn spawn_interval<F>(&self, job_id: &str, period: Duration, mut task: F) -> Option<JoinHandle<()>>
+    pub fn spawn_interval<F>(
+        &self,
+        job_id: &str,
+        period: Duration,
+        mut task: F,
+    ) -> Option<JoinHandle<()>>
     where
         F: FnMut() + Send + 'static,
     {

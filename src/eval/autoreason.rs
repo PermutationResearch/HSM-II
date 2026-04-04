@@ -140,7 +140,10 @@ pub fn parse_judge_ranking_1based(text: &str) -> Option<[usize; 3]> {
         // Allow contiguous digits "213"
         let digits: String = text.chars().filter(|c| ('1'..='3').contains(c)).collect();
         if digits.len() == 3 {
-            nums = digits.chars().filter_map(|c| c.to_digit(10).map(|d| d as usize)).collect();
+            nums = digits
+                .chars()
+                .filter_map(|c| c.to_digit(10).map(|d| d as usize))
+                .collect();
         }
     }
     nums.truncate(3);
@@ -277,10 +280,7 @@ pub async fn run_autoreason(
 
         let mut judge_rankings: Vec<[usize; 3]> = Vec::new();
         for j in 0..cfg.num_judges {
-            let judge_user = format!(
-                "{blind}\n\n(Judge #{}, independent ranking.)",
-                j + 1
-            );
+            let judge_user = format!("{blind}\n\n(Judge #{}, independent ranking.)", j + 1);
             let raw = chat(
                 client,
                 model,
@@ -378,10 +378,7 @@ mod tests {
 
     #[test]
     fn parse_ranking_variants() {
-        assert_eq!(
-            parse_judge_ranking_1based("2, 3, 1"),
-            Some([1, 2, 0])
-        );
+        assert_eq!(parse_judge_ranking_1based("2, 3, 1"), Some([1, 2, 0]));
         assert_eq!(parse_judge_ranking_1based("231"), Some([1, 2, 0]));
     }
 }

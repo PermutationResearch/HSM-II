@@ -1,0 +1,32 @@
+{
+  "benchmarks": [
+    {
+      "name": "claw_code_rust_smoke_help",
+      "labels": {
+        "benchmark": "claw_code",
+        "phase": "smoke_help"
+      },
+      "setup_commands": [
+        ["cargo", "build", "--release", "-p", "claw-cli"]
+      ],
+      "command": ["./target/release/claw", "--help"],
+      "cwd": "/ABS/PATH/TO/claw-code/rust",
+      "env": {
+        "CARGO_TERM_COLOR": "never"
+      },
+      "timeout_sec": 1800
+    },
+    {
+      "name": "claw_code_rust_version",
+      "labels": {
+        "benchmark": "claw_code",
+        "phase": "version"
+      },
+      "setup_commands": [],
+      "command": ["./target/release/claw", "--version"],
+      "cwd": "/ABS/PATH/TO/claw-code/rust",
+      "env": {},
+      "timeout_sec": 120
+    }
+  ]
+}

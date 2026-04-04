@@ -59,8 +59,8 @@ impl RealTelegramBot {
         let config = self.config.clone();
 
         // Build the dispatcher with handler
-        let dispatch_handler = dptree::entry()
-            .branch(Update::filter_message().endpoint(handle_telegram_message));
+        let dispatch_handler =
+            dptree::entry().branch(Update::filter_message().endpoint(handle_telegram_message));
 
         let mut dispatcher = Dispatcher::builder(bot.clone(), dispatch_handler)
             .dependencies(dptree::deps![handler, config])
@@ -92,10 +92,10 @@ impl RealTelegramBot {
     pub async fn send_message(&self, chat_id: &str, content: &str) -> Result<()> {
         let bot = Bot::new(&self.config.token);
         let chat_id: i64 = chat_id.parse()?;
-        
+
         // Split long messages
         let chunks = Self::split_message(content, self.config.max_message_length);
-        
+
         for chunk in chunks {
             match bot
                 .send_message(ChatId(chat_id), &chunk)
@@ -117,11 +117,20 @@ impl RealTelegramBot {
     }
 
     /// Send a direct message using bot instance (for replies)
-    pub async fn send_reply(bot: &Bot, chat_id: ChatId, content: &str, parse_mode: ParseMode) -> Result<()> {
+    pub async fn send_reply(
+        bot: &Bot,
+        chat_id: ChatId,
+        content: &str,
+        parse_mode: ParseMode,
+    ) -> Result<()> {
         let chunks = Self::split_message(content, 4096);
-        
+
         for chunk in chunks {
-            match bot.send_message(chat_id, &chunk).parse_mode(parse_mode).await {
+            match bot
+                .send_message(chat_id, &chunk)
+                .parse_mode(parse_mode)
+                .await
+            {
                 Ok(_) => {}
                 Err(_) => {
                     // Fallback to plain text
@@ -234,14 +243,19 @@ async fn handle_telegram_message(
     };
 
     // Show typing indicator
-    let _ = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await;
+    let _ = bot
+        .send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await;
 
     // Handle the message
     match handler.handle(gateway_msg).await {
         Ok(response) => {
             if !response.is_empty() {
                 // Try to send with Markdown, fall back to plain text
-                if let Err(_) = RealTelegramBot::send_reply(&bot, msg.chat.id, &response, config.parse_mode).await {
+                if let Err(_) =
+                    RealTelegramBot::send_reply(&bot, msg.chat.id, &response, config.parse_mode)
+                        .await
+                {
                     // Fallback: try without escaping
                     let plain = response;
                     let _ = bot.send_message(msg.chat.id, &plain).await;

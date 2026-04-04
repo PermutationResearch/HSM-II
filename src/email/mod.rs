@@ -14,11 +14,11 @@ pub mod memory;
 pub mod responder;
 
 pub use classifier::{Category, EmailClassifier, Priority};
+pub use client::{EmailClient, EmailProvider, ImapConfig, ImapFetchedMessage, SmtpConfig};
 pub use ladybug_storage::{
-    EmailClassification, LadybugEmailStorage, StoredEmail, StorageStats, SuggestedAction,
+    EmailClassification, LadybugEmailStorage, StorageStats, StoredEmail, SuggestedAction,
     VacuumResult,
 };
-pub use client::{EmailClient, EmailProvider, ImapConfig, ImapFetchedMessage, SmtpConfig};
 
 /// Load [`EmailConfig`] from `HSM_IMAP_*` for CLI/cron (Outlook often: `outlook.office365.com`, port `993`).
 ///
@@ -31,9 +31,9 @@ pub fn email_config_from_env() -> anyhow::Result<Option<EmailConfig>> {
         return Ok(None);
     }
 
-    let username = std::env::var("HSM_IMAP_USER").or_else(|_| std::env::var("HSM_IMAP_USERNAME")).map_err(|_| {
-        anyhow::anyhow!("set HSM_IMAP_USER when HSM_IMAP_SERVER is set")
-    })?;
+    let username = std::env::var("HSM_IMAP_USER")
+        .or_else(|_| std::env::var("HSM_IMAP_USERNAME"))
+        .map_err(|_| anyhow::anyhow!("set HSM_IMAP_USER when HSM_IMAP_SERVER is set"))?;
 
     let password = std::env::var("HSM_IMAP_PASSWORD")
         .or_else(|_| std::env::var("HSM_IMAP_PASS"))

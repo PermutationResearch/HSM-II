@@ -118,9 +118,7 @@ pub struct BusinessPersona {
 
 fn path_safe_rel(rel: &str) -> bool {
     let t = rel.trim();
-    !t.is_empty()
-        && !t.contains("..")
-        && !Path::new(t).is_absolute()
+    !t.is_empty() && !t.contains("..") && !Path::new(t).is_absolute()
 }
 
 impl BusinessPack {
@@ -174,7 +172,12 @@ impl BusinessPack {
             r.errors.push("company.name must be non-empty".into());
         }
 
-        if self.last_reviewed.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if self
+            .last_reviewed
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             r.warnings.push(
                 "last_reviewed is unset or empty — set an ISO date when you review this pack."
                     .into(),
@@ -279,10 +282,7 @@ impl BusinessPack {
             tracing::warn!(target: "hsm_business_pack", "{}", w);
         }
         if !report.ok() {
-            anyhow::bail!(
-                "business pack validation failed:\n{}",
-                report.format_cli()
-            );
+            anyhow::bail!("business pack validation failed:\n{}", report.format_cli());
         }
 
         pack.load_attached_files(&pack_root).await?;
@@ -295,7 +295,8 @@ impl BusinessPack {
             if !path_safe_rel(rel) {
                 continue;
             }
-            if let Some(text) = Self::read_capped(pack_root.join(rel), MAX_POLICY_FILE_BYTES).await?
+            if let Some(text) =
+                Self::read_capped(pack_root.join(rel), MAX_POLICY_FILE_BYTES).await?
             {
                 self.loaded_policy_text
                     .push(format!("### policy file: {rel}\n{text}"));
@@ -346,11 +347,13 @@ impl BusinessPack {
         }
         out.push_str(&format!(
             "- **Company:** {} — _{}_\n",
-            self.company.name,
-            self.company.one_liner
+            self.company.name, self.company.one_liner
         ));
         if !self.company.industry.is_empty() {
-            out.push_str(&format!("- **Industry / vertical:** {}\n", self.company.industry));
+            out.push_str(&format!(
+                "- **Industry / vertical:** {}\n",
+                self.company.industry
+            ));
         }
         if !self.company.jurisdictions.is_empty() {
             out.push_str(&format!(
@@ -430,7 +433,9 @@ impl BusinessPack {
                 ));
             }
         } else {
-            out.push_str("\n_(No `HSM_BUSINESS_PERSONA` / `business_persona` set — shared context only.)_\n");
+            out.push_str(
+                "\n_(No `HSM_BUSINESS_PERSONA` / `business_persona` set — shared context only.)_\n",
+            );
         }
 
         out.push_str(&format!(

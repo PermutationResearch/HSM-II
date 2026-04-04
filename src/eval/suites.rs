@@ -39,9 +39,10 @@ pub fn parse_weighted_suites(spec: &str) -> Result<Vec<WeightedEvalSuite>, Strin
             continue;
         }
         let (name, weight) = if let Some((n, w)) = part.split_once(':') {
-            let w = w.trim().parse::<f64>().map_err(|_| {
-                format!("invalid weight in suite spec fragment {:?}", part)
-            })?;
+            let w = w
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("invalid weight in suite spec fragment {:?}", part))?;
             if w < 0.0 {
                 return Err(format!("negative weight in {:?}", part));
             }

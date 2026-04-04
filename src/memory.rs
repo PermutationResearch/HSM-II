@@ -158,7 +158,10 @@ pub fn derive_hierarchy(content: &str) -> (String, String) {
         let mut start = 0;
         let chars: Vec<char> = trimmed.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
-            if (c == '.' || c == '!' || c == '?') && i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+            if (c == '.' || c == '!' || c == '?')
+                && i + 1 < chars.len()
+                && chars[i + 1].is_whitespace()
+            {
                 let sentence: String = chars[start..=i].iter().collect();
                 sentences.push(sentence);
                 start = i + 1;
@@ -385,7 +388,8 @@ impl HybridMemory {
 
         for result in top_k {
             // Try rendering at requested level, fall back if over budget
-            let (rendered, level) = Self::render_at_level(&result.entry, &config.level, budget_remaining);
+            let (rendered, level) =
+                Self::render_at_level(&result.entry, &config.level, budget_remaining);
             let tokens = estimate_tokens(&rendered);
 
             if tokens > budget_remaining && !results.is_empty() {

@@ -144,7 +144,11 @@ impl Tool for ReadEmlTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        object_schema(vec![("path", "Absolute or relative path to .eml file", true)])
+        object_schema(vec![(
+            "path",
+            "Absolute or relative path to .eml file",
+            true,
+        )])
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
@@ -261,7 +265,9 @@ impl Tool for MaildirListTool {
         if entries.is_empty() {
             out.push_str("(no messages)\n");
         } else {
-            out.push_str("\nUse `maildir_read` with one of these paths to parse headers/body/attachments.\n");
+            out.push_str(
+                "\nUse `maildir_read` with one of these paths to parse headers/body/attachments.\n",
+            );
         }
         ToolOutput::success(out)
     }

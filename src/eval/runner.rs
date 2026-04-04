@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::harness::HarnessRuntime;
-use crate::llm::client::{LlmClient, LlmRequest, Message};
-use crate::personal::prompt_defaults::LIVING_PROMPT_SEED;
 use super::judges;
 use super::metrics::{score_keywords, turn_rubric_composite, RunnerMetrics, TurnMetrics};
 use super::tasks::{EvalTask, Turn};
 use super::trace::{BeliefRankEntry, HsmTurnTrace, RankedContextResult};
+use crate::harness::HarnessRuntime;
+use crate::llm::client::{LlmClient, LlmRequest, Message};
+use crate::personal::prompt_defaults::LIVING_PROMPT_SEED;
 
 const BASELINE_EVAL_SYSTEM: &str = "You are a helpful AI assistant. Answer the user's questions thoroughly and accurately. Be concise.";
 
@@ -31,7 +31,8 @@ async fn finalize_turn_metrics(
     injected_memory_context: &str,
 ) -> TurnMetrics {
     let keyword_score = score_keywords(&response, &turn.expected_keywords);
-    let mut extras = judges::evaluate_turn_rubric(turn, &response, injected_memory_context, keyword_score);
+    let mut extras =
+        judges::evaluate_turn_rubric(turn, &response, injected_memory_context, keyword_score);
     let mut pt = prompt_tokens;
     let mut ct = completion_tokens;
     let mut judge_calls = 0u32;
@@ -175,12 +176,7 @@ impl BaselineRunner {
                 resp.usage.completion_tokens,
                 None,
             ),
-            Err(e) => (
-                format!("[ERROR: {}]", e),
-                0,
-                0,
-                Some(e.to_string()),
-            ),
+            Err(e) => (format!("[ERROR: {}]", e), 0, 0, Some(e.to_string())),
         }
     }
 }
@@ -355,11 +351,7 @@ impl HsmRunnerConfig {
         4
     }
 
-    fn pick_usize(
-        file: Option<usize>,
-        builtin: Option<usize>,
-        global: usize,
-    ) -> usize {
+    fn pick_usize(file: Option<usize>, builtin: Option<usize>, global: usize) -> usize {
         file.or(builtin).unwrap_or(global)
     }
 
@@ -446,8 +438,10 @@ impl Default for HsmRunnerConfig {
             memory_entrypoint_max_lines: Self::default_memory_entrypoint_max_lines(),
             memory_entrypoint_max_bytes: Self::default_memory_entrypoint_max_bytes(),
             session_compaction_enabled: Self::default_session_compaction_enabled(),
-            session_compaction_trigger_messages: Self::default_session_compaction_trigger_messages(),
-            session_compaction_keep_tail_messages: Self::default_session_compaction_keep_tail_messages(),
+            session_compaction_trigger_messages: Self::default_session_compaction_trigger_messages(
+            ),
+            session_compaction_keep_tail_messages:
+                Self::default_session_compaction_keep_tail_messages(),
         }
     }
 }
@@ -587,40 +581,79 @@ impl<P: HarnessPolicy> HsmRunner<P> {
     fn seed_skills() -> Vec<TrackedSkill> {
         vec![
             TrackedSkill {
-                id: "api-design".into(), description: "REST API design with authentication, pagination, and versioning".into(),
-                domain: "software_engineering".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "api-design".into(),
+                description: "REST API design with authentication, pagination, and versioning"
+                    .into(),
+                domain: "software_engineering".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "debugging".into(), description: "Systematic debugging of production issues with root cause analysis".into(),
-                domain: "software_engineering".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "debugging".into(),
+                description: "Systematic debugging of production issues with root cause analysis"
+                    .into(),
+                domain: "software_engineering".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "architecture".into(), description: "System architecture design with trade-off analysis".into(),
-                domain: "software_engineering".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "architecture".into(),
+                description: "System architecture design with trade-off analysis".into(),
+                domain: "software_engineering".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "ml-pipeline".into(), description: "ML pipeline design, model training, and deployment".into(),
-                domain: "data_science".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "ml-pipeline".into(),
+                description: "ML pipeline design, model training, and deployment".into(),
+                domain: "data_science".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "data-engineering".into(), description: "Data pipeline design with ETL and streaming".into(),
-                domain: "data_science".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "data-engineering".into(),
+                description: "Data pipeline design with ETL and streaming".into(),
+                domain: "data_science".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "business-strategy".into(), description: "Market analysis, go-to-market, pricing strategy".into(),
-                domain: "business".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "business-strategy".into(),
+                description: "Market analysis, go-to-market, pricing strategy".into(),
+                domain: "business".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "product-mgmt".into(), description: "Product roadmap prioritization and stakeholder management".into(),
-                domain: "business".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "product-mgmt".into(),
+                description: "Product roadmap prioritization and stakeholder management".into(),
+                domain: "business".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "technical-writing".into(), description: "Research papers, technical blogs, documentation".into(),
-                domain: "research".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "technical-writing".into(),
+                description: "Research papers, technical blogs, documentation".into(),
+                domain: "research".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
             TrackedSkill {
-                id: "system-design".into(), description: "Large-scale system design with HIPAA, multi-tenant, distributed".into(),
-                domain: "stress_test".into(), usage_count: 0, success_count: 0, avg_keyword_score: 0.0,
+                id: "system-design".into(),
+                description: "Large-scale system design with HIPAA, multi-tenant, distributed"
+                    .into(),
+                domain: "stress_test".into(),
+                usage_count: 0,
+                success_count: 0,
+                avg_keyword_score: 0.0,
             },
         ]
     }
@@ -973,10 +1006,8 @@ impl<P: HarnessPolicy> HsmRunner<P> {
                     })
                     .filter(|(_, sc)| *sc >= r.summary_threshold)
                     .collect();
-                scored_summaries.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored_summaries
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 for (s, sc) in scored_summaries.into_iter().take(r.max_session_summaries) {
                     session_summary_sessions.push(s.session);
@@ -1035,7 +1066,9 @@ impl<P: HarnessPolicy> HsmRunner<P> {
             } else {
                 0.5
             };
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         candidates.first().cloned().cloned()
@@ -1070,7 +1103,11 @@ impl<P: HarnessPolicy> HsmRunner<P> {
 
     /// Extract keywords from conversation history
     fn extract_keywords(&self, history: &[Message]) -> Vec<String> {
-        let all_text: String = history.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+        let all_text: String = history
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let lower = all_text.to_lowercase();
 
         // Simple keyword extraction: words that appear multiple times and are >4 chars
@@ -1081,7 +1118,8 @@ impl<P: HarnessPolicy> HsmRunner<P> {
             }
         }
 
-        let mut keywords: Vec<(String, usize)> = word_counts.into_iter().filter(|(_, c)| *c >= 2).collect();
+        let mut keywords: Vec<(String, usize)> =
+            word_counts.into_iter().filter(|(_, c)| *c >= 2).collect();
         keywords.sort_by(|a, b| b.1.cmp(&a.1));
         keywords.into_iter().take(10).map(|(w, _)| w).collect()
     }
@@ -1102,12 +1140,7 @@ impl<P: HarnessPolicy> HsmRunner<P> {
                 resp.usage.completion_tokens,
                 None,
             ),
-            Err(e) => (
-                format!("[ERROR: {}]", e),
-                0,
-                0,
-                Some(e.to_string()),
-            ),
+            Err(e) => (format!("[ERROR: {}]", e), 0, 0, Some(e.to_string())),
         }
     }
 }
@@ -1149,7 +1182,10 @@ fn truncate_entrypoint_content(raw: &str, max_lines: usize, max_bytes: usize) ->
     }
 
     let reason = if was_byte_truncated && !was_line_truncated {
-        format!("{} bytes (limit: {max_bytes}) — entries are too long", byte_count)
+        format!(
+            "{} bytes (limit: {max_bytes}) — entries are too long",
+            byte_count
+        )
     } else if was_line_truncated && !was_byte_truncated {
         format!("{line_count} lines (limit: {max_lines})")
     } else {
@@ -1169,10 +1205,7 @@ fn memory_snippet_one_line(s: &str, max_chars: usize) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    let flat: String = collapsed
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let flat: String = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
     flat.chars().take(max_chars).collect()
 }
 
@@ -1181,7 +1214,8 @@ fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
     } else {
-        let boundary = s.char_indices()
+        let boundary = s
+            .char_indices()
             .take_while(|(i, _)| *i < max_len)
             .last()
             .map(|(i, c)| i + c.len_utf8())
@@ -1220,7 +1254,10 @@ mod tests {
 
     #[test]
     fn entrypoint_line_cap_appends_warning() {
-        let lines: String = (0..5).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let lines: String = (0..5)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let out = truncate_entrypoint_content(&lines, 3, 100_000);
         assert!(out.contains("WARNING"));
         assert!(out.starts_with("L0\nL1\nL2"));

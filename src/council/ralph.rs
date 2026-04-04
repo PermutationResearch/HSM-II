@@ -168,35 +168,35 @@ impl RalphCouncil {
             history: Vec::new(),
         }
     }
-    
+
     /// Generate text using Ollama with a specific model
     async fn generate_with_model(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
-        
+
         let body = serde_json::json!({
             "model": model,
             "prompt": prompt,
             "stream": false,
         });
-        
+
         let response = client
             .post("http://localhost:11434/api/generate")
             .json(&body)
             .send()
             .await?;
-        
+
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Ollama returned status {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Ollama returned status {}",
+                response.status()
+            ));
         }
-        
+
         let json: serde_json::Value = response.json().await?;
-        let text = json["response"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        
+        let text = json["response"].as_str().unwrap_or("").to_string();
+
         Ok(text)
     }
 
@@ -233,7 +233,10 @@ impl RalphCouncil {
 
         // Main Ralph Loop
         for iteration in 1..=self.config.max_iterations {
-            println!("[Ralph] Starting iteration {}/{}", iteration, self.config.max_iterations);
+            println!(
+                "[Ralph] Starting iteration {}/{}",
+                iteration, self.config.max_iterations
+            );
 
             // Update iteration counter
             let iter_path = self.state_dir.join("iteration.txt");
@@ -245,7 +248,8 @@ impl RalphCouncil {
             // Check if worker claims completion
             if !work_result.claimed_complete {
                 // Worker didn't claim complete, continue to next iteration
-                self.record_iteration(iteration, &work_result.summary, "CONTINUE", None, 0).await?;
+                self.record_iteration(iteration, &work_result.summary, "CONTINUE", None, 0)
+                    .await?;
                 continue;
             }
 
@@ -273,17 +277,25 @@ impl RalphCouncil {
 
                     // Mark as complete
                     let complete_path = self.state_dir.join(".ralph-complete");
-                    fs::write(&complete_path, format!("Completed after {} iterations\n", iteration)).await?;
+                    fs::write(
+                        &complete_path,
+                        format!("Completed after {} iterations\n", iteration),
+                    )
+                    .await?;
 
                     // Write review result
                     let result_path = self.state_dir.join("review-result.txt");
                     fs::write(&result_path, "SHIP").await?;
 
-                    let decision = self.create_ship_decision(iteration, start_time.elapsed().as_millis() as u64);
+                    let decision = self
+                        .create_ship_decision(iteration, start_time.elapsed().as_millis() as u64);
                     return Ok((RalphVerdict::Ship, decision));
                 }
                 RalphVerdict::Revise { feedback } => {
-                    println!("[Ralph] REVISE received: {}", feedback.chars().take(100).collect::<String>());
+                    println!(
+                        "[Ralph] REVISE received: {}",
+                        feedback.chars().take(100).collect::<String>()
+                    );
 
                     // Write review feedback for next iteration
                     let feedback_path = self.state_dir.join("review-feedback.txt");
@@ -305,14 +317,22 @@ impl RalphCouncil {
                     fs::write(&blocked_path, format!("# Blocked\n\n{}", reason)).await?;
 
                     let decision = self.create_blocked_decision(iteration, reason.clone());
-                    return Ok((RalphVerdict::Blocked { reason: reason.clone() }, decision));
+                    return Ok((
+                        RalphVerdict::Blocked {
+                            reason: reason.clone(),
+                        },
+                        decision,
+                    ));
                 }
                 _ => {}
             }
         }
 
         // Max iterations reached
-        println!("[Ralph] Max iterations ({}) reached", self.config.max_iterations);
+        println!(
+            "[Ralph] Max iterations ({}) reached",
+            self.config.max_iterations
+        );
 
         let decision = self.create_max_iter_decision(self.config.max_iterations);
         Ok((RalphVerdict::MaxIterationsReached, decision))
@@ -324,7 +344,10 @@ impl RalphCouncil {
         let prompt = self.build_worker_prompt();
 
         // Call LLM with worker model
-        let response = match self.generate_with_model(&self.config.worker.model, &prompt).await {
+        let response = match self
+            .generate_with_model(&self.config.worker.model, &prompt)
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => return Err(anyhow::anyhow!("Worker LLM error: {}", e)),
         };
@@ -337,8 +360,12 @@ impl RalphCouncil {
         // Extract summary
         let summary = if let Some(start) = response.find("SUMMARY:") {
             let summary_start = start + 8;
-            let summary_end = response[summary_start..].find('\n').unwrap_or(response.len() - summary_start);
-            response[summary_start..summary_start + summary_end].trim().to_string()
+            let summary_end = response[summary_start..]
+                .find('\n')
+                .unwrap_or(response.len() - summary_start);
+            response[summary_start..summary_start + summary_end]
+                .trim()
+                .to_string()
         } else {
             response.chars().take(200).collect::<String>()
         };
@@ -361,7 +388,10 @@ impl RalphCouncil {
         let prompt = self.build_reviewer_prompt();
 
         // Call LLM with reviewer model (potentially different from worker)
-        let response = match self.generate_with_model(&self.config.reviewer.model, &prompt).await {
+        let response = match self
+            .generate_with_model(&self.config.reviewer.model, &prompt)
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => return Err(anyhow::anyhow!("Reviewer LLM error: {}", e)),
         };
@@ -476,7 +506,7 @@ impl RalphCouncil {
     /// Create SHIP decision
     fn create_ship_decision(&self, iterations: usize, duration_ms: u64) -> CouncilDecision {
         use super::{CouncilDecisionMetadata, ExecutionPlan, ExecutionStep};
-        
+
         CouncilDecision {
             council_id: self.council_id,
             proposal_id: format!("ralph_{}", self.council_id),
@@ -505,7 +535,7 @@ impl RalphCouncil {
     /// Create blocked decision
     fn create_blocked_decision(&self, _iterations: usize, _reason: String) -> CouncilDecision {
         use super::CouncilDecisionMetadata;
-        
+
         CouncilDecision {
             council_id: self.council_id,
             proposal_id: format!("ralph_{}", self.council_id),
@@ -522,7 +552,7 @@ impl RalphCouncil {
     /// Create max iterations decision
     fn create_max_iter_decision(&self, _max_iterations: usize) -> CouncilDecision {
         use super::CouncilDecisionMetadata;
-        
+
         CouncilDecision {
             council_id: self.council_id,
             proposal_id: format!("ralph_{}", self.council_id),

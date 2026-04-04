@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 use hyper_stigmergy::personal::{
-    gateway, resolve_hsmii_home, IntegratedPersonalAgent, IntegratedAgentConfig,
+    gateway, resolve_hsmii_home, IntegratedAgentConfig, IntegratedPersonalAgent,
 };
 
 #[derive(Parser)]
@@ -127,7 +127,11 @@ enum EmailAction {
     /// Process inbox
     Inbox,
     /// Send a test email
-    Send { to: String, subject: String, body: String },
+    Send {
+        to: String,
+        subject: String,
+        body: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -175,8 +179,22 @@ async fn main() -> Result<()> {
     let home = resolve_hsmii_home(cli.config, cli.profile.as_deref());
 
     match cli.command {
-        Commands::Start { daemon, discord, telegram, email, federation } => {
-            cmd_start(&home, daemon, discord, telegram, email, federation || cli.all).await?;
+        Commands::Start {
+            daemon,
+            discord,
+            telegram,
+            email,
+            federation,
+        } => {
+            cmd_start(
+                &home,
+                daemon,
+                discord,
+                telegram,
+                email,
+                federation || cli.all,
+            )
+            .await?;
         }
         Commands::Chat { message } => {
             cmd_chat(&home, message).await?;
@@ -215,17 +233,17 @@ async fn main() -> Result<()> {
 
 /// Start the integrated agent
 async fn cmd_start(
-    home: &PathBuf, 
-    daemon: bool, 
-    discord: bool, 
+    home: &PathBuf,
+    daemon: bool,
+    discord: bool,
     telegram: bool,
     _email: bool,
     _federation: bool,
 ) -> Result<()> {
     // Check if initialized
-    let initialized = hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() 
+    let initialized = hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists()
         || home.join("integrated_config.json").exists();
-    
+
     if !initialized {
         println!("Integrated agent not initialized. Run `hsmii-integrated bootstrap` first.");
         return Ok(());
@@ -245,27 +263,36 @@ async fn cmd_start(
         agent.core.world.agents.len(),
         agent.core.world.global_coherence()
     );
-    
+
     // Component status
     let status = agent.get_component_status();
     println!();
     println!("🔌 Components:");
     println!("   Email:       {}", if status.email { "✓" } else { "✗" });
-    println!("   Federation:  {}", if status.federation { "✓" } else { "✗" });
-    println!("   Coder:       {}", if status.coder_assistant { "✓" } else { "✗" });
+    println!(
+        "   Federation:  {}",
+        if status.federation { "✓" } else { "✗" }
+    );
+    println!(
+        "   Coder:       {}",
+        if status.coder_assistant { "✓" } else { "✗" }
+    );
     println!("   Prolog:      {}", if status.prolog { "✓" } else { "✗" });
     println!("   Pi AI:       {}", if status.pi_ai { "✓" } else { "✗" });
-    println!("   Ouroboros:   {}", if status.ouroboros { "✓" } else { "✗" });
+    println!(
+        "   Ouroboros:   {}",
+        if status.ouroboros { "✓" } else { "✗" }
+    );
     println!("   Hermes:      {}", if status.hermes { "✓" } else { "✗" });
     #[cfg(feature = "gpu")]
     println!("   GPU:         {}", if status.gpu { "✓" } else { "✗" });
     println!();
-    
+
     // Gardening status
     if agent.config.enable_gardening {
-        println!("🌱 Gardening: enabled (interval: {}s, threshold: {:.2})",
-            agent.config.gardening_interval_secs,
-            agent.config.decay_threshold
+        println!(
+            "🌱 Gardening: enabled (interval: {}s, threshold: {:.2})",
+            agent.config.gardening_interval_secs, agent.config.decay_threshold
         );
     }
     println!();
@@ -280,7 +307,7 @@ async fn cmd_start(
         if telegram {
             gateway_config.telegram_token = std::env::var("TELEGRAM_TOKEN").ok();
         }
-        
+
         let rx = agent.start_gateway(gateway_config).await?;
         msg_rx = Some(rx);
         println!("Gateway(s) started.");
@@ -302,12 +329,12 @@ async fn cmd_start(
                             continue;
                         }
                     };
-                    
+
                     let response = match agent.handle_message(msg).await {
                         Ok(resp) => resp,
                         Err(e) => format!("Error: {}", e),
                     };
-                    
+
                     let _ = response_tx.send(response);
                     let _ = agent.save().await;
                 }
@@ -326,14 +353,16 @@ async fn cmd_start(
                         let tick = agent.core.services.dks.tick();
                         agent.core.services.last_dks_tick = Some(tick);
                     }
-                    
+
                     // Trigger gardening if needed
-                    if agent.config.enable_gardening && 
-                       agent.last_gardening.elapsed().as_secs() > agent.config.gardening_interval_secs {
+                    if agent.config.enable_gardening
+                        && agent.last_gardening.elapsed().as_secs()
+                            > agent.config.gardening_interval_secs
+                    {
                         let _ = agent.garden_hypergraph().await;
                         agent.last_gardening = std::time::Instant::now();
                     }
-                    
+
                     let _ = agent.save().await;
                 }
             }
@@ -361,7 +390,7 @@ async fn cmd_start(
             tokio::select! {
                 line_result = lines.next_line() => {
                     let line: String = line_result?.unwrap_or_default();
-                    
+
                     match line.as_str() {
                         "exit" | "quit" => break,
                         "" => continue,
@@ -388,7 +417,7 @@ async fn cmd_start(
                         }
                     }
                 }
-                Some((msg, response_tx)) = async { 
+                Some((msg, response_tx)) = async {
                     if let Some(ref mut rx) = msg_rx { rx.recv().await } else { None }
                 } => {
                     let response = match agent.handle_message(msg).await {
@@ -571,15 +600,71 @@ async fn cmd_status(home: &PathBuf) -> Result<()> {
     println!("  Global coherence: {:.3}\n", stats.coherence);
 
     println!("## Components");
-    println!("  Email:       {}", if status.email { "✓ enabled" } else { "✗ disabled" });
-    println!("  Federation:  {}", if status.federation { "✓ enabled" } else { "✗ disabled" });
-    println!("  Coder:       {}", if status.coder_assistant { "✓ enabled" } else { "✗ disabled" });
-    println!("  Prolog:      {}", if status.prolog { "✓ enabled" } else { "✗ disabled" });
-    println!("  Pi AI:       {}", if status.pi_ai { "✓ enabled" } else { "✗ disabled" });
-    println!("  Ouroboros:   {}", if status.ouroboros { "✓ enabled" } else { "✗ disabled" });
-    println!("  Hermes:      {}", if status.hermes { "✓ enabled" } else { "✗ disabled" });
+    println!(
+        "  Email:       {}",
+        if status.email {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Federation:  {}",
+        if status.federation {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Coder:       {}",
+        if status.coder_assistant {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Prolog:      {}",
+        if status.prolog {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Pi AI:       {}",
+        if status.pi_ai {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Ouroboros:   {}",
+        if status.ouroboros {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  Hermes:      {}",
+        if status.hermes {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
     #[cfg(feature = "gpu")]
-    println!("  GPU:         {}", if status.gpu { "✓ enabled" } else { "✗ disabled" });
+    println!(
+        "  GPU:         {}",
+        if status.gpu {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
 
     println!("\n## Activity");
     println!("  Messages processed: {}", stats.total_messages);
@@ -594,16 +679,72 @@ async fn cmd_config(home: &PathBuf, action: ConfigAction) -> Result<()> {
         ConfigAction::Show => {
             let agent = IntegratedPersonalAgent::initialize(home).await?;
             let config = &agent.config;
-            
+
             println!("# HSM-II Configuration\n");
-            println!("Email:       {}", if config.enable_email { "enabled" } else { "disabled" });
-            println!("Federation:  {}", if config.enable_federation { "enabled" } else { "disabled" });
-            println!("Coder:       {}", if config.enable_coder_assistant { "enabled" } else { "disabled" });
-            println!("Prolog:      {}", if config.enable_prolog { "enabled" } else { "disabled" });
-            println!("Pi AI:       {}", if config.enable_pi_ai { "enabled" } else { "disabled" });
-            println!("Ouroboros:   {}", if config.enable_ouroboros { "enabled" } else { "disabled" });
-            println!("Hermes:      {}", if config.enable_hermes { "enabled" } else { "disabled" });
-            println!("Gardening:   {}", if config.enable_gardening { "enabled" } else { "disabled" });
+            println!(
+                "Email:       {}",
+                if config.enable_email {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Federation:  {}",
+                if config.enable_federation {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Coder:       {}",
+                if config.enable_coder_assistant {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Prolog:      {}",
+                if config.enable_prolog {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Pi AI:       {}",
+                if config.enable_pi_ai {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Ouroboros:   {}",
+                if config.enable_ouroboros {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Hermes:      {}",
+                if config.enable_hermes {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Gardening:   {}",
+                if config.enable_gardening {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
             println!("  Interval:  {}s", config.gardening_interval_secs);
             println!("  Threshold: {:.2}", config.decay_threshold);
         }
@@ -631,9 +772,9 @@ async fn cmd_bootstrap(home: &PathBuf, all: bool) -> Result<()> {
     }
 
     println!("🌱 Bootstrapping HSM-II Integrated Agent\n");
-    
+
     let mut config = IntegratedAgentConfig::default();
-    
+
     if all {
         config.enable_email = true;
         config.enable_federation = true;
@@ -642,21 +783,27 @@ async fn cmd_bootstrap(home: &PathBuf, all: bool) -> Result<()> {
         config.enable_pi_ai = true;
         println!("✨ All components enabled\n");
     }
-    
+
     let mut agent = IntegratedPersonalAgent::initialize(home).await?;
-    
+
     println!("✨ Created {} agents", agent.core.world.agents.len());
-    
+
     let status = agent.get_component_status();
     println!("\n🔌 Components:");
     println!("  Email:       {}", if status.email { "✓" } else { "✗" });
-    println!("  Federation:  {}", if status.federation { "✓" } else { "✗" });
-    println!("  Coder:       {}", if status.coder_assistant { "✓" } else { "✗" });
+    println!(
+        "  Federation:  {}",
+        if status.federation { "✓" } else { "✗" }
+    );
+    println!(
+        "  Coder:       {}",
+        if status.coder_assistant { "✓" } else { "✗" }
+    );
     println!("  Prolog:      {}", if status.prolog { "✓" } else { "✗" });
     println!("  Pi AI:       {}", if status.pi_ai { "✓" } else { "✗" });
-    
+
     agent.save().await?;
-    
+
     println!("\n✓ LadybugDB initialized");
     println!("✓ Configuration saved");
 
@@ -689,8 +836,13 @@ async fn cmd_maintain(home: &PathBuf, action: MaintainAction) -> Result<()> {
         }
         MaintainAction::Status => {
             println!("# Maintenance Status\n");
-            println!("Gardening:   {} (interval: {}s)",
-                if agent.config.enable_gardening { "enabled" } else { "disabled" },
+            println!(
+                "Gardening:   {} (interval: {}s)",
+                if agent.config.enable_gardening {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 agent.config.gardening_interval_secs
             );
             println!("Last garden: {:?} ago", agent.last_gardening.elapsed());

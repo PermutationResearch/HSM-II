@@ -163,14 +163,17 @@ pub fn find_contract(
     contracts[0].clone()
 }
 
-pub fn evaluate_gate_results(transcript: &str, gates: &[OnboardingGate]) -> Vec<OnboardingGateResult> {
+pub fn evaluate_gate_results(
+    transcript: &str,
+    gates: &[OnboardingGate],
+) -> Vec<OnboardingGateResult> {
     let transcript_lc = transcript.to_ascii_lowercase();
-    gates.iter()
+    gates
+        .iter()
         .map(|g| {
-            let satisfied = g
-                .keyword_any
-                .iter()
-                .any(|kw| !kw.trim().is_empty() && transcript_lc.contains(&kw.to_ascii_lowercase()));
+            let satisfied = g.keyword_any.iter().any(|kw| {
+                !kw.trim().is_empty() && transcript_lc.contains(&kw.to_ascii_lowercase())
+            });
             OnboardingGateResult {
                 id: g.id.clone(),
                 label: g.label.clone(),

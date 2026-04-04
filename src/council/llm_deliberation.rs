@@ -223,8 +223,10 @@ pub struct LLMDeliberationConfig {
 impl Default for LLMDeliberationConfig {
     fn default() -> Self {
         Self {
-            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3-coder:480b-cloud".to_string()),
-            endpoint: format!("{}:{}",
+            model: std::env::var("OLLAMA_MODEL")
+                .unwrap_or_else(|_| "qwen3-coder:480b-cloud".to_string()),
+            endpoint: format!(
+                "{}:{}",
                 std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string()),
                 std::env::var("OLLAMA_PORT").unwrap_or_else(|_| "11434".to_string()),
             ),

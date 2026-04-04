@@ -61,7 +61,11 @@ pub struct Playbook {
 }
 
 impl Playbook {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, scenario: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        scenario: impl Into<String>,
+    ) -> Self {
         let now = current_timestamp();
         Self {
             id: format!("pb_{}", uuid::Uuid::new_v4()),
@@ -476,7 +480,13 @@ mod tests {
 
     #[test]
     fn test_step_constructors() {
-        let tool_step = Step::tool_step(0, "Search web", "web_search", serde_json::json!({"query": "test"}), "results found");
+        let tool_step = Step::tool_step(
+            0,
+            "Search web",
+            "web_search",
+            serde_json::json!({"query": "test"}),
+            "results found",
+        );
         assert_eq!(tool_step.tool_name, Some("web_search".to_string()));
 
         let llm_step = Step::llm_step(1, "Summarize", "Summarize: {{input}}", "summary produced");
@@ -486,10 +496,13 @@ mod tests {
 
     #[test]
     fn test_serialization_roundtrip() {
-        let pb = Playbook::new("Test", "desc", "pattern")
-            .with_steps(vec![
-                Step::tool_step(0, "step1", "grep", serde_json::json!({}), "ok"),
-            ]);
+        let pb = Playbook::new("Test", "desc", "pattern").with_steps(vec![Step::tool_step(
+            0,
+            "step1",
+            "grep",
+            serde_json::json!({}),
+            "ok",
+        )]);
 
         let json = serde_json::to_string(&pb).unwrap();
         let deserialized: Playbook = serde_json::from_str(&json).unwrap();

@@ -175,11 +175,7 @@ impl CcOrchestrator {
 
     /// Run full pipeline: drafts → reviews → (optional) synthesis.
     #[instrument(skip(self, harness), fields(task_id = %task.id))]
-    pub async fn run(
-        &self,
-        task: CcTask,
-        harness: &mut Option<HarnessRuntime>,
-    ) -> CcRunResult {
+    pub async fn run(&self, task: CcTask, harness: &mut Option<HarnessRuntime>) -> CcRunResult {
         let mut errors = Vec::new();
         if self.cfg.agents.is_empty() {
             errors.push("no agent slots configured".into());
@@ -286,7 +282,9 @@ impl CcOrchestrator {
                         approve,
                         latency_ms,
                     }),
-                    Err(e) => errors.push(format!("review {reviewer_id}->{subject_agent_id}: {e:#}")),
+                    Err(e) => {
+                        errors.push(format!("review {reviewer_id}->{subject_agent_id}: {e:#}"))
+                    }
                 }
             }
             if let Some(h) = harness.as_mut() {
@@ -349,7 +347,8 @@ async fn exec_draft(
         .await;
     }
 
-    let base = "You are one member of a multi-agent engineering team. Produce a standalone draft answer.";
+    let base =
+        "You are one member of a multi-agent engineering team. Produce a standalone draft answer.";
     let sys = format!("{base}\n{}", slot.persona);
     let mut user = task.instruction.clone();
     if let Some(ctx) = &task.context {
@@ -577,7 +576,10 @@ fn parse_review_heuristic(text: &str) -> (String, f64, bool) {
             }
         }
     }
-    if !text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("verdict:")) {
+    if !text
+        .lines()
+        .any(|l| l.trim().to_ascii_lowercase().starts_with("verdict:"))
+    {
         approve = score >= 0.72;
     }
     (text.trim().to_string(), score.clamp(0.0, 1.0), approve)

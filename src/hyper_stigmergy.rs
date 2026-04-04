@@ -820,7 +820,9 @@ impl HyperStigmergicMorphogenesis {
         for node in &snapshot.nodes {
             // Load actual agents (has "Agent" label but NOT "Vertex" label)
             // Vertex_meta entries with kind=Agent have both labels, so we skip them here
-            if node.labels.iter().any(|l| l == "Agent") && !node.labels.iter().any(|l| l == "Vertex") {
+            if node.labels.iter().any(|l| l == "Agent")
+                && !node.labels.iter().any(|l| l == "Vertex")
+            {
                 let agent_id = get_int(&node.properties, "agent_id").unwrap_or(0) as u64;
                 let mut agent = Agent::new(
                     agent_id,
@@ -879,18 +881,12 @@ impl HyperStigmergicMorphogenesis {
                 let content = get_string(&node.properties, "content").unwrap_or_default();
                 let (l0, l1) = crate::memory::derive_hierarchy(&content);
                 let owner_namespace = get_string(&node.properties, "owner_namespace");
-                let supersedes_belief_id = get_int(&node.properties, "supersedes_belief_id")
-                    .map(|i| i as usize);
-                let evidence_belief_ids: Vec<usize> = get_string(
-                    &node.properties,
-                    "evidence_belief_ids",
-                )
-                .map(|s| {
-                    s.split(',')
-                        .filter_map(|t| t.trim().parse().ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+                let supersedes_belief_id =
+                    get_int(&node.properties, "supersedes_belief_id").map(|i| i as usize);
+                let evidence_belief_ids: Vec<usize> =
+                    get_string(&node.properties, "evidence_belief_ids")
+                        .map(|s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect())
+                        .unwrap_or_default();
                 let human_committed = get_int(&node.properties, "human_committed")
                     .map(|i| i != 0)
                     .unwrap_or(false);
@@ -2784,8 +2780,8 @@ impl HyperStigmergicMorphogenesis {
             }
         }
 
-        let use_random = rand::thread_rng()
-            .gen_bool(crate::world_guardrails::exploration_epsilon());
+        let use_random =
+            rand::thread_rng().gen_bool(crate::world_guardrails::exploration_epsilon());
         let pick_i = if use_random {
             rand::thread_rng().gen_range(0..scored.len())
         } else {
@@ -3970,14 +3966,14 @@ impl HyperStigmergicMorphogenesis {
 
         #[cfg(feature = "lbug")]
         if crate::persistence::lbug_world_store::primary_enabled() {
-            println!(
+            eprintln!(
                 "  System state saved to Ladybug primary store ({} bytes checkpoint payload)",
                 bytes_len
             );
             return Ok(());
         }
 
-        println!(
+        eprintln!(
             "  System state saved to {} ({} bytes)",
             EMBEDDED_GRAPH_STORE_FILE, bytes_len
         );
@@ -3990,19 +3986,19 @@ impl HyperStigmergicMorphogenesis {
             #[cfg(feature = "lbug")]
             {
                 if crate::persistence::lbug_world_store::primary_enabled() {
-                    println!("  System state loaded from Ladybug primary store");
+                    eprintln!("  System state loaded from Ladybug primary store");
                 } else {
-                    println!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
+                    eprintln!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
                 }
             }
             #[cfg(not(feature = "lbug"))]
-            println!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
+            eprintln!("  System state loaded from {}", EMBEDDED_GRAPH_STORE_FILE);
             return Ok(loaded);
         }
 
         if EmbeddedGraphStore::migrate_legacy_files()? {
             let loaded = EmbeddedGraphStore::load_world()?;
-            println!(
+            eprintln!(
                 "  Migrated legacy state ({} + {}) into {}",
                 LEGACY_WORLD_STATE_FILE, LEGACY_EMBEDDING_INDEX_FILE, EMBEDDED_GRAPH_STORE_FILE
             );
@@ -4021,12 +4017,12 @@ impl HyperStigmergicMorphogenesis {
             .map(|(world, _)| world)
             .unwrap_or_else(|_| Self::new(10))
     }
-    
+
     /// Get current tick count
     pub fn current_tick(&self) -> u64 {
         self.tick_count
     }
-    
+
     /// Get agent capability score for a specific tool/skill
     pub fn agent_capability_score(&self, agent_id: AgentId, capability: &str) -> f64 {
         if let Some(reputation) = self.social_memory.reputations.get(&agent_id) {
@@ -4044,17 +4040,15 @@ impl HyperStigmergicMorphogenesis {
         }
         0.0
     }
-    
+
     /// Count similar experiences for skill distillation
     pub fn count_similar_experiences(&self, _agent_id: AgentId, pattern: &str) -> usize {
         self.experiences
             .iter()
-            .filter(|e| {
-                e.description.contains(pattern) || e.context.contains(pattern)
-            })
+            .filter(|e| e.description.contains(pattern) || e.context.contains(pattern))
             .count()
     }
-    
+
     /// Integrate a skill into the world
     pub fn integrate_cass_skill(&mut self, skill: crate::skill::Skill) {
         // Store skill in the world's skill collection
@@ -4290,6 +4284,35 @@ impl HyperStigmergicMorphogenesis {
             json.len()
         );
         Ok(())
+    }
+}
+
+// === ARCHITECTURE BLUEPRINT (embedded `architecture/hsm-ii-blueprint.ron`) ===
+
+impl HyperStigmergicMorphogenesis {
+    /// Canonical five-layer blueprint (versioned RON, embedded at compile time).
+    pub fn architecture_blueprint() -> crate::architecture_blueprint::ArchitectureBlueprint {
+        crate::architecture_blueprint::embedded_blueprint()
+    }
+
+    /// Live counts for `/api/architecture`, `hsm_archviz --live`, and observability.
+    pub fn architecture_runtime_snapshot(
+        &self,
+    ) -> crate::architecture_blueprint::WorldArchitectureRuntime {
+        crate::architecture_blueprint::WorldArchitectureRuntime {
+            beliefs: self.beliefs.len(),
+            experiences: self.experiences.len(),
+            hyper_edges: self.edges.len(),
+            tick_count: self.tick_count,
+            prev_coherence: self.prev_coherence,
+            skill_bank_roots: self.skill_bank.general_skills.len(),
+        }
+    }
+
+    /// Alias for [`Self::architecture_runtime_snapshot`] (self-reporting / external tools).
+    #[inline]
+    pub fn architecture_stats(&self) -> crate::architecture_blueprint::WorldArchitectureRuntime {
+        self.architecture_runtime_snapshot()
     }
 }
 
@@ -4601,9 +4624,7 @@ mod collective_jw_tests {
 
         // Bystander should NOT get credit (not connected via edge)
         let bystander_stats = world.agent_action_stats.get(&bystander);
-        let bystander_downstream = bystander_stats
-            .map(|s| s.downstream_successes)
-            .unwrap_or(0);
+        let bystander_downstream = bystander_stats.map(|s| s.downstream_successes).unwrap_or(0);
         assert_eq!(
             bystander_downstream, 0,
             "Unconnected agent should not get downstream credit"

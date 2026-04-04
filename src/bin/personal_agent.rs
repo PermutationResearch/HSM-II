@@ -6,13 +6,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
+use hyper_stigmergy::api::{ApiState, HonchoApiState, SharedState};
 use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent};
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use hyper_stigmergy::{ApprovalOutcome, ApprovalService};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 // TUI imports for Codex-style interface
 use crossterm::{
@@ -201,7 +202,14 @@ async fn main() -> Result<()> {
         Commands::Ingest { file } => {
             cmd_ingest(&home, &file).await?;
         }
-        Commands::Predict { template, topic, list, history, backtest, outcome } => {
+        Commands::Predict {
+            template,
+            topic,
+            list,
+            history,
+            backtest,
+            outcome,
+        } => {
             cmd_predict(&home, template, topic, list, history, backtest, outcome).await?;
         }
         Commands::Status => {
@@ -212,32 +220,129 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Start the agent
+/// Start the agent — unified runtime (the “OS” for everything else in this process).
+///
+/// Everything runs in one process:
+///  - the personal agent (kept in memory in an Arc<Mutex<>>)
+///  - the Axum REST API server (in-process tokio task)
+///  - the Paperclip **Intelligence Layer** (goals, DRI registry, capability tracking) — **runtime state**, not a company pack
+///  - the DKS evolution heartbeat (in-process tokio task)
+///  - gateway message processing (Discord / Telegram)
+///
+/// Company packs (e.g. on-disk agent/skill trees imported into Postgres) supply **content**;
+/// goals, DRIs, and capabilities for work inside HSM-II come from this **shared** Intelligence Layer
+/// attached to `ApiState`. Rebuild and **restart** this binary (same flags/profile as before) so the
+/// API serves the code you compiled — long-lived processes keep the old in-memory layer until replaced.
+///
+/// The agent's world is synced into the shared API state after every turn so the
+/// dashboard always reflects the live in-memory state rather than a stale snapshot.
 async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) -> Result<()> {
     // Check if initialized (LadybugDB format)
-    let initialized = hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() 
+    let initialized = hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists()
         || home.join("config.json").exists();
-    
+
     if !initialized {
         println!("Enhanced agent not initialized. Run `hsmii bootstrap` first.");
         return Ok(());
     }
 
-    // Load enhanced agent with full HSM-II
+    // ── 1. Load the agent once; keep it in memory for the process lifetime ──
     let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
-    println!("🚀 Starting Enhanced HSM-II Personal Agent");
+    // Enable memory journal by default so Honcho can read session transcripts.
+    agent.config.memory_journal = true;
+
+    println!("🚀 Starting Enhanced HSM-II Personal Agent (unified runtime)");
     println!("   Agents: {}", agent.world.agents.len());
     for (i, a) in agent.world.agents.iter().enumerate() {
         let jw = a.calculate_jw(agent.world.global_coherence(), 3);
         println!("     {}. {:?} (JW: {:.3})", i + 1, a.role, jw);
     }
     println!("   Coherence: {:.3}", agent.world.global_coherence());
-    println!("   Council: {}", if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" });
-    println!("   CASS: {}", if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" });
-    println!("   LadybugDB: ✓ active\n");
+    println!(
+        "   Council: {}",
+        if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" }
+    );
+    println!(
+        "   CASS: {}",
+        if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" }
+    );
+    println!("   LadybugDB: ✓ active");
+    println!("   Memory journal: ✓ enabled");
+    println!("   Honcho inference: ✓ enabled\n");
 
-    // Setup gateway if requested
+    // ── 2. Build shared API state seeded from the live world ────────────────
+    let shared_inner: Arc<RwLock<SharedState>> = Arc::new(RwLock::new(
+        SharedState::with_world(agent.world.clone()),
+    ));
+
+    let honcho_api_state = HonchoApiState {
+        honcho_home: agent.base_path.join("honcho"),
+        hybrid_memory: Arc::clone(&agent.honcho_memory),
+    };
+
+    // ── 2b. Shared runtime Intelligence Layer (not company-pack data) ─────
+    let mut intelligence = hyper_stigmergy::paperclip::IntelligenceLayer::new();
+    // Optional template seeds default capabilities / DRIs / role shape for this process
+    let template_path = home.join("config").join("paperclip_template.json");
+    if template_path.exists() {
+        match hyper_stigmergy::paperclip::template::CompanyTemplate::load(&template_path) {
+            Ok(tpl) => {
+                tpl.apply_to(&mut intelligence);
+                info!("Loaded Paperclip template: {} capabilities, {} DRIs",
+                    intelligence.capabilities.len(), intelligence.dri_registry.len());
+            }
+            Err(e) => warn!("Failed to load Paperclip template: {e}"),
+        }
+    } else {
+        // Apply default template
+        let tpl = hyper_stigmergy::paperclip::template::CompanyTemplate::paperclip_default();
+        tpl.apply_to(&mut intelligence);
+    }
+    let intelligence = Arc::new(Mutex::new(intelligence));
+
+    let api_state = ApiState::from_shared(Arc::clone(&shared_inner))
+        .with_honcho(honcho_api_state)
+        .with_intelligence(Arc::clone(&intelligence));
+
+    // ── 3. Start the Axum API server as an in-process task ──────────────────
+    let api_port: u16 = std::env::var("HSM_API_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3000);
+
+    let app = hyper_stigmergy::api::api_router(api_state)
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{api_port}").parse()?;
+    tokio::spawn(async move {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                info!("HSM-II API server listening on {addr}");
+                if let Err(e) = axum::serve(listener, app).await {
+                    warn!("API server error: {e}");
+                }
+            }
+            Err(e) => warn!("API server bind failed ({addr}): {e}"),
+        }
+    });
+
+    println!("   REST API: http://127.0.0.1:{api_port}");
+    println!("   Web UI:   http://127.0.0.1:3001 (run `cd web && npm run dev`)\n");
+
+    // ── 4. Helper: sync agent world into the shared API state ───────────────
+    let sync_world = {
+        let shared_inner = Arc::clone(&shared_inner);
+        move |world: hyper_stigmergy::hyper_stigmergy::HyperStigmergicMorphogenesis| {
+            let shared = Arc::clone(&shared_inner);
+            tokio::spawn(async move {
+                shared.write().await.world = Some(world);
+            });
+        }
+    };
+
+    // ── 5. Setup gateway if requested ────────────────────────────────────────
     let mut msg_rx = None;
     if discord || telegram {
         let mut gateway_config = gateway::Config::default();
@@ -247,139 +352,154 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         if telegram {
             gateway_config.telegram_token = std::env::var("TELEGRAM_TOKEN").ok();
         }
-        
-        // Start gateway and get message channel
         let rx = agent.start_gateway(gateway_config).await?;
         msg_rx = Some(rx);
         println!("Gateway(s) started. Telegram/Discord messages will be processed.\n");
     }
 
+    // Wrap agent in Arc<Mutex<>> for shared ownership across tasks
+    let agent = Arc::new(Mutex::new(agent));
+
     if daemon {
-        // Daemon mode - spawn message processing task
+        // ── 6a. Daemon mode ──────────────────────────────────────────────────
         info!("Running in daemon mode");
 
-        // Spawn message processing loop
+        // Gateway message processing
         if let Some(mut rx) = msg_rx {
-            let home_msg = home.clone();
+            let agent_clone = Arc::clone(&agent);
+            let sync = sync_world.clone();
             tokio::spawn(async move {
                 while let Some((msg, response_tx)) = rx.recv().await {
-                    // Reload agent for each message to get latest state
-                    let mut agent = match EnhancedPersonalAgent::initialize(&home_msg).await {
-                        Ok(a) => a,
+                    let mut ag = agent_clone.lock().await;
+                    let response = match ag.handle_message(msg).await {
+                        Ok(resp) => resp,
                         Err(e) => {
-                            error!("Failed to load agent: {}", e);
-                            let _ = response_tx.send(format!("Error: {}", e));
-                            continue;
+                            error!("handle_message error: {e}");
+                            format!("Error: {e}")
                         }
                     };
-                    
-                    let response = match agent.handle_message(msg).await {
-                        Ok(resp) => resp,
-                        Err(e) => format!("Error: {}", e),
-                    };
-                    
+                    sync(ag.world.clone());
+                    let _ = ag.save().await;
                     let _ = response_tx.send(response);
-                    let _ = agent.save().await;
                 }
             });
         }
 
-        // Start DKS evolution loop (replacing simple heartbeat)
-        let home_clone = home.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                if let Ok(mut agent) = EnhancedPersonalAgent::initialize(&home_clone).await {
-                    // Run DKS tick
-                    if agent.config.enable_dks {
-                        let _ = agent.services.dks.tick();
+        // DKS + Intelligence Layer heartbeat (uses the shared agent — no disk reload)
+        {
+            let agent_clone = Arc::clone(&agent);
+            let intelligence_clone = Arc::clone(&intelligence);
+            let sync = sync_world.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let mut ag = agent_clone.lock().await;
+
+                    // DKS tick
+                    if ag.config.enable_dks {
+                        let _ = ag.services.dks.tick();
                     }
-                    // Auto-save
-                    let _ = agent.save().await;
+
+                    // Intelligence Layer: scan world for signals, then process them
+                    {
+                        let mut il = intelligence_clone.lock().await;
+                        il.scan_world(ag.world.global_coherence(), ag.world.tick_count);
+                        let results = il.tick();
+                        for r in &results {
+                            if !r.success {
+                                info!(
+                                    goal_id = ?r.goal_id,
+                                    escalated_to = ?r.escalated_to,
+                                    "intelligence: {}",
+                                    r.message
+                                );
+                            }
+                        }
+                    }
+
+                    sync(ag.world.clone());
+                    let _ = ag.save().await;
                 }
-            }
-        });
+            });
+        }
 
         println!("✓ Agent is running in daemon mode");
-        if telegram {
-            println!("  Telegram bot: active (polling for messages)");
-        }
-        if discord {
-            println!("  Discord bot: active");
-        }
+        if telegram { println!("  Telegram bot: active"); }
+        if discord  { println!("  Discord bot: active"); }
         println!("  DKS evolution: every 60s");
+        println!("  Intelligence Layer: every 60s");
         println!("  Auto-save: enabled\n");
         println!("Press Ctrl+C to stop.");
 
-        // Wait for shutdown signal
         tokio::signal::ctrl_c().await?;
-
         println!("\nShutting down...");
-        agent.save().await?;
+        agent.lock().await.save().await?;
     } else {
-        // Interactive mode
+        // ── 6b. Interactive (stdin) mode ─────────────────────────────────────
         println!("Interactive mode. Type 'exit' to quit.\n");
 
         use tokio::io::{stdin, AsyncBufReadExt, BufReader};
-
-        let stdin = BufReader::new(stdin());
-        let mut lines = stdin.lines();
+        let stdin_reader = BufReader::new(stdin());
+        let mut lines = stdin_reader.lines();
 
         loop {
-            // Handle both stdin and gateway messages concurrently
             tokio::select! {
-                // Handle stdin input
                 line_result = lines.next_line() => {
                     let line: String = line_result?.unwrap_or_default();
-                    
                     match line.as_str() {
                         "exit" | "quit" => break,
                         "" => continue,
                         input => {
-                            // Create gateway message
                             let msg = gateway::Message {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 platform: gateway::Platform::Cli,
                                 channel_id: "cli".to_string(),
                                 channel_name: None,
                                 user_id: "user".to_string(),
-                        user_name: "User".to_string(),
+                                user_name: "User".to_string(),
                                 content: input.to_string(),
                                 timestamp: chrono::Utc::now(),
                                 attachments: vec![],
                                 reply_to: None,
                             };
 
-                            match agent.handle_message(msg).await {
+                            let mut ag = agent.lock().await;
+                            match ag.handle_message(msg).await {
                                 Ok(response) => {
-                                    // Show council usage info
-                                    let stats = agent.get_stats();
+                                    let stats = ag.get_stats();
                                     if stats.council_invocations > 0 {
-                                        println!("\n[Coherence: {:.3} | Council used: {} | Agents: {}]", 
-                                            stats.coherence, stats.council_invocations, stats.agent_count);
+                                        println!(
+                                            "\n[Coherence: {:.3} | Council used: {} | Agents: {}]",
+                                            stats.coherence,
+                                            stats.council_invocations,
+                                            stats.agent_count
+                                        );
                                     }
                                     println!("\n{}", response);
                                 }
-                                Err(e) => error!("Error: {}", e),
+                                Err(e) => error!("Error: {e}"),
                             }
+                            sync_world(ag.world.clone());
                         }
                     }
                 }
-                // Handle gateway messages (if gateway is enabled)
-                Some((msg, response_tx)) = async { 
+                Some((msg, response_tx)) = async {
                     if let Some(ref mut rx) = msg_rx { rx.recv().await } else { None }
                 } => {
-                    let response = match agent.handle_message(msg).await {
+                    let mut ag = agent.lock().await;
+                    let response = match ag.handle_message(msg).await {
                         Ok(resp) => resp,
-                        Err(e) => format!("Error: {}", e),
+                        Err(e) => format!("Error: {e}"),
                     };
+                    sync_world(ag.world.clone());
                     let _ = response_tx.send(response);
                 }
             }
         }
 
-        agent.save().await?;
+        agent.lock().await.save().await?;
     }
 
     Ok(())
@@ -420,8 +540,9 @@ async fn cmd_do(home: &PathBuf, task: &str) -> Result<()> {
     let mut agent = EnhancedPersonalAgent::initialize(home).await?;
 
     println!("Executing: {}\n", task);
-    println!("Using {} agents with coherence {:.3}\n", 
-        agent.world.agents.len(), 
+    println!(
+        "Using {} agents with coherence {:.3}\n",
+        agent.world.agents.len(),
         agent.world.global_coherence()
     );
 
@@ -461,10 +582,38 @@ async fn cmd_config(home: &PathBuf, action: ConfigAction) -> Result<()> {
             println!("Coherence: {:.3}", agent.world.global_coherence());
             println!("Beliefs: {}", agent.world.beliefs.len());
             println!("Edges: {}", agent.world.edges.len());
-            println!("\nCouncil: {}", if agent.config.enable_council { "enabled" } else { "disabled" });
-            println!("CASS: {}", if agent.config.enable_cass { "enabled" } else { "disabled" });
-            println!("DKS: {}", if agent.config.enable_dks { "enabled" } else { "disabled" });
-            println!("JouleWork tracking: {}", if agent.config.track_joulework { "enabled" } else { "disabled" });
+            println!(
+                "\nCouncil: {}",
+                if agent.config.enable_council {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "CASS: {}",
+                if agent.config.enable_cass {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "DKS: {}",
+                if agent.config.enable_dks {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "JouleWork tracking: {}",
+                if agent.config.track_joulework {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
         }
         ConfigAction::Persona => {
             // Open SOUL.md in editor
@@ -496,12 +645,17 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
                     BeliefSource::Inference => "🔗",
                     BeliefSource::Prediction => "🔮",
                 };
-                println!("{} [{:.2}] {}", source_icon, belief.confidence, belief.content);
+                println!(
+                    "{} [{:.2}] {}",
+                    source_icon, belief.confidence, belief.content
+                );
             }
             println!("\n# Hyperedges\n");
             for (i, edge) in agent.world.edges.iter().rev().take(n).enumerate() {
-                println!("Edge {}: agents {:?}, weight={:.2}, emergent={}", 
-                    i, edge.participants, edge.weight, edge.emergent);
+                println!(
+                    "Edge {}: agents {:?}, weight={:.2}, emergent={}",
+                    i, edge.participants, edge.weight, edge.emergent
+                );
             }
         }
         MemoryAction::Search { query } => {
@@ -511,7 +665,10 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
                 println!("[{:.2}] {}", belief.confidence, belief.content);
             }
         }
-        MemoryAction::Add { content, category: _ } => {
+        MemoryAction::Add {
+            content,
+            category: _,
+        } => {
             use hyper_stigmergy::hyper_stigmergy::{Belief, BeliefSource};
             // Add as a belief to the world
             let id = agent.world.beliefs.len();
@@ -555,7 +712,7 @@ async fn cmd_heartbeat(home: &PathBuf) -> Result<()> {
     println!("Generation: {}", tick.generation);
     println!("Population: {}", stats.size);
     println!("Avg persistence: {:.3}", stats.average_persistence);
-    
+
     agent.save().await?;
     println!("\n✓ State saved to LadybugDB");
 
@@ -564,28 +721,33 @@ async fn cmd_heartbeat(home: &PathBuf) -> Result<()> {
 
 /// Bootstrap new enhanced agent
 async fn cmd_bootstrap(home: &PathBuf) -> Result<()> {
-    if home.join("config.json").exists() || hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+    if home.join("config.json").exists()
+        || hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists()
+    {
         println!("Enhanced agent already initialized at {}", home.display());
         println!("Run `hsmii config` to view configuration.");
         return Ok(());
     }
 
     println!("🌱 Bootstrapping Enhanced HSM-II Personal Agent\n");
-    
+
     let mut agent = EnhancedPersonalAgent::initialize(home).await?;
-    
+
     // Calculate initial JW scores for display
     let coherence = agent.world.global_coherence();
-    println!("✨ Created {} agents (coherence: {:.3}):", agent.world.agents.len(), coherence);
+    println!(
+        "✨ Created {} agents (coherence: {:.3}):",
+        agent.world.agents.len(),
+        coherence
+    );
     for (i, agent_info) in agent.world.agents.iter().enumerate() {
         let jw = agent_info.calculate_jw(coherence, 3);
-        println!("  {}. {:?} - JW: {:.3}", 
-            i + 1, agent_info.role, jw);
+        println!("  {}. {:?} - JW: {:.3}", i + 1, agent_info.role, jw);
     }
-    
+
     // Save the initial world state
     agent.save().await?;
-    
+
     println!("\n✓ LadybugDB initialized and saved");
     println!("✓ CASS skill system ready");
     println!("✓ Council deliberation enabled");
@@ -648,7 +810,14 @@ async fn cmd_predict(
         for t in builtin_templates() {
             println!("  {} — {}", t.id, t.name);
             println!("    Domain: {}", t.domain);
-            println!("    Required: {}", t.required_variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", "));
+            println!(
+                "    Required: {}",
+                t.required_variables
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             println!("    Variants: {}", t.suggested_variants.join(", "));
             println!();
         }
@@ -663,16 +832,23 @@ async fn cmd_predict(
     // History mode: show past predictions
     if show_history {
         let store = PredictionStore::load(home);
-        println!("\n📜 PREDICTION HISTORY ({} predictions, {} analyses)\n",
-            store.records.len(), store.analyses.len());
+        println!(
+            "\n📜 PREDICTION HISTORY ({} predictions, {} analyses)\n",
+            store.records.len(),
+            store.analyses.len()
+        );
 
         let pending = store.pending_outcomes();
         if !pending.is_empty() {
             println!("⏳ AWAITING OUTCOMES ({}):", pending.len());
             println!("{}", "─".repeat(50));
             for p in &pending {
-                println!("  ID: {}  | Topic: {} | Confidence: {:.0}%",
-                    p.id, p.topic, p.predicted_confidence * 100.0);
+                println!(
+                    "  ID: {}  | Topic: {} | Confidence: {:.0}%",
+                    p.id,
+                    p.topic,
+                    p.predicted_confidence * 100.0
+                );
                 println!("  Predicted: {}", p.predicted_outcome);
                 println!();
             }
@@ -683,10 +859,19 @@ async fn cmd_predict(
             println!("📊 STORED ANALYSES (last 10):");
             println!("{}", "─".repeat(50));
             for a in analyses.iter().take(10) {
-                let recal = if a.analysis.recalibrated { " [recalibrated]" } else { "" };
-                println!("  {} | {} | Impact: {:.1} | Confidence: {:.0}%{}",
-                    a.id, a.analysis.domain, a.analysis.expected_impact,
-                    a.analysis.scenario_report.overall_confidence * 100.0, recal);
+                let recal = if a.analysis.recalibrated {
+                    " [recalibrated]"
+                } else {
+                    ""
+                };
+                println!(
+                    "  {} | {} | Impact: {:.1} | Confidence: {:.0}%{}",
+                    a.id,
+                    a.analysis.domain,
+                    a.analysis.expected_impact,
+                    a.analysis.scenario_report.overall_confidence * 100.0,
+                    recal
+                );
                 if !a.notes.is_empty() {
                     println!("    Notes: {}", a.notes);
                 }
@@ -708,29 +893,52 @@ async fn cmd_predict(
         println!("{}", "═".repeat(50));
         println!("  Total predictions evaluated: {}", stats.total_evaluated);
         println!("  Correct predictions:         {}", stats.correct);
-        println!("  Actual accuracy:             {:.1}%", stats.actual_accuracy * 100.0);
-        println!("  Avg predicted confidence:    {:.1}%", stats.avg_predicted_confidence * 100.0);
-        println!("  Calibration error:           {:.2}", stats.calibration_error);
+        println!(
+            "  Actual accuracy:             {:.1}%",
+            stats.actual_accuracy * 100.0
+        );
+        println!(
+            "  Avg predicted confidence:    {:.1}%",
+            stats.avg_predicted_confidence * 100.0
+        );
+        println!(
+            "  Calibration error:           {:.2}",
+            stats.calibration_error
+        );
         println!("  Direction:                   {}", stats.direction);
-        println!("  Adjustment factor:           {:.2}×", stats.adjustment_factor);
+        println!(
+            "  Adjustment factor:           {:.2}×",
+            stats.adjustment_factor
+        );
         println!();
 
         if stats.direction == "overconfident" {
             println!("  ⚠ Your model predicts with higher confidence than warranted.");
-            println!("    Confidence scores are being adjusted down by {:.0}%.",
-                (1.0 - stats.adjustment_factor) * 100.0);
+            println!(
+                "    Confidence scores are being adjusted down by {:.0}%.",
+                (1.0 - stats.adjustment_factor) * 100.0
+            );
         } else if stats.direction == "underconfident" {
             println!("  💡 Your model is more accurate than it thinks.");
-            println!("    Confidence scores are being adjusted up by {:.0}%.",
-                (stats.adjustment_factor - 1.0) * 100.0);
+            println!(
+                "    Confidence scores are being adjusted up by {:.0}%.",
+                (stats.adjustment_factor - 1.0) * 100.0
+            );
         } else if stats.direction == "well-calibrated" {
             println!("  ✅ Model is well-calibrated. Confidence scores are accurate.");
         }
 
-        let synthetic_count = store.records.iter().filter(|r| r.id.starts_with("synthetic_")).count();
+        let synthetic_count = store
+            .records
+            .iter()
+            .filter(|r| r.id.starts_with("synthetic_"))
+            .count();
         let real_count = stats.total_evaluated - synthetic_count;
         if synthetic_count > 0 {
-            println!("\n  📊 Data sources: {} synthetic bootstrap + {} real outcomes", synthetic_count, real_count);
+            println!(
+                "\n  📊 Data sources: {} synthetic bootstrap + {} real outcomes",
+                synthetic_count, real_count
+            );
             if real_count < 10 {
                 println!("  💡 Record more outcomes to improve calibration accuracy:");
                 println!("     hsmii predict --outcome \"<prediction_id> <what_happened> correct|wrong\"");
@@ -743,7 +951,9 @@ async fn cmd_predict(
     if let Some(outcome_str) = outcome_arg {
         let parts: Vec<&str> = outcome_str.splitn(3, ' ').collect();
         if parts.len() < 3 {
-            println!("Usage: hsmii predict --outcome \"<prediction_id> <actual_result> correct|wrong\"");
+            println!(
+                "Usage: hsmii predict --outcome \"<prediction_id> <actual_result> correct|wrong\""
+            );
             println!("Example: hsmii predict --outcome \"pred_1710547200 revenue_grew correct\"");
             return Ok(());
         }
@@ -753,12 +963,20 @@ async fn cmd_predict(
 
         let mut store = PredictionStore::load(home);
         store.record_outcome(pred_id, actual, was_correct);
-        println!("✅ Recorded outcome for '{}': {} ({})",
-            pred_id, actual, if was_correct { "correct" } else { "wrong" });
+        println!(
+            "✅ Recorded outcome for '{}': {} ({})",
+            pred_id,
+            actual,
+            if was_correct { "correct" } else { "wrong" }
+        );
 
         let stats = store.calibration_stats();
-        println!("   Updated calibration: {:.1}% accuracy over {} predictions ({})",
-            stats.actual_accuracy * 100.0, stats.total_evaluated, stats.direction);
+        println!(
+            "   Updated calibration: {:.1}% accuracy over {} predictions ({})",
+            stats.actual_accuracy * 100.0,
+            stats.total_evaluated,
+            stats.direction
+        );
         return Ok(());
     }
 
@@ -772,7 +990,11 @@ async fn cmd_predict(
     let agent = EnhancedPersonalAgent::initialize(home).await?;
     let mut llm_config = hyper_stigmergy::ollama_client::OllamaConfig::default();
     if llm_config.model == "auto" {
-        llm_config.model = hyper_stigmergy::ollama_client::OllamaConfig::detect_model(&llm_config.host, llm_config.port).await;
+        llm_config.model = hyper_stigmergy::ollama_client::OllamaConfig::detect_model(
+            &llm_config.host,
+            llm_config.port,
+        )
+        .await;
     }
     let llm = hyper_stigmergy::ollama_client::OllamaClient::new(llm_config);
     let mut engine = MiroFishEngine::new(llm, home);
@@ -780,10 +1002,12 @@ async fn cmd_predict(
     if let Some(tid) = template_id {
         // Template-based prediction
         let templates = builtin_templates();
-        let template = templates
-            .iter()
-            .find(|t| t.id == tid)
-            .ok_or_else(|| anyhow::anyhow!("Template '{}' not found. Use --list to see available templates.", tid))?;
+        let template = templates.iter().find(|t| t.id == tid).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Template '{}' not found. Use --list to see available templates.",
+                tid
+            )
+        })?;
 
         println!("\n🐟 MiroFish Trajectory Analysis: {}\n", template.name);
 
@@ -835,7 +1059,10 @@ async fn cmd_predict(
         }
         println!();
 
-        println!("🔀 PROBABILITY FLOW ({} time steps)", analysis.flow_network.time_steps);
+        println!(
+            "🔀 PROBABILITY FLOW ({} time steps)",
+            analysis.flow_network.time_steps
+        );
         println!("{}", "─".repeat(40));
         for state in &analysis.flow_network.states {
             if state.probability > 0.01 {
@@ -851,7 +1078,10 @@ async fn cmd_predict(
         }
         println!();
 
-        println!("📋 ACTION TRAJECTORY ({} steps)", analysis.trajectory.steps.len());
+        println!(
+            "📋 ACTION TRAJECTORY ({} steps)",
+            analysis.trajectory.steps.len()
+        );
         println!("{}", "─".repeat(40));
         for (i, step) in analysis.trajectory.steps.iter().enumerate() {
             let recal_note = if analysis.recalibrated && i < analysis.step_scores.len() {
@@ -861,7 +1091,11 @@ async fn cmd_predict(
             };
             println!(
                 "  Step {}: {} (p={:.0}%{}, {})",
-                step.step, step.action, step.success_probability * 100.0, recal_note, step.time_horizon
+                step.step,
+                step.action,
+                step.success_probability * 100.0,
+                recal_note,
+                step.time_horizon
             );
             if !step.risks.is_empty() {
                 println!("    ⚠ Risks: {}", step.risks.join(", "));
@@ -923,7 +1157,10 @@ async fn cmd_predict(
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        println!("📊 Overall confidence: {:.0}%\n", report.overall_confidence * 100.0);
+        println!(
+            "📊 Overall confidence: {:.0}%\n",
+            report.overall_confidence * 100.0
+        );
         for branch in &report.branches {
             println!(
                 "  {} ({:.0}%): {}",
@@ -1007,11 +1244,38 @@ async fn cmd_status(home: &PathBuf) -> Result<()> {
     }
 
     println!("\n## System");
-    println!("  LadybugDB: {}", 
-        if hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() { "✓ active" } else { "✗ not found" });
-    println!("  Council: {}", if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" });
-    println!("  CASS: {}", if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" });
-    println!("  DKS: {}", if agent.config.enable_dks { "✓ enabled" } else { "✗ disabled" });
+    println!(
+        "  LadybugDB: {}",
+        if hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore::exists() {
+            "✓ active"
+        } else {
+            "✗ not found"
+        }
+    );
+    println!(
+        "  Council: {}",
+        if agent.config.enable_council {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  CASS: {}",
+        if agent.config.enable_cass {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
+    println!(
+        "  DKS: {}",
+        if agent.config.enable_dks {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
+    );
 
     Ok(())
 }
@@ -1058,7 +1322,11 @@ async fn cmd_start_tui(home: &PathBuf) -> Result<()> {
             What would you like to explore today?",
             stats.agent_count,
             stats.coherence,
-            if a.config.enable_council { "✓" } else { "✗" },
+            if a.config.enable_council {
+                "✓"
+            } else {
+                "✗"
+            },
             if a.config.enable_cass { "✓" } else { "✗" },
             if a.config.enable_dks { "✓" } else { "✗" }
         )
@@ -1499,14 +1767,20 @@ async fn handle_slash_command(cmd: &str, state: &mut CodexState) {
                             ApprovalOutcome::Deny
                         };
                         match svc.decide(key, outcome, "tui_user") {
-                            Ok(()) => {
-                                state.push_message("system", &format!("Recorded decision for `{}`.", key))
+                            Ok(()) => state.push_message(
+                                "system",
+                                &format!("Recorded decision for `{}`.", key),
+                            ),
+                            Err(e) => {
+                                state.push_message("system", &format!("Approval error: {}", e))
                             }
-                            Err(e) => state.push_message("system", &format!("Approval error: {}", e)),
                         }
                     }
                 }
-                _ => state.push_message("system", "Usage: /approve list | /approve allow <key> | /approve deny <key>"),
+                _ => state.push_message(
+                    "system",
+                    "Usage: /approve list | /approve allow <key> | /approve deny <key>",
+                ),
             }
         }
 

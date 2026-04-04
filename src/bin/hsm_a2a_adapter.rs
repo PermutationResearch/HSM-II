@@ -10,14 +10,14 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use clap::Parser;
+use hyper_stigmergy::harness::{
+    Migration, MigrationRunner, ResumeSessionMap, RuntimeConfig, Scheduler,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
-use hyper_stigmergy::harness::{
-    Migration, MigrationRunner, ResumeSessionMap, RuntimeConfig, Scheduler,
-};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "hsm_a2a_adapter")]
@@ -351,7 +351,10 @@ async fn heartbeat_tick(state: &AppState, params: &Value) -> anyhow::Result<Valu
         })),
         "inputs": ticket.get("inputs").cloned().unwrap_or_else(|| json!({"repo_ref":"main"}))
     });
-    let request_dry_run = params.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
+    let request_dry_run = params
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let dry_run = state.cli.dry_run || request_dry_run;
     let delegation_result = if dry_run {
         json!({

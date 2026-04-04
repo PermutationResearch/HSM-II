@@ -133,19 +133,14 @@ impl ValidationPipeline {
                     self.validate_integration(playbook, tool_registry, llm)
                         .await
                 }
-                ValidationStage::Staged => {
-                    self.validate_staged(playbook, tool_registry, llm).await
-                }
+                ValidationStage::Staged => self.validate_staged(playbook, tool_registry, llm).await,
             };
 
             let passed = result.passed;
             stage_results.push(result);
 
             if !passed {
-                info!(
-                    "Playbook '{}' failed {} validation",
-                    playbook.name, stage
-                );
+                info!("Playbook '{}' failed {} validation", playbook.name, stage);
                 return ValidationResult {
                     passed: false,
                     stage_reached: last_stage,
@@ -154,10 +149,7 @@ impl ValidationPipeline {
                 };
             }
 
-            debug!(
-                "Playbook '{}' passed {} validation",
-                playbook.name, stage
-            );
+            debug!("Playbook '{}' passed {} validation", playbook.name, stage);
         }
 
         info!(
@@ -215,10 +207,7 @@ impl ValidationPipeline {
             }
             // Must have either tool or prompt
             if step.tool_name.is_none() && step.prompt_template.is_none() {
-                issues.push(format!(
-                    "Step {} has neither tool nor prompt",
-                    step.index
-                ));
+                issues.push(format!("Step {} has neither tool nor prompt", step.index));
                 score -= 0.2;
             }
         }
@@ -249,7 +238,10 @@ impl ValidationPipeline {
         let mut context = HashMap::new();
         context.insert("query".to_string(), playbook.scenario_pattern.clone());
 
-        let result = self.harness.execute(playbook, tool_registry, llm, &context).await;
+        let result = self
+            .harness
+            .execute(playbook, tool_registry, llm, &context)
+            .await;
 
         let score = if result.success {
             result.steps_completed as f64 / result.steps_total.max(1) as f64
@@ -293,12 +285,19 @@ impl ValidationPipeline {
         let mut details_parts = Vec::new();
 
         for (i, scenario) in scenarios.iter().enumerate() {
-            let result = self.harness.execute(playbook, tool_registry, llm, scenario).await;
+            let result = self
+                .harness
+                .execute(playbook, tool_registry, llm, scenario)
+                .await;
 
             if result.success {
                 successes += 1;
                 total_score += 1.0;
-                details_parts.push(format!("Scenario {}: PASS ({}ms)", i + 1, result.total_duration_ms));
+                details_parts.push(format!(
+                    "Scenario {}: PASS ({}ms)",
+                    i + 1,
+                    result.total_duration_ms
+                ));
             } else {
                 total_score += result.steps_completed as f64 / result.steps_total.max(1) as f64;
                 details_parts.push(format!(
@@ -357,14 +356,13 @@ mod tests {
         registry.register(Arc::new(crate::tools::shell_tools::GrepTool));
         let pipeline = ValidationPipeline::default_pipeline();
 
-        let pb = Playbook::new("Search", "desc", "search code")
-            .with_steps(vec![Step::tool_step(
-                0,
-                "Grep for pattern",
-                "grep",
-                serde_json::json!({"pattern": "test", "path": "src/"}),
-                "results found",
-            )]);
+        let pb = Playbook::new("Search", "desc", "search code").with_steps(vec![Step::tool_step(
+            0,
+            "Grep for pattern",
+            "grep",
+            serde_json::json!({"pattern": "test", "path": "src/"}),
+            "results found",
+        )]);
         let mut pb = pb;
         pb.quality_score = 0.8;
 
@@ -376,14 +374,13 @@ mod tests {
     fn test_unit_validation_unknown_tool() {
         let registry = ToolRegistry::new();
         let pipeline = ValidationPipeline::default_pipeline();
-        let mut pb = Playbook::new("Test", "desc", "pattern")
-            .with_steps(vec![Step::tool_step(
-                0,
-                "Use nonexistent",
-                "nonexistent_tool",
-                serde_json::json!({}),
-                "ok",
-            )]);
+        let mut pb = Playbook::new("Test", "desc", "pattern").with_steps(vec![Step::tool_step(
+            0,
+            "Use nonexistent",
+            "nonexistent_tool",
+            serde_json::json!({}),
+            "ok",
+        )]);
         pb.quality_score = 0.8;
 
         let result = pipeline.validate_unit(&pb, &registry);

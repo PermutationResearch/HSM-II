@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
@@ -149,9 +149,7 @@ fn objective_score(
     latency_penalty_w: f64,
 ) -> f64 {
     let latency_penalty = (latency_ratio_vs_baseline - 1.0).max(0.0);
-    (kw_w * keyword_delta)
-        + (recall_w * recall_delta)
-        + (rubric_w * rubric_delta)
+    (kw_w * keyword_delta) + (recall_w * recall_delta) + (rubric_w * rubric_delta)
         - (latency_penalty_w * latency_penalty)
 }
 
@@ -235,25 +233,17 @@ struct CandidateFile {
 fn load_candidate_configs(path: &Path) -> anyhow::Result<Vec<HsmRunnerConfig>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("read harness candidate file {}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).context("parse candidate JSON")?;
+    let v: serde_json::Value = serde_json::from_str(&text).context("parse candidate JSON")?;
     if let Ok(list) = serde_json::from_value::<Vec<HsmRunnerConfig>>(v.clone()) {
         return Ok(list);
     }
-    let w: CandidateFile = serde_json::from_value(v).context(
-        "expected [HsmRunnerConfig, ...] or {\"candidates\":[...]}",
-    )?;
+    let w: CandidateFile = serde_json::from_value(v)
+        .context("expected [HsmRunnerConfig, ...] or {\"candidates\":[...]}")?;
     Ok(w.candidates)
 }
 
 fn promote(from: &Path, to: &Path) -> anyhow::Result<()> {
-    fs::copy(from, to).with_context(|| {
-        format!(
-            "copy {} -> {}",
-            from.display(),
-            to.display()
-        )
-    })?;
+    fs::copy(from, to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
     println!(
         "Promoted harness config:\n  from {}\n  to   {}",
         from.display(),
@@ -301,8 +291,7 @@ fn resolve_eval_suites(cli: &SearchArgs) -> anyhow::Result<Vec<WeightedEvalSuite
             }]
         } else {
             // Safer default for harness search: evaluate transfer across multiple suites.
-            parse_weighted_suites("memory:1,tool:1,council:1")
-                .map_err(anyhow::Error::msg)?
+            parse_weighted_suites("memory:1,tool:1,council:1").map_err(anyhow::Error::msg)?
         }
     };
     for s in &mut out {
@@ -366,9 +355,11 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    let config_path = cli
-        .config
-        .or_else(|| std::env::var("HSM_META_HARNESS_CONFIG").ok().map(PathBuf::from));
+    let config_path = cli.config.or_else(|| {
+        std::env::var("HSM_META_HARNESS_CONFIG")
+            .ok()
+            .map(PathBuf::from)
+    });
 
     let mut candidate_configs: Vec<(String, HsmRunnerConfig)> = Vec::new();
     if cli.include_default {
@@ -423,85 +414,88 @@ async fn run_search(cli: SearchArgs) -> anyhow::Result<()> {
             let mut agg_lr = 0.0;
 
             for ws in &suites {
-            let baseline = baseline_by_name.get(&ws.name).expect("baseline for suite");
-            let mut runner = HsmRunner::with_config(LlmClient::new()?, cfg.clone());
-            if cli.trace {
-                runner.set_collect_traces(true);
-            }
-            let hsm = runner.run(&ws.tasks).await;
-            let traces = if cli.trace {
-                runner.take_traces()
-            } else {
-                Vec::new()
-            };
+                let baseline = baseline_by_name.get(&ws.name).expect("baseline for suite");
+                let mut runner = HsmRunner::with_config(LlmClient::new()?, cfg.clone());
+                if cli.trace {
+                    runner.set_collect_traces(true);
+                }
+                let hsm = runner.run(&ws.tasks).await;
+                let traces = if cli.trace {
+                    runner.take_traces()
+                } else {
+                    Vec::new()
+                };
 
-            let report = compare(baseline, &hsm, &ws.tasks);
-            let baseline_latency = baseline.avg_latency_ms().max(1.0);
-            let latency_ratio_vs_baseline = hsm.avg_latency_ms() / baseline_latency;
-            let obj = objective_score(
-                report.improvement.keyword_score_delta,
-                report.improvement.recall_score_delta,
-                report.improvement.rubric_composite_delta,
-                latency_ratio_vs_baseline,
-                cli.objective_keyword_weight,
-                cli.objective_recall_weight,
-                cli.objective_rubric_weight,
-                cli.objective_latency_penalty,
-            );
+                let report = compare(baseline, &hsm, &ws.tasks);
+                let baseline_latency = baseline.avg_latency_ms().max(1.0);
+                let latency_ratio_vs_baseline = hsm.avg_latency_ms() / baseline_latency;
+                let obj = objective_score(
+                    report.improvement.keyword_score_delta,
+                    report.improvement.recall_score_delta,
+                    report.improvement.rubric_composite_delta,
+                    latency_ratio_vs_baseline,
+                    cli.objective_keyword_weight,
+                    cli.objective_recall_weight,
+                    cli.objective_rubric_weight,
+                    cli.objective_latency_penalty,
+                );
 
-            let w = ws.weight;
-            w_sum += w;
-            obj_acc += w * obj;
-            agg_kw += w * hsm.avg_keyword_score();
-            agg_rec += w * hsm.avg_recall_score();
-            agg_rub += w * hsm.avg_rubric_composite();
-            agg_pr += w * hsm.rubric_pass_rate();
-            agg_lat += w * hsm.avg_latency_ms();
-            agg_kd += w * report.improvement.keyword_score_delta;
-            agg_rd += w * report.improvement.recall_score_delta;
-            agg_rcd += w * report.improvement.rubric_composite_delta;
-            agg_prd += w * report.improvement.rubric_pass_rate_delta;
-            agg_lr += w * latency_ratio_vs_baseline;
+                let w = ws.weight;
+                w_sum += w;
+                obj_acc += w * obj;
+                agg_kw += w * hsm.avg_keyword_score();
+                agg_rec += w * hsm.avg_recall_score();
+                agg_rub += w * hsm.avg_rubric_composite();
+                agg_pr += w * hsm.rubric_pass_rate();
+                agg_lat += w * hsm.avg_latency_ms();
+                agg_kd += w * report.improvement.keyword_score_delta;
+                agg_rd += w * report.improvement.recall_score_delta;
+                agg_rcd += w * report.improvement.rubric_composite_delta;
+                agg_prd += w * report.improvement.rubric_pass_rate_delta;
+                agg_lr += w * latency_ratio_vs_baseline;
 
-            let suite_summary = PerSuiteEvalSummary {
-                suite_name: ws.name.clone(),
-                weight: w,
-                task_count: ws.tasks.len(),
-                hsm_avg_keyword_score: hsm.avg_keyword_score(),
-                hsm_avg_recall_score: hsm.avg_recall_score(),
-                hsm_avg_rubric_composite: hsm.avg_rubric_composite(),
-                hsm_rubric_pass_rate: hsm.rubric_pass_rate(),
-                hsm_avg_latency_ms: hsm.avg_latency_ms(),
-                keyword_delta_vs_baseline: report.improvement.keyword_score_delta,
-                recall_delta_vs_baseline: report.improvement.recall_score_delta,
-                rubric_composite_delta: report.improvement.rubric_composite_delta,
-                rubric_pass_rate_delta: report.improvement.rubric_pass_rate_delta,
-                latency_ratio_vs_baseline,
-                objective_score: obj,
-                verdict: report.verdict.clone(),
-            };
-            if rep == 0 {
-                per_suite.push(suite_summary);
-            }
+                let suite_summary = PerSuiteEvalSummary {
+                    suite_name: ws.name.clone(),
+                    weight: w,
+                    task_count: ws.tasks.len(),
+                    hsm_avg_keyword_score: hsm.avg_keyword_score(),
+                    hsm_avg_recall_score: hsm.avg_recall_score(),
+                    hsm_avg_rubric_composite: hsm.avg_rubric_composite(),
+                    hsm_rubric_pass_rate: hsm.rubric_pass_rate(),
+                    hsm_avg_latency_ms: hsm.avg_latency_ms(),
+                    keyword_delta_vs_baseline: report.improvement.keyword_score_delta,
+                    recall_delta_vs_baseline: report.improvement.recall_score_delta,
+                    rubric_composite_delta: report.improvement.rubric_composite_delta,
+                    rubric_pass_rate_delta: report.improvement.rubric_pass_rate_delta,
+                    latency_ratio_vs_baseline,
+                    objective_score: obj,
+                    verdict: report.verdict.clone(),
+                };
+                if rep == 0 {
+                    per_suite.push(suite_summary);
+                }
 
-            if rep == 0 {
-                let suite_dir = cand_dir.join(&ws.name);
-                fs::create_dir_all(&suite_dir)?;
-                fs::write(
-                    suite_dir.join("hsm_metrics.json"),
-                    serde_json::to_string_pretty(&hsm)?,
-                )?;
-                fs::write(
-                    suite_dir.join("comparison_report.json"),
-                    serde_json::to_string_pretty(&report)?,
-                )?;
-                write_turn_metrics_jsonl(&suite_dir.join("turns_hsm.jsonl"), &hsm.turns)?;
-                write_turn_metrics_jsonl(&suite_dir.join("turns_baseline.jsonl"), &baseline.turns)?;
-                if cli.trace && !traces.is_empty() {
-                    write_jsonl(&suite_dir.join("hsm_trace.jsonl"), &traces)?;
+                if rep == 0 {
+                    let suite_dir = cand_dir.join(&ws.name);
+                    fs::create_dir_all(&suite_dir)?;
+                    fs::write(
+                        suite_dir.join("hsm_metrics.json"),
+                        serde_json::to_string_pretty(&hsm)?,
+                    )?;
+                    fs::write(
+                        suite_dir.join("comparison_report.json"),
+                        serde_json::to_string_pretty(&report)?,
+                    )?;
+                    write_turn_metrics_jsonl(&suite_dir.join("turns_hsm.jsonl"), &hsm.turns)?;
+                    write_turn_metrics_jsonl(
+                        &suite_dir.join("turns_baseline.jsonl"),
+                        &baseline.turns,
+                    )?;
+                    if cli.trace && !traces.is_empty() {
+                        write_jsonl(&suite_dir.join("hsm_trace.jsonl"), &traces)?;
+                    }
                 }
             }
-        }
 
             let inv = if w_sum > 0.0 { 1.0 / w_sum } else { 0.0 };
             rep_objectives.push(obj_acc * inv);

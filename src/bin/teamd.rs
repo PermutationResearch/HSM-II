@@ -89,12 +89,10 @@ async fn main() -> anyhow::Result<()> {
     let auth_dir = base_dir.join("auth");
     std::fs::create_dir_all(&auth_dir)?;
 
-    let auth = Arc::new(
-        PersistentAuthManager::load(&auth_dir).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to load auth state, starting fresh");
-            PersistentAuthManager::new(&auth_dir)
-        }),
-    );
+    let auth = Arc::new(PersistentAuthManager::load(&auth_dir).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "Failed to load auth state, starting fresh");
+        PersistentAuthManager::new(&auth_dir)
+    }));
     info!("Auth manager initialised");
 
     let registry = Arc::new(TenantRegistry::new(&base_dir));
@@ -129,11 +127,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Ok(orch) = reg.get_orchestrator(&outcome.tenant_id).await {
                     let mut orch = orch.write().await;
                     if let Some(member) = orch.member_mut(outcome.assigned_role) {
-                        member.record_outcome(
-                            &outcome.domain,
-                            outcome.outcome.success,
-                            quality,
-                        );
+                        member.record_outcome(&outcome.domain, outcome.outcome.success, quality);
                     }
                     orch.refresh_dream_advisor();
                     let _ = orch.save();
@@ -151,9 +145,7 @@ async fn main() -> anyhow::Result<()> {
         inference: Some(inference),
     };
 
-    let tenant_auth_state = TenantAuthState {
-        auth: auth.clone(),
-    };
+    let tenant_auth_state = TenantAuthState { auth: auth.clone() };
 
     // ── Build router ────────────────────────────────────────────────
     // Public routes (no auth required)

@@ -112,11 +112,7 @@ impl HarnessRuntime {
     ) {
         let duration_ms = step_start.elapsed().as_millis() as u64;
         let (to, outcome, detail) = if error.is_none() {
-            (
-                HarnessState::Completed,
-                Some(TaskOutcome::Success),
-                None,
-            )
+            (HarnessState::Completed, Some(TaskOutcome::Success), None)
         } else {
             (
                 HarnessState::Failed,

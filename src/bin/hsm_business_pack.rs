@@ -164,11 +164,7 @@ fn main() -> anyhow::Result<()> {
             println!("Contract: {} ({})", selected.id, selected.display_name);
             for g in kpi.iter().chain(risk.iter()) {
                 let ok = g.satisfied;
-                println!(
-                    "  - {}: {}",
-                    g.id,
-                    if ok { "OK" } else { "MISSING" }
-                );
+                println!("  - {}: {}", g.id, if ok { "OK" } else { "MISSING" });
                 if g.required && !ok {
                     missing.push(g.id.clone());
                 }

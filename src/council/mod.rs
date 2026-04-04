@@ -34,7 +34,7 @@ pub use ralph::{
     RalphVerdict as RalphDecision,
 };
 pub use simple::{SimpleCouncil, Vote};
-pub use trace_summarizer::{TraceSummarizer, TraceSummary, TraceBullet};
+pub use trace_summarizer::{TraceBullet, TraceSummarizer, TraceSummary};
 
 /// Unique identifier for a council session
 pub type CouncilId = uuid::Uuid;

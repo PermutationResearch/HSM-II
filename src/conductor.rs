@@ -327,9 +327,9 @@ impl Conductor {
                 intent,
                 exec_ok: exec_result.is_ok(),
                 reward,
-                federation: None, // populated below after world lock is released
+                federation: None,  // populated below after world lock is released
                 autocontext: None, // populated below
-                dream: None, // populated below in Phase 7
+                dream: None,       // populated below in Phase 7
             }
         };
 
@@ -366,10 +366,7 @@ impl Conductor {
             let current_tick = tick_result.tick;
             if dream.should_dream(current_tick) {
                 let mut world = self.world.write().await;
-                let dream_result = dream.dream(
-                    &mut world,
-                    &mut rlm.living_prompt,
-                );
+                let dream_result = dream.dream(&mut world, &mut rlm.living_prompt);
                 tick_result.dream = Some(dream_result);
             }
         }

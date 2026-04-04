@@ -55,20 +55,13 @@ impl ToolPermissionContext {
     /// Allow only these exact tool names.
     pub fn allow_only(names: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self {
-            allow_exact: Some(
-                names
-                    .into_iter()
-                    .map(|s| s.as_ref().to_string())
-                    .collect(),
-            ),
+            allow_exact: Some(names.into_iter().map(|s| s.as_ref().to_string()).collect()),
             block_prefixes: Vec::new(),
         }
     }
 
     /// Deny tools whose names start with any of these prefixes (tests and programmatic setup).
-    pub fn with_blocked_prefixes(
-        prefixes: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn with_blocked_prefixes(prefixes: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             allow_exact: None,
             block_prefixes: prefixes.into_iter().map(Into::into).collect(),
@@ -86,9 +79,7 @@ impl ToolPermissionContext {
         }
         for p in &self.block_prefixes {
             if tool_name.starts_with(p) {
-                return Err(format!(
-                    "blocked by prefix '{p}' (HSM_TOOL_BLOCK_PREFIXES)"
-                ));
+                return Err(format!("blocked by prefix '{p}' (HSM_TOOL_BLOCK_PREFIXES)"));
             }
         }
         Ok(())

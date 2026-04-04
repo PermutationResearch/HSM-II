@@ -31,11 +31,19 @@ struct TestRunner {
 
 impl TestRunner {
     fn new(total: u32) -> Self {
-        Self { passed: 0, failed: 0, test_num: 0, total_tests: total }
+        Self {
+            passed: 0,
+            failed: 0,
+            test_num: 0,
+            total_tests: total,
+        }
     }
     fn section(&mut self, name: &str) {
         self.test_num += 1;
-        println!("\n━━━ [{}/{}] {} ━━━", self.test_num, self.total_tests, name);
+        println!(
+            "\n━━━ [{}/{}] {} ━━━",
+            self.test_num, self.total_tests, name
+        );
     }
     fn pass(&mut self, msg: &str) {
         println!("  ✓ {}", msg);
@@ -51,12 +59,19 @@ impl TestRunner {
     fn summary(&self) {
         let total = self.passed + self.failed;
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
-        println!("║  Results: {} / {} passed{}", self.passed, total,
-            " ".repeat(42usize.saturating_sub(format!("{} / {}", self.passed, total).len())));
+        println!(
+            "║  Results: {} / {} passed{}",
+            self.passed,
+            total,
+            " ".repeat(42usize.saturating_sub(format!("{} / {}", self.passed, total).len()))
+        );
         if self.failed == 0 {
             println!("║  ✓ ALL SYSTEMS OPERATIONAL                                   ║");
         } else {
-            println!("║  ⚠ {} test(s) failed                                          ║", self.failed);
+            println!(
+                "║  ⚠ {} test(s) failed                                          ║",
+                self.failed
+            );
         }
         println!("╚═══════════════════════════════════════════════════════════════╝");
     }
@@ -93,8 +108,10 @@ async fn main() -> anyhow::Result<()> {
             };
             match client.chat(request).await {
                 Ok(resp) => {
-                    t.pass(&format!("Claude responded via {:?} in {}ms ({} tokens)",
-                        resp.provider, resp.latency_ms, resp.usage.total_tokens));
+                    t.pass(&format!(
+                        "Claude responded via {:?} in {}ms ({} tokens)",
+                        resp.provider, resp.latency_ms, resp.usage.total_tokens
+                    ));
                     t.info(&format!("Response: {}", resp.content.trim()));
                 }
                 Err(e) => t.fail(&format!("Chat failed: {}", e)),
@@ -118,16 +135,27 @@ async fn main() -> anyhow::Result<()> {
         let mut dks = DKSSystem::new(config);
         dks.seed(10);
         let initial_stats = dks.stats();
-        t.info(&format!("Seeded: {} entities, avg energy: {:.2}", initial_stats.size, initial_stats.average_energy));
+        t.info(&format!(
+            "Seeded: {} entities, avg energy: {:.2}",
+            initial_stats.size, initial_stats.average_energy
+        ));
 
         let results = dks.evolve(20);
         let final_stats = dks.stats();
-        t.pass(&format!("Evolved {} generations: {} → {} entities",
-            results.len(), initial_stats.size, final_stats.size));
-        t.info(&format!("Avg persistence: {:.3}, Avg replication rate: {:.3}",
-            final_stats.average_persistence, final_stats.average_replication_rate));
-        t.info(&format!("Total energy: {:.2}, Max generation: {}",
-            final_stats.total_energy, final_stats.max_generation));
+        t.pass(&format!(
+            "Evolved {} generations: {} → {} entities",
+            results.len(),
+            initial_stats.size,
+            final_stats.size
+        ));
+        t.info(&format!(
+            "Avg persistence: {:.3}, Avg replication rate: {:.3}",
+            final_stats.average_persistence, final_stats.average_replication_rate
+        ));
+        t.info(&format!(
+            "Total energy: {:.2}, Max generation: {}",
+            final_stats.total_energy, final_stats.max_generation
+        ));
 
         if final_stats.average_persistence > 0.0 {
             t.pass("Selection pressure active: persistence scores positive");
@@ -139,8 +167,10 @@ async fn main() -> anyhow::Result<()> {
         t.info(&format!("Multifractal spectrum: {} points", spectrum.len()));
 
         let tick = dks.tick();
-        t.info(&format!("Tick: +{} born, -{} decayed, {} selected, pop={}",
-            tick.new_entities, tick.decayed_entities, tick.selected_entities, tick.population_size));
+        t.info(&format!(
+            "Tick: +{} born, -{} decayed, {} selected, pop={}",
+            tick.new_entities, tick.decayed_entities, tick.selected_entities, tick.population_size
+        ));
     }
 
     // ═══ TEST 3: CASS Semantic Skills ═══
@@ -162,8 +192,12 @@ async fn main() -> anyhow::Result<()> {
 
         let mut cass = CASS::new(skill_bank);
         cass.initialize().await?;
-        t.pass(&format!("Initialized with {} skills ({} seeded + 1 custom), embedding dim={}",
-            cass.skill_count(), initial_count, cass.embedding_dimension()));
+        t.pass(&format!(
+            "Initialized with {} skills ({} seeded + 1 custom), embedding dim={}",
+            cass.skill_count(),
+            initial_count,
+            cass.embedding_dimension()
+        ));
 
         let ctx = ContextSnapshot {
             timestamp: 0,
@@ -176,21 +210,35 @@ async fn main() -> anyhow::Result<()> {
             coherence_score: 0.85,
         };
 
-        let results = cass.search("find bugs in the codebase", Some(ctx.clone()), 3).await;
+        let results = cass
+            .search("find bugs in the codebase", Some(ctx.clone()), 3)
+            .await;
         if !results.is_empty() {
-            t.pass(&format!("Semantic search returned {} matches", results.len()));
+            t.pass(&format!(
+                "Semantic search returned {} matches",
+                results.len()
+            ));
             for r in &results {
-                t.info(&format!("  {} — semantic: {:.3}, context: {:.3}",
-                    r.skill.title, r.semantic_score, r.context_relevance));
+                t.info(&format!(
+                    "  {} — semantic: {:.3}, context: {:.3}",
+                    r.skill.title, r.semantic_score, r.context_relevance
+                ));
             }
         } else {
             t.fail("Semantic search returned 0 results");
         }
 
         let chain = cass.find_composition_path("custom_web_search", "secure and fast code");
-        t.info(&format!("Composition path: {}",
-            chain.map(|c| format!("{} skills, confidence: {:.3}", c.skills.len(), c.total_confidence))
-                .unwrap_or_else(|| "none found".to_string())));
+        t.info(&format!(
+            "Composition path: {}",
+            chain
+                .map(|c| format!(
+                    "{} skills, confidence: {:.3}",
+                    c.skills.len(),
+                    c.total_confidence
+                ))
+                .unwrap_or_else(|| "none found".to_string())
+        ));
 
         cass.record_usage("custom_web_search", true, ctx.clone());
         cass.record_usage("custom_web_search", true, ctx);
@@ -210,40 +258,75 @@ async fn main() -> anyhow::Result<()> {
         social.ensure_agent(agent_c);
 
         let promise_id = social.record_promise(
-            agent_a, Some(agent_b), "code_review",
+            agent_a,
+            Some(agent_b),
+            "code_review",
             "Review the authentication module by Friday",
-            DataSensitivity::Internal, 1000, Some(2000),
+            DataSensitivity::Internal,
+            1000,
+            Some(2000),
         );
         t.pass(&format!("Promise created: {}", promise_id));
 
         social.resolve_promise(
-            &promise_id, PromiseStatus::Kept, Some(agent_a),
-            1500, Some(0.9), Some(true), Some(true), &[],
+            &promise_id,
+            PromiseStatus::Kept,
+            Some(agent_a),
+            1500,
+            Some(0.9),
+            Some(true),
+            Some(true),
+            &[],
         );
         t.pass("Promise resolved: Kept (quality: 0.9, on-time: true)");
 
         for i in 0..5 {
-            social.record_delivery(agent_a, "code_review", true,
-                0.85 + (i as f64 * 0.02), true, true, 2000 + i * 100, &[]);
+            social.record_delivery(
+                agent_a,
+                "code_review",
+                true,
+                0.85 + (i as f64 * 0.02),
+                true,
+                true,
+                2000 + i * 100,
+                &[],
+            );
         }
         social.record_delivery(agent_b, "code_review", true, 0.7, false, true, 2500, &[]);
         social.record_delivery(agent_c, "code_review", false, 0.3, false, true, 2600, &[]);
 
         let rep_a = &social.reputations[&agent_a];
         let rep_b = &social.reputations[&agent_b];
-        t.pass(&format!("Agent A: reliability={:.2}, timeliness={:.2}, quality={:.2}",
-            rep_a.reliability_score(), rep_a.timeliness_score(), rep_a.avg_quality()));
-        t.info(&format!("Agent B: reliability={:.2}, timeliness={:.2}",
-            rep_b.reliability_score(), rep_b.timeliness_score()));
+        t.pass(&format!(
+            "Agent A: reliability={:.2}, timeliness={:.2}, quality={:.2}",
+            rep_a.reliability_score(),
+            rep_a.timeliness_score(),
+            rep_a.avg_quality()
+        ));
+        t.info(&format!(
+            "Agent B: reliability={:.2}, timeliness={:.2}",
+            rep_b.reliability_score(),
+            rep_b.timeliness_score()
+        ));
 
         let candidates = vec![(agent_a, 0.8), (agent_b, 0.6), (agent_c, 0.5)];
         let delegate = social.recommend_delegate(
-            &candidates, Some("code_review"), None, Some(DataSensitivity::Internal));
+            &candidates,
+            Some("code_review"),
+            None,
+            Some(DataSensitivity::Internal),
+        );
         if let Some(d) = delegate {
-            t.pass(&format!("Delegation: Agent {} (score: {:.3})", d.agent_id, d.score));
-            t.info(&format!("  observed={:.3}, capability={:.3}, collab={:.3}",
-                d.components.observed_score, d.components.capability_score,
-                d.components.collaboration_score));
+            t.pass(&format!(
+                "Delegation: Agent {} (score: {:.3})",
+                d.agent_id, d.score
+            ));
+            t.info(&format!(
+                "  observed={:.3}, capability={:.3}, collab={:.3}",
+                d.components.observed_score,
+                d.components.capability_score,
+                d.components.collaboration_score
+            ));
         } else {
             t.fail("No delegation recommendation");
         }
@@ -254,7 +337,10 @@ async fn main() -> anyhow::Result<()> {
         if can_share && cant_share {
             t.pass("Share policies enforced correctly");
         } else {
-            t.fail(&format!("Share policy issue: can_AB={}, cant_AC={}", can_share, !cant_share));
+            t.fail(&format!(
+                "Share policy issue: can_AB={}, cant_AC={}",
+                can_share, !cant_share
+            ));
         }
     }
 
@@ -262,11 +348,17 @@ async fn main() -> anyhow::Result<()> {
     t.section("Kuramoto Oscillators (Agent Synchronization)");
     {
         let config = KuramotoConfig {
-            coupling_strength: 2.0, dt: 0.1, dispersion: 0.5,
-            council_influence: 0.3, noise_amplitude: 0.05,
-            min_edge_weight: 0.1, enable_frustration: false,
-            enable_phase_field: false, phase_field_growth: 0.0,
-            phase_field_hyperviscosity: 0.0, phase_field_dispersion: 0.0,
+            coupling_strength: 2.0,
+            dt: 0.1,
+            dispersion: 0.5,
+            council_influence: 0.3,
+            noise_amplitude: 0.05,
+            min_edge_weight: 0.1,
+            enable_frustration: false,
+            enable_phase_field: false,
+            phase_field_growth: 0.0,
+            phase_field_hyperviscosity: 0.0,
+            phase_field_dispersion: 0.0,
         };
         let mut engine = KuramotoEngine::new(config);
 
@@ -276,30 +368,41 @@ async fn main() -> anyhow::Result<()> {
 
         let mut adj: HashMap<AgentId, Vec<(AgentId, f64)>> = HashMap::new();
         for i in 0..5u64 {
-            let neighbors: Vec<_> = (0..5u64).filter(|&j| j != i)
-                .map(|j| (j as AgentId, 1.0)).collect();
+            let neighbors: Vec<_> = (0..5u64)
+                .filter(|&j| j != i)
+                .map(|j| (j as AgentId, 1.0))
+                .collect();
             adj.insert(i as AgentId, neighbors);
         }
 
         let snap0 = engine.snapshot();
-        t.info(&format!("Initial: order_param={:.3}, mean_phase={:.3}",
-            snap0.order_parameter, snap0.mean_phase));
+        t.info(&format!(
+            "Initial: order_param={:.3}, mean_phase={:.3}",
+            snap0.order_parameter, snap0.mean_phase
+        ));
 
         for _ in 0..100 {
             engine.step(&adj);
         }
 
         let snap_final = engine.snapshot();
-        t.pass(&format!("After 100 steps: order_param {:.3} → {:.3}",
-            snap0.order_parameter, snap_final.order_parameter));
-        t.info(&format!("Clusters: {}, Phase histogram: {:?}",
-            snap_final.clusters.len(), snap_final.phase_histogram));
+        t.pass(&format!(
+            "After 100 steps: order_param {:.3} → {:.3}",
+            snap0.order_parameter, snap_final.order_parameter
+        ));
+        t.info(&format!(
+            "Clusters: {}, Phase histogram: {:?}",
+            snap_final.clusters.len(),
+            snap_final.phase_histogram
+        ));
 
         if snap_final.order_parameter >= snap0.order_parameter * 0.8 {
             t.pass("Synchronization maintained/improved under coupling");
         } else {
-            t.fail(&format!("Synchronization degraded: {:.3} → {:.3}",
-                snap0.order_parameter, snap_final.order_parameter));
+            t.fail(&format!(
+                "Synchronization degraded: {:.3} → {:.3}",
+                snap0.order_parameter, snap_final.order_parameter
+            ));
         }
     }
 
@@ -322,18 +425,26 @@ async fn main() -> anyhow::Result<()> {
 
         let trust_ab = trust.get_trust(&node_a, &node_b);
         let trust_ac = trust.get_trust(&node_a, &node_c);
-        t.pass(&format!("Trust: A→B={:.3} (5 successes), A→C={:.3} (1 success, 1 failure)",
-            trust_ab, trust_ac));
+        t.pass(&format!(
+            "Trust: A→B={:.3} (5 successes), A→C={:.3} (1 success, 1 failure)",
+            trust_ab, trust_ac
+        ));
 
         if trust_ab > trust_ac {
             t.pass("Trust ordering correct: reliable node > mixed node");
         } else {
-            t.fail(&format!("Trust ordering wrong: AB={:.3} should be > AC={:.3}", trust_ab, trust_ac));
+            t.fail(&format!(
+                "Trust ordering wrong: AB={:.3} should be > AC={:.3}",
+                trust_ab, trust_ac
+            ));
         }
 
         trust.decay_all(500);
         let trust_ab_decayed = trust.get_trust(&node_a, &node_b);
-        t.info(&format!("After decay (tick 500): A→B {:.3} → {:.3}", trust_ab, trust_ab_decayed));
+        t.info(&format!(
+            "After decay (tick 500): A→B {:.3} → {:.3}",
+            trust_ab, trust_ab_decayed
+        ));
     }
 
     // ═══ TEST 7: Council LLM Argument Cache ═══
@@ -342,20 +453,31 @@ async fn main() -> anyhow::Result<()> {
         let cache = ArgumentCache::new(300, 1000);
 
         let argument = LLMArgument {
-            agent_id: 1, role: Role::Architect, stance: Stance::For,
+            agent_id: 1,
+            role: Role::Architect,
+            stance: Stance::For,
             content: "This architectural change improves modularity".to_string(),
             confidence: 0.85,
-            key_points: vec!["Reduces coupling".to_string(), "Enables parallel dev".to_string()],
-            evidence: vec![], round: 1, responding_to: None,
-            tokens_generated: 150, generation_time_ms: 800,
+            key_points: vec![
+                "Reduces coupling".to_string(),
+                "Enables parallel dev".to_string(),
+            ],
+            evidence: vec![],
+            round: 1,
+            responding_to: None,
+            tokens_generated: 150,
+            generation_time_ms: 800,
         };
         cache.put(Role::Architect, "proposal-1", "opening", argument);
 
         let hit = cache.get(Role::Architect, "proposal-1", "opening");
         if let Some(cached) = hit {
-            t.pass(&format!("Cache hit: '{}...' (conf: {}, stance: {})",
+            t.pass(&format!(
+                "Cache hit: '{}...' (conf: {}, stance: {})",
                 cached.content.chars().take(40).collect::<String>(),
-                cached.confidence, cached.stance.as_str()));
+                cached.confidence,
+                cached.stance.as_str()
+            ));
         } else {
             t.fail("Cache miss on recently cached argument");
         }
@@ -368,7 +490,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let stats = cache.stats();
-        t.info(&format!("Stats: {} entries, {} hits, {} misses", stats.total_entries, stats.hits, stats.misses));
+        t.info(&format!(
+            "Stats: {} entries, {} hits, {} misses",
+            stats.total_entries, stats.hits, stats.misses
+        ));
     }
 
     // ═══ TEST 8: AutoContext Knowledge Base ═══
@@ -456,22 +581,50 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut hsm = HyperStigmergicMorphogenesis::new(5);
 
-        let id1 = hsm.add_belief("Rust adoption is accelerating in systems programming", 0.85, BeliefSource::Observation);
-        let id2 = hsm.add_belief("Federation enables distributed intelligence across nodes", 0.75, BeliefSource::Prediction);
-        let id3 = hsm.add_belief("DKS evolutionary pressure promotes validated knowledge", 0.80, BeliefSource::Inference);
-        let id4 = hsm.add_belief("User prefers concise responses over verbose explanations", 0.90, BeliefSource::UserProvided);
+        let id1 = hsm.add_belief(
+            "Rust adoption is accelerating in systems programming",
+            0.85,
+            BeliefSource::Observation,
+        );
+        let id2 = hsm.add_belief(
+            "Federation enables distributed intelligence across nodes",
+            0.75,
+            BeliefSource::Prediction,
+        );
+        let id3 = hsm.add_belief(
+            "DKS evolutionary pressure promotes validated knowledge",
+            0.80,
+            BeliefSource::Inference,
+        );
+        let id4 = hsm.add_belief(
+            "User prefers concise responses over verbose explanations",
+            0.90,
+            BeliefSource::UserProvided,
+        );
 
-        t.pass(&format!("Stored 4 beliefs (ids: {}, {}, {}, {})", id1, id2, id3, id4));
+        t.pass(&format!(
+            "Stored 4 beliefs (ids: {}, {}, {}, {})",
+            id1, id2, id3, id4
+        ));
 
         let top = hsm.top_beliefs(3);
-        t.pass(&format!("Top 3 by confidence: [{}]",
-            top.iter().map(|b| format!("{:.2}", b.confidence)).collect::<Vec<_>>().join(", ")));
+        t.pass(&format!(
+            "Top 3 by confidence: [{}]",
+            top.iter()
+                .map(|b| format!("{:.2}", b.confidence))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
 
         let sources: Vec<_> = top.iter().map(|b| format!("{:?}", b.source)).collect();
         t.info(&format!("Sources: {}", sources.join(", ")));
 
         // Contradicting belief
-        let id5 = hsm.add_belief("Rust adoption is slowing due to learning curve", 0.45, BeliefSource::Reflection);
+        let id5 = hsm.add_belief(
+            "Rust adoption is slowing due to learning curve",
+            0.45,
+            BeliefSource::Reflection,
+        );
         t.info(&format!("Added contradicting belief (id: {})", id5));
         t.pass(&format!("Total beliefs: {}", hsm.top_beliefs(100).len()));
     }
@@ -481,23 +634,57 @@ async fn main() -> anyhow::Result<()> {
     {
         let council_id = uuid::Uuid::new_v4();
         let members = vec![
-            CouncilMember { agent_id: 1, role: Role::Architect, expertise_score: 0.9, participation_weight: 1.0 },
-            CouncilMember { agent_id: 2, role: Role::Critic, expertise_score: 0.85, participation_weight: 1.0 },
-            CouncilMember { agent_id: 3, role: Role::Explorer, expertise_score: 0.8, participation_weight: 1.0 },
-            CouncilMember { agent_id: 4, role: Role::Catalyst, expertise_score: 0.75, participation_weight: 0.8 },
+            CouncilMember {
+                agent_id: 1,
+                role: Role::Architect,
+                expertise_score: 0.9,
+                participation_weight: 1.0,
+            },
+            CouncilMember {
+                agent_id: 2,
+                role: Role::Critic,
+                expertise_score: 0.85,
+                participation_weight: 1.0,
+            },
+            CouncilMember {
+                agent_id: 3,
+                role: Role::Explorer,
+                expertise_score: 0.8,
+                participation_weight: 1.0,
+            },
+            CouncilMember {
+                agent_id: 4,
+                role: Role::Catalyst,
+                expertise_score: 0.75,
+                participation_weight: 0.8,
+            },
         ];
         let mut council = SimpleCouncil::new(council_id, members);
 
-        let simple = Proposal::new("s1", "Add logging to API endpoints", "Standard observability improvement", 1);
+        let simple = Proposal::new(
+            "s1",
+            "Add logging to API endpoints",
+            "Standard observability improvement",
+            1,
+        );
         match council.evaluate(&simple, CouncilMode::Simple).await {
-            Ok(d) => t.pass(&format!("Simple: {:?} (conf: {:.2})", d.decision, d.confidence)),
+            Ok(d) => t.pass(&format!(
+                "Simple: {:?} (conf: {:.2})",
+                d.decision, d.confidence
+            )),
             Err(e) => t.fail(&format!("Simple failed: {}", e)),
         }
 
         let orchestrate = Proposal::new("o1", "Implement federated knowledge sync",
             "Design protocol for hypergraph belief synchronization across nodes with conflict resolution", 1);
-        match council.evaluate(&orchestrate, CouncilMode::Orchestrate).await {
-            Ok(d) => t.pass(&format!("Orchestrate: {:?} (conf: {:.2})", d.decision, d.confidence)),
+        match council
+            .evaluate(&orchestrate, CouncilMode::Orchestrate)
+            .await
+        {
+            Ok(d) => t.pass(&format!(
+                "Orchestrate: {:?} (conf: {:.2})",
+                d.decision, d.confidence
+            )),
             Err(e) => t.fail(&format!("Orchestrate failed: {}", e)),
         }
 
@@ -507,15 +694,24 @@ async fn main() -> anyhow::Result<()> {
         let stances = [Stance::For, Stance::Against, Stance::Cautious];
         for (i, (role, stance)) in roles.iter().zip(stances.iter()).enumerate() {
             let arg = LLMArgument {
-                agent_id: i as AgentId, role: role.clone(), stance: stance.clone(),
+                agent_id: i as AgentId,
+                role: role.clone(),
+                stance: stance.clone(),
                 content: format!("{:?} argues {:?} on federation sync", role, stance),
-                confidence: 0.7, key_points: vec!["Point 1".to_string()],
-                evidence: vec![], round: 1, responding_to: None,
-                tokens_generated: 100, generation_time_ms: 500,
+                confidence: 0.7,
+                key_points: vec!["Point 1".to_string()],
+                evidence: vec![],
+                round: 1,
+                responding_to: None,
+                tokens_generated: 100,
+                generation_time_ms: 500,
             };
             cache.put(role.clone(), "o1", "opening", arg);
         }
-        t.pass(&format!("Debate cache prepared: {} arguments", cache.stats().total_entries));
+        t.pass(&format!(
+            "Debate cache prepared: {} arguments",
+            cache.stats().total_entries
+        ));
     }
 
     // ═══ TEST 11: MiroFish + Belief + Council Pipeline ═══
@@ -541,18 +737,38 @@ async fn main() -> anyhow::Result<()> {
 
             let content: String = output.result.chars().take(500).collect();
             let id = hsm.add_belief(&content, 0.72, BeliefSource::Prediction);
-            t.pass(&format!("Stored as Belief (id: {}, source: Prediction)", id));
+            t.pass(&format!(
+                "Stored as Belief (id: {}, source: Prediction)",
+                id
+            ));
 
             let council_id = uuid::Uuid::new_v4();
             let members = vec![
-                CouncilMember { agent_id: 1, role: Role::Architect, expertise_score: 0.9, participation_weight: 1.0 },
-                CouncilMember { agent_id: 2, role: Role::Critic, expertise_score: 0.85, participation_weight: 1.0 },
+                CouncilMember {
+                    agent_id: 1,
+                    role: Role::Architect,
+                    expertise_score: 0.9,
+                    participation_weight: 1.0,
+                },
+                CouncilMember {
+                    agent_id: 2,
+                    role: Role::Critic,
+                    expertise_score: 0.85,
+                    participation_weight: 1.0,
+                },
             ];
             let mut council = SimpleCouncil::new(council_id, members);
-            let proposal = Proposal::new("p1", "Prioritize CASS over DKS",
-                "Based on prediction: allocate more compute to CASS skill evolution", 1);
+            let proposal = Proposal::new(
+                "p1",
+                "Prioritize CASS over DKS",
+                "Based on prediction: allocate more compute to CASS skill evolution",
+                1,
+            );
             match council.evaluate(&proposal, CouncilMode::Orchestrate).await {
-                Ok(d) => t.pass(&format!("Council reviewed: {:?} (conf: {:.2})", d.decision, d.confidence)),
+                Ok(d) => t.pass(&format!(
+                    "Council reviewed: {:?} (conf: {:.2})",
+                    d.decision, d.confidence
+                )),
                 Err(e) => t.fail(&format!("Council failed: {}", e)),
             }
         } else {
@@ -568,12 +784,39 @@ async fn main() -> anyhow::Result<()> {
         let agents: Vec<AgentId> = vec![10, 20, 30];
 
         for i in 0..10u64 {
-            social.record_delivery(agents[0], "federation_sync", true, 0.9, true, true, 1000 + i * 100, &[]);
+            social.record_delivery(
+                agents[0],
+                "federation_sync",
+                true,
+                0.9,
+                true,
+                true,
+                1000 + i * 100,
+                &[],
+            );
         }
         for i in 0..5u64 {
-            social.record_delivery(agents[1], "federation_sync", i < 3, 0.6, i < 2, true, 1000 + i * 100, &[]);
+            social.record_delivery(
+                agents[1],
+                "federation_sync",
+                i < 3,
+                0.6,
+                i < 2,
+                true,
+                1000 + i * 100,
+                &[],
+            );
         }
-        social.record_delivery(agents[2], "federation_sync", false, 0.2, false, false, 1000, &[]);
+        social.record_delivery(
+            agents[2],
+            "federation_sync",
+            false,
+            0.2,
+            false,
+            false,
+            1000,
+            &[],
+        );
 
         let node_a = "node-A".to_string();
         let agent10 = "agent-10".to_string();
@@ -589,20 +832,36 @@ async fn main() -> anyhow::Result<()> {
         trust.record_failure(&node_a, &agent20, 10);
         trust.record_failure(&node_a, &agent30, 11);
 
-        let jw_scores: Vec<(AgentId, f64)> = agents.iter().enumerate()
-            .map(|(i, &a)| (a, 0.8 - (i as f64 * 0.15))).collect();
+        let jw_scores: Vec<(AgentId, f64)> = agents
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| (a, 0.8 - (i as f64 * 0.15)))
+            .collect();
         let delegate = social.recommend_delegate(
-            &jw_scores, Some("federation_sync"), None, Some(DataSensitivity::Internal));
+            &jw_scores,
+            Some("federation_sync"),
+            None,
+            Some(DataSensitivity::Internal),
+        );
 
         if let Some(d) = &delegate {
-            t.pass(&format!("Best delegate: Agent {} (score: {:.3})", d.agent_id, d.score));
+            t.pass(&format!(
+                "Best delegate: Agent {} (score: {:.3})",
+                d.agent_id, d.score
+            ));
             let trust_score = trust.get_trust(&node_a, &format!("agent-{}", d.agent_id));
-            t.info(&format!("Federation trust for delegate: {:.3}", trust_score));
+            t.info(&format!(
+                "Federation trust for delegate: {:.3}",
+                trust_score
+            ));
 
             if d.agent_id == agents[0] {
                 t.pass("Correct: most reliable agent selected");
             } else {
-                t.info(&format!("Selected agent {} (JW weighting may differ)", d.agent_id));
+                t.info(&format!(
+                    "Selected agent {} (JW weighting may differ)",
+                    d.agent_id
+                ));
             }
         } else {
             t.fail("No delegate recommended");
@@ -619,8 +878,10 @@ async fn main() -> anyhow::Result<()> {
 
     if let Ok(client) = LlmClient::new() {
         let m = client.metrics();
-        println!("\n  LLM Metrics: {} requests, {} tokens, {}ms avg latency",
-            m.requests_total, m.tokens_total, m.avg_latency_ms);
+        println!(
+            "\n  LLM Metrics: {} requests, {} tokens, {}ms avg latency",
+            m.requests_total, m.tokens_total, m.avg_latency_ms
+        );
     }
 
     std::process::exit(if t.failed > 0 { 1 } else { 0 });

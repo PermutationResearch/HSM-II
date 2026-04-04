@@ -1,0 +1,31 @@
+{
+  "benchmarks": [
+    {
+      "name": "yc_bench_medium_seed1",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "1",
+        "company_pack": "PLACEHOLDER_COMPANY_PACK"
+      },
+      "setup_commands": [
+        ["uv", "sync"]
+      ],
+      "command": [
+        "uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/anthropic/claude-3.7-sonnet",
+        "--seed",
+        "1",
+        "--config",
+        "medium"
+      ],
+      "cwd": "/ABS/PATH/TO/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    }
+  ]
+}

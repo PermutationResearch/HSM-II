@@ -78,7 +78,8 @@ pub fn build_proposer_context(
 ) -> anyhow::Result<ProposerContext> {
     let conn = open_run_store(db_path).with_context(|| db_path.display().to_string())?;
     let recent_runs = query_recent(&conn, opts.recent_limit)?;
-    let top_objective_runs = query_best_objective(&conn, opts.top_objective_min, opts.top_objective_limit)?;
+    let top_objective_runs =
+        query_best_objective(&conn, opts.top_objective_min, opts.top_objective_limit)?;
     let harness_source_files = discover_harness_rust_sources(workspace)?;
     let file_list = harness_source_files.join("\n");
     let agent_instructions = format!(

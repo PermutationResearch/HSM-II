@@ -1,0 +1,314 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Nothing dark tokens (instrument panel / OLED) */
+:root {
+  --nd-black: #000000;
+  --nd-surface: #111111;
+  --nd-surface-raised: #1a1a1a;
+  --nd-border: #222222;
+  --nd-border-visible: #333333;
+  --nd-text-disabled: #666666;
+  --nd-text-secondary: #999999;
+  --nd-text-primary: #e8e8e8;
+  --nd-text-display: #ffffff;
+  --nd-accent: #d71921;
+  --nd-success: #4a9e5c;
+  --nd-warning: #d4a843;
+  --nd-interactive: #5b9bf6;
+
+  /* shadcn / Radix — mapped to Nothing + Paperclip admin dark */
+  --radius: 0.5rem;
+  --background: #000000;
+  --foreground: #e8e8e8;
+  --card: #111111;
+  --card-foreground: #e8e8e8;
+  --popover: #111111;
+  --popover-foreground: #e8e8e8;
+  --primary: #5b9bf6;
+  --primary-foreground: #ffffff;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #e8e8e8;
+  --muted: #1a1a1a;
+  --muted-foreground: #999999;
+  --accent: #1a1a1a;
+  --accent-foreground: #e8e8e8;
+  --destructive: #d71921;
+  --destructive-foreground: #ffffff;
+  --border: #222222;
+  --input: #333333;
+  --ring: #5b9bf6;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* ALL CAPS instrument labels (Nothing components.md) */
+.nd-label {
+  @apply font-mono text-[11px] font-normal uppercase tracking-[0.08em] text-muted-foreground;
+}
+
+@keyframes activity-row-enter {
+  from {
+    background-color: rgba(255, 255, 255, 0.08);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.activity-row-enter {
+  animation: activity-row-enter 0.95s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/**
+ * Dashboard: one ambient layer only (nothing-gradients). Cards/charts stay flat (#111 + borders).
+ */
+.nd-dashboard-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+.nd-dashboard-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+      130% 90% at 50% -35%,
+      oklab(0.21 0.02 -0.04 / 0.42) 0%,
+      oklab(0.05 0 0 / 0) 52%
+    ),
+    #000000;
+}
+
+.nd-dashboard-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+/**
+ * Paperclip-class workspace surfaces (dense tables, headers) using the same tokens as Nothing/shadcn.
+ * Prefer these over one-off hex in new workspace pages.
+ */
+@layer components {
+  .pc-workspace-canvas {
+    @apply relative min-w-0 flex-1 overflow-auto;
+  }
+
+  .pc-page-eyebrow {
+    @apply font-mono text-[11px] font-normal uppercase tracking-[0.08em] text-muted-foreground;
+  }
+
+  .pc-page-title {
+    @apply text-lg font-semibold tracking-tight text-foreground;
+  }
+
+  .pc-page-desc {
+    @apply mt-1 text-sm text-muted-foreground;
+  }
+
+  .pc-panel {
+    @apply rounded-lg border border-admin-border bg-card shadow-pc-card;
+  }
+
+  .pc-table-header {
+    @apply grid gap-2 border-b border-admin-border px-4 py-2 font-mono text-[10px] font-semibold uppercase tracking-wide text-muted-foreground;
+    /* Opacity + CSS var: @apply bg-muted/30 fails when muted is var(--muted) */
+    background-color: color-mix(in srgb, var(--muted) 30%, transparent);
+  }
+
+  .pc-table-row {
+    @apply border-b border-admin-border px-4 py-3 text-left text-sm transition-colors hover:bg-white/5;
+  }
+
+  .pc-sidebar-brand {
+    @apply font-mono text-xs font-semibold uppercase tracking-[0.1em] text-admin-muted hover:text-foreground;
+  }
+}
+
+/* ── react-grid-layout: pointer + transform placement (RGL adds .cssTransforms when using transformStrategy) ── */
+.react-grid-layout {
+  position: relative;
+  transition: height 150ms ease;
+}
+
+.react-grid-item {
+  touch-action: none;
+  contain: layout paint style;
+  backface-visibility: hidden;
+}
+
+/* Transform + size animate when idle; none during active drag/resize (RGL sets these classes). */
+.react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
+  transition-duration: 160ms;
+  transition-timing-function: ease;
+}
+
+.react-grid-item.react-draggable-dragging,
+.react-grid-item.resizing {
+  transition: none;
+}
+
+.react-grid-item.react-draggable-dragging {
+  z-index: 100;
+  opacity: 0.94;
+  will-change: transform;
+  contain: layout paint style;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.react-grid-item.resizing {
+  z-index: 90;
+  will-change: width, height;
+  contain: layout paint style;
+}
+
+.react-grid-item.react-grid-placeholder {
+  background: rgba(91, 155, 246, 0.12);
+  border: 1px dashed rgba(91, 155, 246, 0.35);
+  border-radius: 1rem;
+  opacity: 1;
+  transition: all 120ms ease;
+}
+
+/* Resize handle: large hit target, pen/touch friendly, above widget chrome */
+.react-grid-item > .react-resizable-handle {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  touch-action: none;
+  z-index: 35;
+  opacity: 1;
+  transition: none;
+}
+
+.react-grid-item > .react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  border: 0;
+  transition: none;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-n {
+  top: 0;
+  left: 14px;
+  right: 14px;
+  width: auto;
+  height: 12px;
+  cursor: n-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-s {
+  bottom: 0;
+  left: 14px;
+  right: 14px;
+  width: auto;
+  height: 12px;
+  cursor: s-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-e {
+  top: 14px;
+  right: 0;
+  bottom: 14px;
+  width: 12px;
+  height: auto;
+  cursor: e-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-w {
+  top: 14px;
+  left: 0;
+  bottom: 14px;
+  width: 12px;
+  height: auto;
+  cursor: w-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-ne {
+  top: 2px;
+  right: 2px;
+  cursor: ne-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-nw {
+  top: 2px;
+  left: 2px;
+  cursor: nw-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se {
+  right: 2px;
+  bottom: 2px;
+  cursor: se-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw {
+  left: 2px;
+  bottom: 2px;
+  cursor: sw-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-n::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-s::after {
+  inset: auto;
+  width: 0;
+  height: 0;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-n::after {
+  inset: auto;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-e::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-w::after {
+  inset: auto;
+  width: 0;
+  height: 0;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-e::after {
+  inset: auto;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-ne::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-nw::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw::after {
+  inset: auto;
+  width: 7px;
+  height: 7px;
+  background-color: transparent;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-ne::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se::after {
+  right: auto;
+  border-right: 0;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-nw::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw::after {
+  left: auto;
+  border-left: 0;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-nw::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-ne::after {
+  top: auto;
+  border-top: 0;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se::after {
+  bottom: auto;
+  border-bottom: 0;
+}

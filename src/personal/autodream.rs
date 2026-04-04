@@ -87,9 +87,7 @@ pub fn watched_files(home: &Path) -> Vec<(String, PathBuf)> {
         "prompt.template.md",
         "config/prompt_routes.yaml",
     ];
-    rels.iter()
-        .map(|r| (r.to_string(), home.join(r)))
-        .collect()
+    rels.iter().map(|r| (r.to_string(), home.join(r))).collect()
 }
 
 /// Files whose mtime increased vs `state.watched_mtimes` (or missing prior entry and file exists).
@@ -122,8 +120,12 @@ fn list_recent_extracts(home: &Path, max: usize) -> Vec<(String, String)> {
         }
     }
     files.sort_by(|a, b| {
-        let ta = std::fs::metadata(a).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-        let tb = std::fs::metadata(b).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let ta = std::fs::metadata(a)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let tb = std::fs::metadata(b)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
         tb.cmp(&ta)
     });
     files
@@ -190,7 +192,10 @@ pub async fn maybe_consolidate(
 
     let mut body = String::new();
     body.push_str("# autoDream consolidation\n\n");
-    body.push_str(&format!("- generated_at: `{}` (unix {})\n", label, now_unix));
+    body.push_str(&format!(
+        "- generated_at: `{}` (unix {})\n",
+        label, now_unix
+    ));
     if !stale.is_empty() {
         body.push_str("\n## Stale / updated instruction files\n\n");
         for s in &stale {

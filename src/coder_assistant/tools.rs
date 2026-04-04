@@ -339,9 +339,7 @@ impl ToolExecutor {
         if !(high_risk_local || external_provider) {
             return Ok(());
         }
-        let provider_id = provider
-            .map(|p| p.id.as_str())
-            .unwrap_or("builtin");
+        let provider_id = provider.map(|p| p.id.as_str()).unwrap_or("builtin");
         let key = format!("tool:{}@{}", tool_name, provider_id);
         let summary = format!(
             "tool={} provider={} args={}",
@@ -1768,7 +1766,10 @@ mod tests {
     #[tokio::test]
     async fn blocks_non_allowlisted_network_hosts() {
         let mut context = ToolContext::default();
-        context.execution_policy.network_boundary.block_network_for_bash = false;
+        context
+            .execution_policy
+            .network_boundary
+            .block_network_for_bash = false;
         context.execution_policy.network_boundary.allowed_hosts = vec!["api.example.com".into()];
         let executor = ToolExecutor::with_context(context);
 
@@ -1789,7 +1790,10 @@ mod tests {
     #[tokio::test]
     async fn bash_receives_only_injected_environment_variables() {
         let mut context = ToolContext::default();
-        context.execution_policy.network_boundary.block_network_for_bash = false;
+        context
+            .execution_policy
+            .network_boundary
+            .block_network_for_bash = false;
         context
             .env_vars
             .insert("API_TOKEN".into(), "super-secret-value".into());
@@ -1868,7 +1872,10 @@ mod tests {
             .expect("provider should exist");
 
         let mut context = ToolContext::default();
-        context.execution_policy.network_boundary.block_network_for_bash = false;
+        context
+            .execution_policy
+            .network_boundary
+            .block_network_for_bash = false;
         context.execution_policy.network_boundary.allowed_hosts = vec!["127.0.0.1".into()];
         let executor = ToolExecutor::with_context(context);
         let output = executor

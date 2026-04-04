@@ -108,7 +108,11 @@ fn keyword_score(tokens: &[String], tool_name: &str, corpus: &str) -> f64 {
 }
 
 /// Score every tool in `registry` against `prompt` using registered function schemas.
-pub fn rank_tools_for_prompt(registry: &ToolRegistry, prompt: &str, rank_cap: usize) -> Vec<ScoredTool> {
+pub fn rank_tools_for_prompt(
+    registry: &ToolRegistry,
+    prompt: &str,
+    rank_cap: usize,
+) -> Vec<ScoredTool> {
     let tokens = tokenize_prompt(prompt);
     let cap = rank_cap.max(1);
     let mut ranked: Vec<ScoredTool> = Vec::new();
@@ -124,7 +128,10 @@ pub fn rank_tools_for_prompt(registry: &ToolRegistry, prompt: &str, rank_cap: us
             .get("description")
             .and_then(|x| x.as_str())
             .unwrap_or("");
-        let parameters = func.get("parameters").cloned().unwrap_or_else(|| Value::Object(Default::default()));
+        let parameters = func
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
         let corpus = build_schema_corpus(name, description, &parameters);
         let score = keyword_score(&tokens, name, &corpus);
         ranked.push(ScoredTool {
@@ -144,7 +151,11 @@ pub fn rank_tools_for_prompt(registry: &ToolRegistry, prompt: &str, rank_cap: us
 }
 
 /// Best-scoring tool if `score >= min_score`.
-pub fn pick_tool_for_prompt(registry: &ToolRegistry, prompt: &str, min_score: f64) -> Option<ScoredTool> {
+pub fn pick_tool_for_prompt(
+    registry: &ToolRegistry,
+    prompt: &str,
+    min_score: f64,
+) -> Option<ScoredTool> {
     let ranked = rank_tools_for_prompt(registry, prompt, 1);
     ranked.into_iter().next().filter(|t| t.score >= min_score)
 }
@@ -186,7 +197,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::tools::{Tool, ToolOutput, ToolRegistry, tool_permissions::ToolPermissionContext};
+    use crate::tools::{tool_permissions::ToolPermissionContext, Tool, ToolOutput, ToolRegistry};
 
     struct DummyTool {
         name: &'static str,
@@ -224,16 +235,18 @@ mod tests {
             schema: json!({"type":"object","properties":{"query":{"type":"string","description":"search query"}}}),
         }));
 
-        let ranked = rank_tools_for_prompt(&reg, "Please search the web for rust async tutorial", 8);
+        let ranked =
+            rank_tools_for_prompt(&reg, "Please search the web for rust async tutorial", 8);
         assert_eq!(ranked[0].name, "web_search");
         assert!(ranked[0].score >= ranked.get(1).map(|x| x.score).unwrap_or(0.0));
     }
 
     #[tokio::test]
     async fn execute_respects_firewall() {
-        let mut reg = ToolRegistry::new_with_permissions(ToolPermissionContext::with_blocked_prefixes([
-            "web_",
-        ]));
+        let mut reg =
+            ToolRegistry::new_with_permissions(ToolPermissionContext::with_blocked_prefixes([
+                "web_",
+            ]));
         reg.register(Arc::new(DummyTool {
             name: "web_search",
             desc: "Search the web",

@@ -4,7 +4,7 @@ use reqwest::{Client, Method};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::{Tool, ToolOutput, object_schema};
+use super::{object_schema, Tool, ToolOutput};
 
 // ============================================================================
 // HTTP Request Tool
@@ -30,28 +30,35 @@ impl Tool for HttpRequestTool {
     fn name(&self) -> &str {
         "http_request"
     }
-    
+
     fn description(&self) -> &str {
         "Make an HTTP request to any API endpoint. Supports GET, POST, PUT, DELETE, PATCH."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("url", "URL to request", true),
-            ("method", "HTTP method: GET, POST, PUT, DELETE, PATCH (default: GET)", false),
+            (
+                "method",
+                "HTTP method: GET, POST, PUT, DELETE, PATCH (default: GET)",
+                false,
+            ),
             ("headers", "JSON object of headers to send", false),
             ("body", "Request body (for POST/PUT/PATCH)", false),
             ("params", "Query parameters as JSON object", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
         if url.is_empty() {
             return ToolOutput::error("URL is required");
         }
-        
-        let method_str = params.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+
+        let method_str = params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
         let method = match method_str.to_uppercase().as_str() {
             "GET" => Method::GET,
             "POST" => Method::POST,
@@ -62,9 +69,9 @@ impl Tool for HttpRequestTool {
             "OPTIONS" => Method::OPTIONS,
             _ => Method::GET,
         };
-        
+
         let mut request = self.client.request(method, url);
-        
+
         // Add headers
         if let Some(headers) = params.get("headers").and_then(|v| v.as_object()) {
             for (key, value) in headers {
@@ -73,7 +80,7 @@ impl Tool for HttpRequestTool {
                 }
             }
         }
-        
+
         // Add query params
         if let Some(query) = params.get("params").and_then(|v| v.as_object()) {
             let query_map: HashMap<String, String> = query
@@ -82,12 +89,12 @@ impl Tool for HttpRequestTool {
                 .collect();
             request = request.query(&query_map);
         }
-        
+
         // Add body
         if let Some(body) = params.get("body") {
             request = request.json(body);
         }
-        
+
         match request.send().await {
             Ok(response) => {
                 let status = response.status();
@@ -98,20 +105,27 @@ impl Tool for HttpRequestTool {
                         v.to_str().ok().map(|val| (k.to_string(), val.to_string()))
                     })
                     .collect();
-                
+
                 match response.text().await {
                     Ok(body) => {
                         // Try to parse as JSON
-                        let parsed_body: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
-                            Value::String(body.clone())
-                        });
-                        
+                        let parsed_body: Value = serde_json::from_str(&body)
+                            .unwrap_or_else(|_| Value::String(body.clone()));
+
                         let output = if status.is_success() {
-                            ToolOutput::success(format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")))
+                            ToolOutput::success(format!(
+                                "HTTP {} {}",
+                                status.as_u16(),
+                                status.canonical_reason().unwrap_or("")
+                            ))
                         } else {
-                            ToolOutput::error(format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")))
+                            ToolOutput::error(format!(
+                                "HTTP {} {}",
+                                status.as_u16(),
+                                status.canonical_reason().unwrap_or("")
+                            ))
                         };
-                        
+
                         output.with_metadata(serde_json::json!({
                             "status": status.as_u16(),
                             "status_text": status.canonical_reason(),
@@ -157,11 +171,11 @@ impl Tool for WebhookSendTool {
     fn name(&self) -> &str {
         "webhook_send"
     }
-    
+
     fn description(&self) -> &str {
         "Send a webhook payload to a URL. Supports Discord, Slack, and generic webhooks."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("url", "Webhook URL", true),
@@ -170,15 +184,15 @@ impl Tool for WebhookSendTool {
             ("avatar_url", "Override avatar URL (optional)", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        
+
         if url.is_empty() || content.is_empty() {
             return ToolOutput::error("URL and content are required");
         }
-        
+
         // Detect webhook type and format payload
         let payload = if url.contains("discord") || url.contains("slack") {
             let mut p = serde_json::json!({
@@ -198,7 +212,7 @@ impl Tool for WebhookSendTool {
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             })
         };
-        
+
         match self.client.post(url).json(&payload).send().await {
             Ok(response) => {
                 if response.status().is_success() {
@@ -235,21 +249,25 @@ impl Tool for JsonParseTool {
     fn name(&self) -> &str {
         "json_parse"
     }
-    
+
     fn description(&self) -> &str {
         "Parse and extract data from JSON using dot-notation path."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("json", "JSON string or object to parse", true),
-            ("path", "Dot-notation path to extract (e.g., 'data.users.0.name')", false),
+            (
+                "path",
+                "Dot-notation path to extract (e.g., 'data.users.0.name')",
+                false,
+            ),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let json_input = params.get("json").cloned().unwrap_or(Value::Null);
-        
+
         let value = if let Some(s) = json_input.as_str() {
             match serde_json::from_str::<Value>(s) {
                 Ok(v) => v,
@@ -258,7 +276,7 @@ impl Tool for JsonParseTool {
         } else {
             json_input
         };
-        
+
         let result = if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
             // Navigate path
             let parts: Vec<&str> = path.split('.').collect();
@@ -274,11 +292,10 @@ impl Tool for JsonParseTool {
         } else {
             value
         };
-        
-        ToolOutput::success(format!("Extracted: {}", result))
-            .with_metadata(serde_json::json!({
-                "result": result,
-            }))
+
+        ToolOutput::success(format!("Extracted: {}", result)).with_metadata(serde_json::json!({
+            "result": result,
+        }))
     }
 }
 
@@ -305,33 +322,33 @@ impl Tool for JsonValidateTool {
     fn name(&self) -> &str {
         "json_validate"
     }
-    
+
     fn description(&self) -> &str {
         "Validate JSON against a JSON Schema."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("json", "JSON to validate", true),
             ("schema", "JSON Schema to validate against", true),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         // Basic validation - just check both are valid JSON
         let json_value = params.get("json").cloned().unwrap_or(Value::Null);
         let schema_value = params.get("schema").cloned().unwrap_or(Value::Null);
-        
+
         if json_value.is_null() {
             return ToolOutput::error("Invalid or missing JSON");
         }
         if schema_value.is_null() {
             return ToolOutput::error("Invalid or missing schema");
         }
-        
+
         // Check if required fields exist (basic schema validation)
         let mut errors = Vec::new();
-        
+
         if let Some(required) = schema_value.get("required").and_then(|v| v.as_array()) {
             for req in required {
                 if let Some(field) = req.as_str() {
@@ -341,7 +358,7 @@ impl Tool for JsonValidateTool {
                 }
             }
         }
-        
+
         // Check types
         if let Some(properties) = schema_value.get("properties").and_then(|v| v.as_object()) {
             for (prop, schema_def) in properties {
@@ -366,7 +383,7 @@ impl Tool for JsonValidateTool {
                 }
             }
         }
-        
+
         if errors.is_empty() {
             ToolOutput::success("JSON is valid against schema".to_string())
         } else {
@@ -398,11 +415,11 @@ impl Tool for Base64Tool {
     fn name(&self) -> &str {
         "base64"
     }
-    
+
     fn description(&self) -> &str {
         "Encode or decode Base64 strings."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("operation", "encode or decode", true),
@@ -410,14 +427,20 @@ impl Tool for Base64Tool {
             ("url_safe", "Use URL-safe base64 (default: false)", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
-        use base64::{Engine, engine::general_purpose};
-        
-        let operation = params.get("operation").and_then(|v| v.as_str()).unwrap_or("");
+        use base64::{engine::general_purpose, Engine};
+
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let data = params.get("data").and_then(|v| v.as_str()).unwrap_or("");
-        let url_safe = params.get("url_safe").and_then(|v| v.as_bool()).unwrap_or(false);
-        
+        let url_safe = params
+            .get("url_safe")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         match operation {
             "encode" => {
                 let encoded = if url_safe {
@@ -433,11 +456,13 @@ impl Tool for Base64Tool {
                 } else {
                     general_purpose::STANDARD.decode(data)
                 };
-                
+
                 match result {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(decoded) => ToolOutput::success(decoded),
-                        Err(e) => ToolOutput::success(format!("Decoded bytes (not valid UTF-8): {}", e)),
+                        Err(e) => {
+                            ToolOutput::success(format!("Decoded bytes (not valid UTF-8): {}", e))
+                        }
                     },
                     Err(e) => ToolOutput::error(format!("Decode failed: {}", e)),
                 }
@@ -470,11 +495,11 @@ impl Tool for UrlTool {
     fn name(&self) -> &str {
         "url"
     }
-    
+
     fn description(&self) -> &str {
         "Parse URLs into components or build URLs from components."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("url", "URL to parse", false),
@@ -482,7 +507,7 @@ impl Tool for UrlTool {
             ("add_params", "Query params to add to parsed URL", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         // Parse URL
         if let Some(url_str) = params.get("url").and_then(|v| v.as_str()) {
@@ -492,7 +517,7 @@ impl Tool for UrlTool {
                         .query_pairs()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
-                    
+
                     let result = serde_json::json!({
                         "scheme": url.scheme(),
                         "host": url.host_str(),
@@ -502,36 +527,35 @@ impl Tool for UrlTool {
                         "fragment": url.fragment(),
                         "query_params": query_pairs,
                     });
-                    
-                    ToolOutput::success(format!("Parsed: {}", url))
-                        .with_metadata(result)
+
+                    ToolOutput::success(format!("Parsed: {}", url)).with_metadata(result)
                 }
                 Err(e) => ToolOutput::error(format!("Failed to parse URL: {}", e)),
             }
         } else if let Some(build) = params.get("build").and_then(|v| v.as_object()) {
             let mut url = String::new();
-            
+
             if let Some(scheme) = build.get("scheme").and_then(|v| v.as_str()) {
                 url.push_str(scheme);
                 url.push_str("://");
             }
-            
+
             if let Some(host) = build.get("host").and_then(|v| v.as_str()) {
                 url.push_str(host);
             }
-            
+
             if let Some(port) = build.get("port").and_then(|v| v.as_u64()) {
                 url.push(':');
                 url.push_str(&port.to_string());
             }
-            
+
             if let Some(path) = build.get("path").and_then(|v| v.as_str()) {
                 if !path.starts_with('/') {
                     url.push('/');
                 }
                 url.push_str(path);
             }
-            
+
             if let Some(params) = build.get("params").and_then(|v| v.as_object()) {
                 url.push('?');
                 let pairs: Vec<String> = params
@@ -540,7 +564,7 @@ impl Tool for UrlTool {
                     .collect();
                 url.push_str(&pairs.join("&"));
             }
-            
+
             ToolOutput::success(url)
         } else {
             ToolOutput::error("Either 'url' to parse or 'build' object required")
@@ -571,41 +595,47 @@ impl Tool for MarkdownTool {
     fn name(&self) -> &str {
         "markdown"
     }
-    
+
     fn description(&self) -> &str {
         "Convert Markdown to HTML or strip Markdown formatting."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("operation", "to_html or strip (default: to_html)", false),
             ("text", "Markdown text to process", true),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let operation = params.get("operation").and_then(|v| v.as_str()).unwrap_or("to_html");
-        
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("to_html");
+
         match operation {
             "to_html" => {
                 // Simple markdown to HTML conversion
                 let mut html = text.to_string();
-                
+
                 // Headers
                 html = html.replace("# ", "<h1>").replace("\n# ", "\n<h1>");
                 html = html.replace("## ", "<h2>").replace("\n## ", "\n<h2>");
                 html = html.replace("### ", "<h3>").replace("\n### ", "\n<h3>");
                 html = html.replace("#### ", "<h4>").replace("\n#### ", "\n<h4>");
-                
+
                 // Bold and italic
                 html = html.replace("**", "<strong>").replace("__", "<strong>");
                 html = html.replace("*", "<em>").replace("_", "<em>");
-                
+
                 // Links - simple regex-like replacement
                 // This is a simplified version; a real implementation would use a proper parser
-                html = format!("<p>{}</p>", html.replace("\n\n", "</p><p>").replace("\n", "<br>"));
-                
+                html = format!(
+                    "<p>{}</p>",
+                    html.replace("\n\n", "</p><p>").replace("\n", "<br>")
+                );
+
                 ToolOutput::success(html)
             }
             "strip" => {
@@ -613,7 +643,10 @@ impl Tool for MarkdownTool {
                 let mut plain = text.to_string();
                 plain = plain.replace("**", "").replace("__", "");
                 plain = plain.replace("*", "").replace("_", "");
-                plain = plain.replace("# ", "").replace("## ", "").replace("### ", "");
+                plain = plain
+                    .replace("# ", "")
+                    .replace("## ", "")
+                    .replace("### ", "");
                 plain = plain.replace("`", "").replace("```", "");
                 ToolOutput::success(plain)
             }
@@ -645,42 +678,55 @@ impl Tool for CsvParseTool {
     fn name(&self) -> &str {
         "csv_parse"
     }
-    
+
     fn description(&self) -> &str {
         "Parse CSV data into JSON."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("data", "CSV string to parse", true),
-            ("headers", "Whether first row is headers (default: true)", false),
+            (
+                "headers",
+                "Whether first row is headers (default: true)",
+                false,
+            ),
             ("delimiter", "Field delimiter (default: comma)", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let data = params.get("data").and_then(|v| v.as_str()).unwrap_or("");
-        let has_headers = params.get("headers").and_then(|v| v.as_bool()).unwrap_or(true);
-        let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-        
+        let has_headers = params
+            .get("headers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let delimiter = params
+            .get("delimiter")
+            .and_then(|v| v.as_str())
+            .unwrap_or(",");
+
         let delim = delimiter.chars().next().unwrap_or(',');
         let lines: Vec<&str> = data.lines().collect();
-        
+
         if lines.is_empty() {
             return ToolOutput::error("Empty CSV data");
         }
-        
+
         let headers: Vec<String> = if has_headers {
-            lines[0].split(delim).map(|s| s.trim().to_string()).collect()
+            lines[0]
+                .split(delim)
+                .map(|s| s.trim().to_string())
+                .collect()
         } else {
             (0..lines[0].split(delim).count())
                 .map(|i| format!("column_{}", i))
                 .collect()
         };
-        
+
         let start_row = if has_headers { 1 } else { 0 };
         let mut records = Vec::new();
-        
+
         for line in &lines[start_row..] {
             let values: Vec<&str> = line.split(delim).collect();
             let mut record = serde_json::Map::new();
@@ -690,12 +736,13 @@ impl Tool for CsvParseTool {
             }
             records.push(Value::Object(record));
         }
-        
-        ToolOutput::success(format!("Parsed {} records", records.len()))
-            .with_metadata(serde_json::json!({
+
+        ToolOutput::success(format!("Parsed {} records", records.len())).with_metadata(
+            serde_json::json!({
                 "headers": headers,
                 "records": records,
-            }))
+            }),
+        )
     }
 }
 
@@ -718,44 +765,60 @@ impl Tool for CsvGenerateTool {
     fn name(&self) -> &str {
         "csv_generate"
     }
-    
+
     fn description(&self) -> &str {
         "Generate CSV from JSON array."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
             ("data", "JSON array of objects to convert to CSV", true),
-            ("headers", "Column headers (optional, auto-detected if not provided)", false),
+            (
+                "headers",
+                "Column headers (optional, auto-detected if not provided)",
+                false,
+            ),
             ("delimiter", "Field delimiter (default: comma)", false),
         ])
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
-        let data = params.get("data").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-        
+        let data = params
+            .get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let delimiter = params
+            .get("delimiter")
+            .and_then(|v| v.as_str())
+            .unwrap_or(",");
+
         if data.is_empty() {
             return ToolOutput::error("Empty data array");
         }
-        
-        let headers: Vec<String> = if let Some(h) = params.get("headers").and_then(|v| v.as_array()) {
-            h.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+
+        let headers: Vec<String> = if let Some(h) = params.get("headers").and_then(|v| v.as_array())
+        {
+            h.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
         } else {
             // Auto-detect from first record
-            data[0].as_object()
+            data[0]
+                .as_object()
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default()
         };
-        
+
         let mut csv = headers.join(delimiter);
         csv.push('\n');
-        
+
         for record in &data {
             let values: Vec<String> = headers
                 .iter()
                 .map(|h| {
-                    record.get(h)
+                    record
+                        .get(h)
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                         .unwrap_or_default()
                 })
@@ -763,7 +826,7 @@ impl Tool for CsvGenerateTool {
             csv.push_str(&values.join(delimiter));
             csv.push('\n');
         }
-        
+
         ToolOutput::success(csv)
     }
 }

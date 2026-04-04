@@ -95,9 +95,16 @@ pub struct ContextSummary {
 
 impl Trajectory {
     /// Create a new trajectory
-    pub fn new(query: impl Into<String>, context_source: impl Into<String>, context_bytes: usize) -> Self {
+    pub fn new(
+        query: impl Into<String>,
+        context_source: impl Into<String>,
+        context_bytes: usize,
+    ) -> Self {
         Self {
-            id: format!("traj_{}", uuid::Uuid::new_v4().to_string()[..16].to_string()),
+            id: format!(
+                "traj_{}",
+                uuid::Uuid::new_v4().to_string()[..16].to_string()
+            ),
             timestamp: chrono::Utc::now(),
             query: query.into(),
             context_source: context_source.into(),
@@ -108,61 +115,55 @@ impl Trajectory {
             metadata: TrajectoryMetadata::default(),
         }
     }
-    
+
     /// Add an iteration snapshot
     pub fn add_iteration(&mut self, iteration: IterationSnapshot) {
         self.iterations.push(iteration);
         self.stats.total_iterations = self.iterations.len();
     }
-    
+
     /// Set final answer
     pub fn set_final_answer(&mut self, answer: impl Into<String>) {
         self.final_answer = Some(answer.into());
         self.metadata.success = true;
     }
-    
+
     /// Mark as failed
     pub fn mark_failed(&mut self, error: impl Into<String>) {
         self.metadata.success = false;
         self.metadata.error = Some(error.into());
     }
-    
+
     /// Update stats
     pub fn update_stats(&mut self, stats: RlmStats) {
         self.stats = stats;
     }
-    
+
     /// Get total duration across all iterations
     pub fn total_duration_ms(&self) -> u64 {
         self.iterations.iter().map(|i| i.duration_ms).sum()
     }
-    
+
     /// Get the final iteration count
     pub fn iteration_count(&self) -> usize {
         self.iterations.len()
     }
-    
+
     /// Summarize for display
     pub fn summarize(&self) -> String {
         let status = if self.metadata.success { "✓" } else { "✗" };
         let iterations = self.iterations.len();
         let duration_sec = self.total_duration_ms() as f64 / 1000.0;
-        let subqueries: usize = self.iterations.iter()
+        let subqueries: usize = self
+            .iterations
+            .iter()
             .map(|i| i.subquery_results.len())
             .sum();
-        let tools: usize = self.iterations.iter()
-            .map(|i| i.tool_results.len())
-            .sum();
-        
+        let tools: usize = self.iterations.iter().map(|i| i.tool_results.len()).sum();
+
         format!(
             "{} {} | {} iterations | {:.1}s | {} sub-queries | {} tool calls | {} bytes context",
-            status,
-            self.id,
-            iterations,
-            duration_sec,
-            subqueries,
-            tools,
-            self.context_bytes
+            status, self.id, iterations, duration_sec, subqueries, tools, self.context_bytes
         )
     }
 }
@@ -181,61 +182,63 @@ impl TrajectoryStore {
             trajectories: HashMap::new(),
         }
     }
-    
+
     /// Initialize storage directory
     pub async fn initialize(&self) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.base_path).await?;
         Ok(())
     }
-    
+
     /// Save a trajectory
     pub async fn save(&mut self, trajectory: &Trajectory) -> Result<(), super::RlmError> {
         // Store in memory
-        self.trajectories.insert(trajectory.id.clone(), trajectory.clone());
-        
+        self.trajectories
+            .insert(trajectory.id.clone(), trajectory.clone());
+
         // Persist to disk
         let path = self.base_path.join(format!("{}.json", trajectory.id));
         let json = serde_json::to_string_pretty(trajectory)
             .map_err(|e| super::RlmError::StorageError(e.to_string()))?;
-        
-        tokio::fs::write(&path, json)
-            .await
-            .map_err(|e| super::RlmError::StorageError(format!("Failed to write trajectory: {}", e)))?;
-        
+
+        tokio::fs::write(&path, json).await.map_err(|e| {
+            super::RlmError::StorageError(format!("Failed to write trajectory: {}", e))
+        })?;
+
         Ok(())
     }
-    
+
     /// Load a trajectory by ID
     pub async fn load(&self, id: &str) -> Result<Option<Trajectory>, super::RlmError> {
         // Check memory first
         if let Some(traj) = self.trajectories.get(id) {
             return Ok(Some(traj.clone()));
         }
-        
+
         // Load from disk
         let path = self.base_path.join(format!("{}.json", id));
         if !path.exists() {
             return Ok(None);
         }
-        
-        let json = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| super::RlmError::StorageError(format!("Failed to read trajectory: {}", e)))?;
-        
-        let trajectory: Trajectory = serde_json::from_str(&json)
-            .map_err(|e| super::RlmError::StorageError(format!("Failed to parse trajectory: {}", e)))?;
-        
+
+        let json = tokio::fs::read_to_string(&path).await.map_err(|e| {
+            super::RlmError::StorageError(format!("Failed to read trajectory: {}", e))
+        })?;
+
+        let trajectory: Trajectory = serde_json::from_str(&json).map_err(|e| {
+            super::RlmError::StorageError(format!("Failed to parse trajectory: {}", e))
+        })?;
+
         Ok(Some(trajectory))
     }
-    
+
     /// List all trajectories (from disk)
     pub async fn list(&self) -> Result<Vec<TrajectorySummary>, super::RlmError> {
-        let mut entries = tokio::fs::read_dir(&self.base_path)
-            .await
-            .map_err(|e| super::RlmError::StorageError(format!("Failed to read directory: {}", e)))?;
-        
+        let mut entries = tokio::fs::read_dir(&self.base_path).await.map_err(|e| {
+            super::RlmError::StorageError(format!("Failed to read directory: {}", e))
+        })?;
+
         let mut summaries = Vec::new();
-        
+
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "json") {
@@ -246,23 +249,23 @@ impl TrajectoryStore {
                 }
             }
         }
-        
+
         // Sort by timestamp descending
         summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         Ok(summaries)
     }
-    
+
     /// Get recent trajectories
     pub async fn recent(&self, limit: usize) -> Result<Vec<TrajectorySummary>, super::RlmError> {
         let mut all = self.list().await?;
         all.truncate(limit);
         Ok(all)
     }
-    
+
     /// Delete a trajectory
     pub async fn delete(&mut self, id: &str) -> Result<bool, super::RlmError> {
         self.trajectories.remove(id);
-        
+
         let path = self.base_path.join(format!("{}.json", id));
         if path.exists() {
             tokio::fs::remove_file(&path)
@@ -303,36 +306,55 @@ impl From<&Trajectory> for TrajectorySummary {
 pub struct TrajectoryViewer;
 
 impl TrajectoryViewer {
-
     /// Display a trajectory in a human-readable format
     pub fn display_trajectory(traj: &Trajectory) -> String {
         let mut output = format!("═══ RLM Trajectory: {} ═══\n\n", traj.id);
         output.push_str(&format!("Query: {}\n", traj.query));
-        output.push_str(&format!("Context: {} ({} bytes)\n", traj.context_source, traj.context_bytes));
-        output.push_str(&format!("Started: {}\n", traj.timestamp.format("%Y-%m-%d %H:%M:%S")));
-        output.push_str(&format!("Status: {}\n", if traj.metadata.success { "✓ Success" } else { "✗ Failed" }));
+        output.push_str(&format!(
+            "Context: {} ({} bytes)\n",
+            traj.context_source, traj.context_bytes
+        ));
+        output.push_str(&format!(
+            "Started: {}\n",
+            traj.timestamp.format("%Y-%m-%d %H:%M:%S")
+        ));
+        output.push_str(&format!(
+            "Status: {}\n",
+            if traj.metadata.success {
+                "✓ Success"
+            } else {
+                "✗ Failed"
+            }
+        ));
         output.push_str(&format!("\nIterations: {}\n", traj.iterations.len()));
-        
+
         for (i, iter) in traj.iterations.iter().enumerate() {
-            output.push_str(&format!("\n─── Iteration {} ({:.1}s) ───\n", i + 1, iter.duration_ms as f64 / 1000.0));
+            output.push_str(&format!(
+                "\n─── Iteration {} ({:.1}s) ───\n",
+                i + 1,
+                iter.duration_ms as f64 / 1000.0
+            ));
             output.push_str(&format!("Action: {:?}\n", iter.action));
-            
+
             if !iter.tool_results.is_empty() {
                 output.push_str(&format!("  Tools: {} executed\n", iter.tool_results.len()));
             }
             if !iter.subquery_results.is_empty() {
-                output.push_str(&format!("  Sub-queries: {} completed\n", iter.subquery_results.len()));
+                output.push_str(&format!(
+                    "  Sub-queries: {} completed\n",
+                    iter.subquery_results.len()
+                ));
             }
         }
-        
+
         if let Some(answer) = &traj.final_answer {
             output.push_str(&format!("\n═══ Final Answer ═══\n{}\n", answer));
         }
-        
+
         if let Some(error) = &traj.metadata.error {
             output.push_str(&format!("\n═══ Error ═══\n{}\n", error));
         }
-        
+
         output
     }
 }

@@ -1,13 +1,13 @@
 //! Tool Registry - manages all available tools
 
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use super::{Tool, ToolCall, ToolCallResult, ToolOutput};
 use super::tool_permissions::ToolPermissionContext;
+use super::{Tool, ToolCall, ToolCallResult, ToolOutput};
 
 /// Registry of all available tools
 pub struct ToolRegistry {
@@ -58,11 +58,11 @@ impl ToolRegistry {
     pub fn set_permissions(&mut self, permissions: ToolPermissionContext) {
         self.permissions = permissions;
     }
-    
+
     /// Create registry with default HSM-II tools
     pub fn with_default_tools() -> Self {
         let mut registry = Self::new();
-        
+
         // Register default tools
         registry.register(Arc::new(super::web_search::WebSearchTool::new()));
         registry.register(Arc::new(super::file_tools::ReadTool::new()));
@@ -71,11 +71,11 @@ impl ToolRegistry {
         registry.register(Arc::new(super::shell_tools::BashTool::new()));
         registry.register(Arc::new(super::shell_tools::GrepTool::new()));
         registry.register(Arc::new(super::shell_tools::FindTool::new()));
-        
+
         info!("Registered {} default tools", registry.tools.len());
         registry
     }
-    
+
     /// Register a tool
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
@@ -83,17 +83,17 @@ impl ToolRegistry {
         self.tools.insert(name.clone(), tool);
         self.stats.entry(name).or_default();
     }
-    
+
     /// Get a tool by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
     }
-    
+
     /// Check if a tool exists
     pub fn has(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
-    
+
     /// List all available tools
     pub fn list_tools(&self) -> Vec<(&str, &str)> {
         self.tools
@@ -101,7 +101,7 @@ impl ToolRegistry {
             .map(|t| (t.name(), t.description()))
             .collect()
     }
-    
+
     /// Get tool schemas for LLM function calling
     pub fn get_schemas(&self) -> Vec<Value> {
         self.tools
@@ -118,7 +118,7 @@ impl ToolRegistry {
             })
             .collect()
     }
-    
+
     /// Execute a single tool call (no timeout - let tools complete)
     pub async fn execute(&mut self, call: ToolCall) -> ToolCallResult {
         let start = Instant::now();
@@ -140,7 +140,10 @@ impl ToolRegistry {
         }
 
         let output = if let Some(tool) = self.tools.get(&call.name) {
-            debug!("Executing tool: {} with params: {:?}", call.name, call.parameters);
+            debug!(
+                "Executing tool: {} with params: {:?}",
+                call.name, call.parameters
+            );
 
             // Execute without timeout
             let result = tool.execute(call.parameters.clone()).await;
@@ -150,7 +153,7 @@ impl ToolRegistry {
             warn!("Tool not found: {}", call.name);
             ToolOutput::error(format!("Tool '{}' not found", call.name))
         };
-        
+
         ToolCallResult {
             call,
             output,
@@ -158,7 +161,7 @@ impl ToolRegistry {
             timestamp,
         }
     }
-    
+
     /// Execute multiple tool calls in sequence
     pub async fn execute_all(&mut self, calls: Vec<ToolCall>) -> Vec<ToolCallResult> {
         let mut results = Vec::new();
@@ -167,12 +170,12 @@ impl ToolRegistry {
         }
         results
     }
-    
+
     /// Get statistics for all tools
     pub fn get_stats(&self) -> &HashMap<String, ToolStats> {
         &self.stats
     }
-    
+
     /// Update tool statistics
     fn update_stats(&mut self, name: &str, success: bool, duration: Duration) {
         if let Some(stats) = self.stats.get_mut(name) {
@@ -184,11 +187,12 @@ impl ToolRegistry {
             }
             // Update rolling average
             let duration_ms = duration.as_millis() as f64;
-            stats.avg_duration_ms = (stats.avg_duration_ms * (stats.calls - 1) as f64 + duration_ms) 
+            stats.avg_duration_ms = (stats.avg_duration_ms * (stats.calls - 1) as f64
+                + duration_ms)
                 / stats.calls as f64;
         }
     }
-    
+
     /// Set execution timeout
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
@@ -208,17 +212,17 @@ mod tests {
     use serde_json::json;
 
     struct TestTool;
-    
+
     #[async_trait::async_trait]
     impl Tool for TestTool {
         fn name(&self) -> &str {
             "test_tool"
         }
-        
+
         fn description(&self) -> &str {
             "A test tool"
         }
-        
+
         fn parameters_schema(&self) -> Value {
             serde_json::json!({
                 "type": "object",
@@ -228,7 +232,7 @@ mod tests {
                 "required": ["input"]
             })
         }
-        
+
         async fn execute(&self, params: Value) -> ToolOutput {
             let input = params.get("input").and_then(|v| v.as_str()).unwrap_or("");
             ToolOutput::success(format!("Processed: {}", input))
@@ -270,7 +274,12 @@ mod tests {
         let result = registry.execute(call).await;
         assert!(!result.output.success);
         assert!(
-            result.output.error.as_deref().unwrap_or("").contains("blocked"),
+            result
+                .output
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("blocked"),
             "{:?}",
             result.output.error
         );
@@ -310,9 +319,19 @@ mod tests {
         };
 
         let result = registry.execute(call).await;
-        assert!(result.output.success, "read_file failed: {:?}", result.output.error);
-        assert!(!result.output.result.is_empty(), "read_file returned empty result");
-        assert!(result.output.result.contains("[package]"), "Cargo.toml should contain [package]");
+        assert!(
+            result.output.success,
+            "read_file failed: {:?}",
+            result.output.error
+        );
+        assert!(
+            !result.output.result.is_empty(),
+            "read_file returned empty result"
+        );
+        assert!(
+            result.output.result.contains("[package]"),
+            "Cargo.toml should contain [package]"
+        );
     }
 
     #[tokio::test]
@@ -327,8 +346,16 @@ mod tests {
         };
 
         let result = registry.execute(call).await;
-        assert!(result.output.success, "calculator failed: {:?}", result.output.error);
-        assert!(result.output.result.contains("4"), "2+2 should equal 4, got: {}", result.output.result);
+        assert!(
+            result.output.success,
+            "calculator failed: {:?}",
+            result.output.error
+        );
+        assert!(
+            result.output.result.contains("4"),
+            "2+2 should equal 4, got: {}",
+            result.output.result
+        );
     }
 
     #[tokio::test]
@@ -343,8 +370,15 @@ mod tests {
         };
 
         let result = registry.execute(call).await;
-        assert!(result.output.success, "system_info failed: {:?}", result.output.error);
-        assert!(!result.output.result.is_empty(), "system_info returned empty result");
+        assert!(
+            result.output.success,
+            "system_info failed: {:?}",
+            result.output.error
+        );
+        assert!(
+            !result.output.result.is_empty(),
+            "system_info returned empty result"
+        );
     }
 
     #[tokio::test]
@@ -359,9 +393,16 @@ mod tests {
         };
 
         let result = registry.execute(call).await;
-        assert!(result.output.success, "grep failed: {:?}", result.output.error);
+        assert!(
+            result.output.success,
+            "grep failed: {:?}",
+            result.output.error
+        );
         // Should find at least one fn main in src/
-        assert!(!result.output.result.is_empty(), "grep for 'fn main' in src/ returned empty");
+        assert!(
+            !result.output.result.is_empty(),
+            "grep for 'fn main' in src/ returned empty"
+        );
     }
 
     #[tokio::test]
@@ -376,8 +417,15 @@ mod tests {
         };
 
         let result = registry.execute(call).await;
-        assert!(result.output.success, "list_directory failed: {:?}", result.output.error);
-        assert!(!result.output.result.is_empty(), "list_directory returned empty");
+        assert!(
+            result.output.success,
+            "list_directory failed: {:?}",
+            result.output.error
+        );
+        assert!(
+            !result.output.result.is_empty(),
+            "list_directory returned empty"
+        );
     }
 
     #[tokio::test]
@@ -393,6 +441,10 @@ mod tests {
 
         let result = registry.execute(call).await;
         // git_status should succeed if we're in a git repo
-        assert!(result.output.success, "git_status failed: {:?}", result.output.error);
+        assert!(
+            result.output.success,
+            "git_status failed: {:?}",
+            result.output.error
+        );
     }
 }

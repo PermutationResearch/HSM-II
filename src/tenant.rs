@@ -255,10 +255,7 @@ impl TenantRegistry {
     /// Get (or load) the TeamOrchestrator for a tenant.
     ///
     /// Checks LRU cache first; on miss, loads from disk (~5ms).
-    pub async fn get_orchestrator(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Arc<RwLock<TeamOrchestrator>>> {
+    pub async fn get_orchestrator(&self, tenant_id: &str) -> Result<Arc<RwLock<TeamOrchestrator>>> {
         // Check cache
         {
             let mut cache = self.cache.write().await;

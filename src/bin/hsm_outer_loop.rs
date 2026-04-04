@@ -156,8 +156,8 @@ fn main() -> anyhow::Result<()> {
         Commands::External { spec, out } => {
             let text = std::fs::read_to_string(&spec)
                 .with_context(|| format!("read {}", spec.display()))?;
-            let b: ExternalBenchmarkSpec = serde_json::from_str(&text)
-                .context("parse ExternalBenchmarkSpec JSON")?;
+            let b: ExternalBenchmarkSpec =
+                serde_json::from_str(&text).context("parse ExternalBenchmarkSpec JSON")?;
             let result = run_external_sync(&b)?;
             let path = out.unwrap_or_else(|| {
                 PathBuf::from(format!("runs/external_{}_{}.json", b.name, stamp()))
@@ -178,15 +178,18 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::ExternalBatch { spec, out, fail_fast } => {
+        Commands::ExternalBatch {
+            spec,
+            out,
+            fail_fast,
+        } => {
             let text = std::fs::read_to_string(&spec)
                 .with_context(|| format!("read {}", spec.display()))?;
             let batch: ExternalBenchmarkBatch =
                 serde_json::from_str(&text).context("parse ExternalBenchmarkBatch JSON")?;
             let batch_result = run_external_batch_sync(&batch, fail_fast)?;
-            let path = out.unwrap_or_else(|| {
-                PathBuf::from(format!("runs/external_batch_{}.json", stamp()))
-            });
+            let path = out
+                .unwrap_or_else(|| PathBuf::from(format!("runs/external_batch_{}.json", stamp())));
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
             }
@@ -288,10 +291,7 @@ fn main() -> anyhow::Result<()> {
                 },
             )?;
             let path = out.unwrap_or_else(|| {
-                PathBuf::from(format!(
-                    "proposals/proposer_context_{}.json",
-                    stamp()
-                ))
+                PathBuf::from(format!("proposals/proposer_context_{}.json", stamp()))
             });
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
@@ -309,7 +309,8 @@ fn main() -> anyhow::Result<()> {
                 println!("(no index file at {})", index.display());
                 return Ok(());
             }
-            let text = std::fs::read_to_string(&index).with_context(|| index.display().to_string())?;
+            let text =
+                std::fs::read_to_string(&index).with_context(|| index.display().to_string())?;
             let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
             let start = lines.len().saturating_sub(limit);
             for line in &lines[start..] {

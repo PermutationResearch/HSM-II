@@ -119,7 +119,12 @@ pub fn list_memory_markdown_files(home: &Path) -> Vec<MemoryFileEntry> {
         }
         if let Ok(rel) = p.strip_prefix(home) {
             let rel_s = rel.to_string_lossy().replace('\\', "/");
-            if rel_s.contains("/extracts/") && std::env::var("HSM_MEMORY_PREFETCH_INCLUDE_EXTRACTS").ok().as_deref() != Some("1") {
+            if rel_s.contains("/extracts/")
+                && std::env::var("HSM_MEMORY_PREFETCH_INCLUDE_EXTRACTS")
+                    .ok()
+                    .as_deref()
+                    != Some("1")
+            {
                 continue;
             }
             let snippet = std::fs::read_to_string(p)
@@ -269,7 +274,11 @@ pub async fn run_post_turn_extract(home: &Path, user: &str, assistant: &str) -> 
     let dir = home.join("memory/extracts");
     tokio::fs::create_dir_all(&dir).await?;
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let id = uuid::Uuid::new_v4().to_string().chars().take(8).collect::<String>();
+    let id = uuid::Uuid::new_v4()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect::<String>();
     let path = dir.join(format!("extract-{ts}-{id}.md"));
 
     let mut md = String::from("---\nsource: post_turn_extract\n---\n\n");

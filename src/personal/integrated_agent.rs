@@ -27,11 +27,11 @@ use crate::personal::EnhancedPersonalAgent;
 use crate::EmbeddedGraphStore;
 
 // Component imports
+use crate::coder_assistant::SessionManager;
 use crate::email::{EmailAgent, EmailConfig};
 use crate::federation::{FederationClient, FederationConfig};
-use crate::coder_assistant::SessionManager;
-use crate::prolog_engine::{PrologEngine, Term, Atom};
 use crate::pi_ai_compat::Context;
+use crate::prolog_engine::{Atom, PrologEngine, Term};
 
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuAccelerator;
@@ -47,7 +47,7 @@ enum IntegrationRoute {
 pub struct IntegratedAgentConfig {
     /// Base enhanced agent config
     pub base: crate::personal::EnhancedAgentConfig,
-    
+
     // Feature toggles
     /// Enable email agent integration
     pub enable_email: bool,
@@ -66,11 +66,11 @@ pub struct IntegratedAgentConfig {
     /// Enable GPU acceleration
     #[cfg(feature = "gpu")]
     pub enable_gpu: bool,
-    
+
     // Component-specific configs
     pub email_config: Option<EmailConfig>,
     pub federation_config: Option<FederationConfig>,
-    
+
     // Maintenance settings
     /// Enable automatic graph gardening
     pub enable_gardening: bool,
@@ -114,11 +114,11 @@ pub struct AgentComponents {
     pub prolog: RwLock<PrologEngine>,
     /// Pi AI compatibility context
     pub pi_ai_context: RwLock<Context>,
-    
+
     #[cfg(feature = "gpu")]
     /// GPU accelerator for compute-intensive operations
     pub gpu: Option<RwLock<GpuAccelerator>>,
-    
+
     #[cfg(not(feature = "gpu"))]
     _gpu_placeholder: (),
 }
@@ -193,7 +193,7 @@ impl IntegratedPersonalAgent {
             last_gardening: Instant::now(),
         })
     }
-    
+
     /// Initialize optional components based on config
     async fn initialize_components(
         config: &IntegratedAgentConfig,
@@ -219,36 +219,34 @@ impl IntegratedPersonalAgent {
         } else {
             None
         };
-        
+
         // Federation client
         let federation = if config.enable_federation {
             // Create with default system ID and empty peers for now
-            let client = FederationClient::new(
-                "hsmii-local".to_string(),
-                Vec::new()
-            );
+            let client = FederationClient::new("hsmii-local".to_string(), Vec::new());
             info!("Federation client initialized");
             Some(RwLock::new(client))
         } else {
             None
         };
-        
+
         // Coder assistant sessions
         let coder_sessions = RwLock::new(SessionManager::new(&base_path.join("coder_sessions")));
         if config.enable_coder_assistant {
             info!("Coder assistant session manager initialized");
         }
-        
+
         // Prolog engine
         let prolog = RwLock::new(PrologEngine::new(10)); // max_depth = 10
         if config.enable_prolog {
             info!("Prolog engine initialized");
         }
-        
+
         // Pi AI context
-        let pi_ai_context = RwLock::new(Context::new()
-            .with_system("You are HSM-II, a multi-agent AI assistant with symbolic reasoning capabilities."));
-        
+        let pi_ai_context = RwLock::new(Context::new().with_system(
+            "You are HSM-II, a multi-agent AI assistant with symbolic reasoning capabilities.",
+        ));
+
         #[cfg(feature = "gpu")]
         let gpu = if config.enable_gpu {
             match GpuAccelerator::new().await {
@@ -264,10 +262,10 @@ impl IntegratedPersonalAgent {
         } else {
             None
         };
-        
+
         #[cfg(not(feature = "gpu"))]
         let _gpu_placeholder = ();
-        
+
         Ok(AgentComponents {
             email,
             federation,
@@ -280,34 +278,50 @@ impl IntegratedPersonalAgent {
             _gpu_placeholder,
         })
     }
-    
+
     /// Format active components for logging
     fn format_active_components(config: &IntegratedAgentConfig) -> String {
         let mut active = vec![];
-        if config.enable_email { active.push("email"); }
-        if config.enable_federation { active.push("federation"); }
-        if config.enable_coder_assistant { active.push("coder"); }
-        if config.enable_prolog { active.push("prolog"); }
-        if config.enable_pi_ai { active.push("pi-ai"); }
-        if config.enable_ouroboros { active.push("ouroboros"); }
-        if config.enable_hermes { active.push("hermes"); }
+        if config.enable_email {
+            active.push("email");
+        }
+        if config.enable_federation {
+            active.push("federation");
+        }
+        if config.enable_coder_assistant {
+            active.push("coder");
+        }
+        if config.enable_prolog {
+            active.push("prolog");
+        }
+        if config.enable_pi_ai {
+            active.push("pi-ai");
+        }
+        if config.enable_ouroboros {
+            active.push("ouroboros");
+        }
+        if config.enable_hermes {
+            active.push("hermes");
+        }
         #[cfg(feature = "gpu")]
-        if config.enable_gpu { active.push("gpu"); }
-        
+        if config.enable_gpu {
+            active.push("gpu");
+        }
+
         if active.is_empty() {
             "none (base only)".to_string()
         } else {
             active.join(", ")
         }
     }
-    
+
     /// Main message processing pipeline with all components integrated
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
         self.core.maybe_run_heartbeat_tick().await;
 
         let start_time = Instant::now();
         let message_id = msg.id.clone();
-        
+
         // Create message context
         let mut context = crate::personal::MessageContext {
             message_id: message_id.clone(),
@@ -321,10 +335,10 @@ impl IntegratedPersonalAgent {
             start_time,
             joulework_contributions: HashMap::new(),
         };
-        
+
         // === COMPONENT ROUTING ===
         // Check for specialized component usage before general processing
-        
+
         let response = if msg.content.starts_with("/email") {
             // Explicit email command
             self.process_email_command(&msg, &mut context).await?
@@ -378,41 +392,68 @@ impl IntegratedPersonalAgent {
 
         Ok(response.content)
     }
-    
+
     // === AUTO-DETECTION FUNCTIONS ===
-    
+
     /// Detect if message is email-related
     fn should_use_email(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
         let email_keywords = [
-            "email", "inbox", "mail", "message", "reply to", "send mail",
-            "check mail", "unread", "spam", "newsletter", "gmail", "imap", "smtp"
+            "email",
+            "inbox",
+            "mail",
+            "message",
+            "reply to",
+            "send mail",
+            "check mail",
+            "unread",
+            "spam",
+            "newsletter",
+            "gmail",
+            "imap",
+            "smtp",
         ];
         email_keywords.iter().any(|kw| lower.contains(kw))
     }
-    
+
     /// Detect if message is federation-related
     fn should_use_federation(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
         let fed_keywords = [
-            "federation", "sync", "share knowledge", "peer", "node", 
-            "distributed", "cross-system", "mesh", "remote agent"
+            "federation",
+            "sync",
+            "share knowledge",
+            "peer",
+            "node",
+            "distributed",
+            "cross-system",
+            "mesh",
+            "remote agent",
         ];
         fed_keywords.iter().any(|kw| lower.contains(kw))
     }
-    
+
     /// Detect if message requires symbolic reasoning
     fn should_use_prolog(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
         let prolog_keywords = [
-            "prove", "deduce", "infer", "logic", "predicate", "rule",
-            "constraint", "satisfy", "forall", "exists", "implication"
+            "prove",
+            "deduce",
+            "infer",
+            "logic",
+            "predicate",
+            "rule",
+            "constraint",
+            "satisfy",
+            "forall",
+            "exists",
+            "implication",
         ];
         prolog_keywords.iter().any(|kw| lower.contains(kw))
     }
-    
+
     // === COMPONENT PROCESSORS ===
-    
+
     /// Process email commands
     async fn process_email_command(
         &mut self,
@@ -472,13 +513,17 @@ impl IntegratedPersonalAgent {
 
             let content = if args.is_empty() || args == "status" {
                 let stats = email.stats();
-                format!("📧 **Email Agent Status**\n\nProcessed: {} emails", stats.total_processed)
+                format!(
+                    "📧 **Email Agent Status**\n\nProcessed: {} emails",
+                    stats.total_processed
+                )
             } else if args == "inbox" || args == "check" {
                 drop(email); // Release read lock
                 let mut email_mut = email_agent.write().await;
                 match email_mut.process_inbox(10).await {
                     Ok(actions) => {
-                        let mut output = format!("📧 **Inbox Processing** ({} actions)\n\n", actions.len());
+                        let mut output =
+                            format!("📧 **Inbox Processing** ({} actions)\n\n", actions.len());
                         for action in actions.iter().take(5) {
                             output.push_str(&format!("- {:?}\n", action));
                         }
@@ -518,7 +563,7 @@ impl IntegratedPersonalAgent {
             })
         }
     }
-    
+
     /// Process email queries (auto-detected)
     async fn process_email_query(
         &mut self,
@@ -532,7 +577,7 @@ impl IntegratedPersonalAgent {
         };
         self.process_email_command(&modified_msg, context).await
     }
-    
+
     /// Process federation commands
     async fn process_federation_command(
         &mut self,
@@ -540,7 +585,7 @@ impl IntegratedPersonalAgent {
         _context: &mut crate::personal::MessageContext,
     ) -> Result<crate::personal::AgentResponse> {
         let args = msg.content.trim_start_matches("/federation").trim();
-        
+
         if let Some(_fed_client) = &self.components.federation {
             let content = if args.is_empty() || args == "status" {
                 "🌐 **Federation Status**\n\nFederation client is active.\nUse `/federation sync` to synchronize with peers.".to_string()
@@ -552,7 +597,7 @@ impl IntegratedPersonalAgent {
             } else {
                 "🌐 **Federation Commands**\n- `/federation status` - Show federation status\n- `/federation sync` - Sync with peers\n- `/federation query <topic>` - Query distributed knowledge".to_string()
             };
-            
+
             Ok(crate::personal::AgentResponse {
                 content,
                 primary_agent: 0,
@@ -564,7 +609,8 @@ impl IntegratedPersonalAgent {
             })
         } else {
             Ok(crate::personal::AgentResponse {
-                content: "🌐 Federation not enabled. Set enable_federation=true in config.".to_string(),
+                content: "🌐 Federation not enabled. Set enable_federation=true in config."
+                    .to_string(),
                 primary_agent: 0,
                 council_used: false,
                 confidence: 0.0,
@@ -574,7 +620,7 @@ impl IntegratedPersonalAgent {
             })
         }
     }
-    
+
     /// Process federation queries (auto-detected)
     async fn process_federation_query(
         &mut self,
@@ -585,9 +631,10 @@ impl IntegratedPersonalAgent {
             content: "/federation status".to_string(),
             ..msg.clone()
         };
-        self.process_federation_command(&modified_msg, context).await
+        self.process_federation_command(&modified_msg, context)
+            .await
     }
-    
+
     /// Process Prolog commands
     async fn process_prolog_command(
         &mut self,
@@ -595,7 +642,7 @@ impl IntegratedPersonalAgent {
         _context: &mut crate::personal::MessageContext,
     ) -> Result<crate::personal::AgentResponse> {
         let query_str = msg.content.trim_start_matches("/prolog").trim();
-        
+
         if query_str.is_empty() {
             return Ok(crate::personal::AgentResponse {
                 content: "🔮 **Prolog Reasoning**\n\nUsage: `/prolog <query>`\n\nExamples:\n- `/prolog member(X, [a,b,c])`\n- `/prolog assert(father(john, jim))`".to_string(),
@@ -607,15 +654,18 @@ impl IntegratedPersonalAgent {
                 processing_time_ms: 0,
             });
         }
-        
+
         let prolog = self.components.prolog.read().await;
-        
+
         // Parse and execute query
         let result = match self.parse_prolog_query(query_str) {
             Ok(query) => {
                 let query_result = prolog.query(&query);
                 if query_result.succeeded && !query_result.solutions.is_empty() {
-                    let mut output = format!("🔮 **Prolog Results** ({} solutions)\n\n", query_result.solutions.len());
+                    let mut output = format!(
+                        "🔮 **Prolog Results** ({} solutions)\n\n",
+                        query_result.solutions.len()
+                    );
                     for (i, solution) in query_result.solutions.iter().take(5).enumerate() {
                         output.push_str(&format!("{}. {:?}\n", i + 1, solution));
                     }
@@ -624,9 +674,9 @@ impl IntegratedPersonalAgent {
                     "No solutions found.".to_string()
                 }
             }
-            Err(e) => format!("Parse error: {}", e)
+            Err(e) => format!("Parse error: {}", e),
         };
-        
+
         Ok(crate::personal::AgentResponse {
             content: result,
             primary_agent: 0,
@@ -637,7 +687,7 @@ impl IntegratedPersonalAgent {
             processing_time_ms: 0,
         })
     }
-    
+
     /// Process symbolic queries (auto-detected)
     async fn process_symbolic_query(
         &mut self,
@@ -672,40 +722,44 @@ impl IntegratedPersonalAgent {
             Ok(IntegrationRoute::Completed { text })
         }
     }
-    
+
     /// Parse a simple Prolog query
     fn parse_prolog_query(&self, input: &str) -> Result<Atom> {
         // Simple parser for basic Prolog syntax
         // e.g., "member(X, [a,b,c])" or "father(john, jim)"
-        
+
         let input = input.trim();
         if let Some(paren_pos) = input.find('(') {
             let predicate = &input[..paren_pos];
             let args_str = &input[paren_pos + 1..input.len() - 1];
-            
-            let args: Vec<Term> = args_str.split(',').map(|s| {
-                let s = s.trim();
-                if s.starts_with(|c: char| c.is_uppercase()) {
-                    Term::Var(s.to_string())
-                } else if s.starts_with('[') && s.ends_with(']') {
-                    // Parse list
-                    let inner = &s[1..s.len()-1];
-                    let items: Vec<Term> = inner.split(',').map(|item| {
-                        Term::Atom(item.trim().to_string())
-                    }).collect();
-                    Term::List(items)
-                } else {
-                    Term::Atom(s.to_string())
-                }
-            }).collect();
-            
+
+            let args: Vec<Term> = args_str
+                .split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    if s.starts_with(|c: char| c.is_uppercase()) {
+                        Term::Var(s.to_string())
+                    } else if s.starts_with('[') && s.ends_with(']') {
+                        // Parse list
+                        let inner = &s[1..s.len() - 1];
+                        let items: Vec<Term> = inner
+                            .split(',')
+                            .map(|item| Term::Atom(item.trim().to_string()))
+                            .collect();
+                        Term::List(items)
+                    } else {
+                        Term::Atom(s.to_string())
+                    }
+                })
+                .collect();
+
             Ok(Atom::new(predicate, args))
         } else {
             // Simple atom
             Ok(Atom::new(input, vec![]))
         }
     }
-    
+
     /// Process coder assistant commands
     async fn process_coder_command(
         &mut self,
@@ -728,15 +782,17 @@ impl IntegratedPersonalAgent {
         }
 
         if args == "status" {
-            return Ok(IntegrationRoute::NeedsFinalize(crate::personal::AgentResponse {
-                content: "💻 **Coder Assistant**: Ready".to_string(),
-                primary_agent: 0,
-                council_used: false,
-                confidence: 1.0,
-                skills_used: vec!["coder".to_string()],
-                joulework_contributions: HashMap::new(),
-                processing_time_ms: 0,
-            }));
+            return Ok(IntegrationRoute::NeedsFinalize(
+                crate::personal::AgentResponse {
+                    content: "💻 **Coder Assistant**: Ready".to_string(),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 1.0,
+                    skills_used: vec!["coder".to_string()],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                },
+            ));
         }
 
         let mut ralph_msg = msg.clone();
@@ -759,24 +815,29 @@ impl IntegratedPersonalAgent {
         let initial_edges = self.core.world.edges.len();
         let initial_beliefs = self.core.world.beliefs.len();
 
-        self.core.world.edges.retain(|edge| {
-            edge.weight > self.config.decay_threshold
-        });
+        self.core
+            .world
+            .edges
+            .retain(|edge| edge.weight > self.config.decay_threshold);
 
         self.core.world.decay_beliefs();
 
-        self.core.world.beliefs.retain(|belief| {
-            belief.confidence > self.config.decay_threshold
-        });
-        
+        self.core
+            .world
+            .beliefs
+            .retain(|belief| belief.confidence > self.config.decay_threshold);
+
         let edges_removed = initial_edges - self.core.world.edges.len();
         let beliefs_removed = initial_beliefs - self.core.world.beliefs.len();
-        
-        info!("🌱 Gardening complete: removed {} edges, {} beliefs", edges_removed, beliefs_removed);
-        
+
+        info!(
+            "🌱 Gardening complete: removed {} edges, {} beliefs",
+            edges_removed, beliefs_removed
+        );
+
         Ok(())
     }
-    
+
     /// Save state (shared hypergraph + integration config).
     pub async fn save(&mut self) -> Result<()> {
         self.config.base = self.core.config.clone();
@@ -784,7 +845,7 @@ impl IntegratedPersonalAgent {
         self.save_config().await?;
         Ok(())
     }
-    
+
     /// Get component status
     pub fn get_component_status(&self) -> ComponentStatus {
         ComponentStatus {
@@ -799,14 +860,14 @@ impl IntegratedPersonalAgent {
             hermes: self.config.enable_hermes,
         }
     }
-    
+
     /// Get world statistics
     pub fn get_stats(&self) -> crate::personal::WorldStats {
         self.core.get_stats()
     }
-    
+
     // === UTILITY FUNCTIONS ===
-    
+
     async fn ensure_structure(base_path: &Path) -> Result<()> {
         tokio::fs::create_dir_all(base_path).await?;
         tokio::fs::create_dir_all(base_path.join("memory")).await?;
@@ -815,7 +876,7 @@ impl IntegratedPersonalAgent {
         tokio::fs::create_dir_all(base_path.join("federation")).await?;
         Ok(())
     }
-    
+
     async fn load_config(base_path: &Path) -> Result<IntegratedAgentConfig> {
         let integrated = base_path.join("integrated_config.json");
         if integrated.exists() {
@@ -845,7 +906,7 @@ impl IntegratedPersonalAgent {
         .map_err(|e| anyhow::anyhow!(e))??;
         Ok(())
     }
-    
+
     /// Start gateway (owned by the shared [`EnhancedPersonalAgent`]).
     pub async fn start_gateway(
         &mut self,

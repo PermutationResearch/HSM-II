@@ -8,13 +8,13 @@
 //! `HSM_LLM_PROVIDER_ORDER=ollama,openai` tries local Ollama first, then OpenAI. When unset,
 //! available cloud providers are tried first, then Ollama (always included by default).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
 
@@ -310,23 +310,39 @@ struct LlmMetrics {
 
 impl LlmMetrics {
     fn record_request(&self, success: bool, tokens: usize, latency_ms: u64) {
-        self.requests_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.requests_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if !success {
-            self.requests_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.requests_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.tokens_total.fetch_add(tokens as u64, std::sync::atomic::Ordering::Relaxed);
-        self.latency_ms_sum.fetch_add(latency_ms, std::sync::atomic::Ordering::Relaxed);
+        self.tokens_total
+            .fetch_add(tokens as u64, std::sync::atomic::Ordering::Relaxed);
+        self.latency_ms_sum
+            .fetch_add(latency_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn get_stats(&self) -> MetricsSnapshot {
         MetricsSnapshot {
-            requests_total: self.requests_total.load(std::sync::atomic::Ordering::Relaxed),
-            requests_failed: self.requests_failed.load(std::sync::atomic::Ordering::Relaxed),
+            requests_total: self
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            requests_failed: self
+                .requests_failed
+                .load(std::sync::atomic::Ordering::Relaxed),
             tokens_total: self.tokens_total.load(std::sync::atomic::Ordering::Relaxed),
             avg_latency_ms: {
-                let total = self.requests_total.load(std::sync::atomic::Ordering::Relaxed);
-                let sum = self.latency_ms_sum.load(std::sync::atomic::Ordering::Relaxed);
-                if total > 0 { sum / total } else { 0 }
+                let total = self
+                    .requests_total
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let sum = self
+                    .latency_ms_sum
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if total > 0 {
+                    sum / total
+                } else {
+                    0
+                }
             },
         }
     }
@@ -344,14 +360,17 @@ impl LlmClient {
     /// Create new LLM client from environment variables
     pub fn new() -> Result<Self> {
         let providers = LlmProvider::slots_from_env();
-        
+
         if providers.is_empty() {
             return Err(anyhow!(
                 "No LLM providers configured. Set one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_URL"
             ));
         }
 
-        info!("Initialized LLM client with {} provider(s)", providers.len());
+        info!(
+            "Initialized LLM client with {} provider(s)",
+            providers.len()
+        );
 
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
@@ -417,7 +436,7 @@ impl LlmClient {
                     let latency_ms = start.elapsed().as_millis() as u64;
                     let tokens = response.usage.total_tokens;
                     self.metrics.record_request(true, tokens, latency_ms);
-                    
+
                     info!(
                         provider = %slot.label,
                         model = %response.model,
@@ -425,7 +444,7 @@ impl LlmClient {
                         tokens = tokens,
                         "LLM request succeeded"
                     );
-                    
+
                     return Ok(LlmResponse {
                         latency_ms,
                         ..response
@@ -458,7 +477,10 @@ impl LlmClient {
                 .as_millis() as u64;
             self.breaker_open_until_ms
                 .store(now2.saturating_add(cool_ms), Ordering::SeqCst);
-            warn!(cool_ms, "LLM circuit breaker opened after repeated failures");
+            warn!(
+                cool_ms,
+                "LLM circuit breaker opened after repeated failures"
+            );
         }
 
         error!("All LLM providers failed");
@@ -491,7 +513,10 @@ impl LlmClient {
                 sleep(Duration::from_millis(delay)).await;
             }
 
-            match self.send_request(request.clone(), provider, api_key, base_url).await {
+            match self
+                .send_request(request.clone(), provider, api_key, base_url)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     // Don't retry on HTTP 4xx — quota/rate-limit/model-not-found won't heal by waiting.
@@ -519,7 +544,10 @@ impl LlmClient {
     /// Calculate exponential backoff delay
     fn calculate_backoff(&self, attempt: usize) -> u64 {
         let delay = (self.retry_config.base_delay_ms as f64
-            * self.retry_config.exponential_base.powi(attempt.saturating_sub(1) as i32)) as u64;
+            * self
+                .retry_config
+                .exponential_base
+                .powi(attempt.saturating_sub(1) as i32)) as u64;
         delay.min(self.retry_config.max_delay_ms)
     }
 
@@ -532,15 +560,12 @@ impl LlmClient {
         base_url: &str,
     ) -> Result<LlmResponse> {
         match provider {
-            LlmProvider::OpenAi => {
-                self.send_openai_request(request, api_key, base_url).await
-            }
+            LlmProvider::OpenAi => self.send_openai_request(request, api_key, base_url).await,
             LlmProvider::Anthropic => {
-                self.send_anthropic_request(request, api_key, base_url).await
+                self.send_anthropic_request(request, api_key, base_url)
+                    .await
             }
-            LlmProvider::Ollama => {
-                self.send_ollama_request(request, base_url).await
-            }
+            LlmProvider::Ollama => self.send_ollama_request(request, base_url).await,
         }
     }
 
@@ -552,7 +577,7 @@ impl LlmClient {
         base_url: &str,
     ) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", base_url);
-        
+
         let body = json!({
             "model": request.model,
             "messages": request.messages.iter().map(|m| json!({
@@ -587,16 +612,22 @@ impl LlmClient {
         let url = format!("{}/messages", base_url);
 
         // Convert messages to Anthropic format
-        let system_msg = request.messages.iter()
+        let system_msg = request
+            .messages
+            .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.clone());
 
-        let messages: Vec<_> = request.messages.iter()
+        let messages: Vec<_> = request
+            .messages
+            .iter()
             .filter(|m| m.role != "system")
-            .map(|m| json!({
-                "role": if m.role == "user" { "user" } else { "assistant" },
-                "content": m.content
-            }))
+            .map(|m| {
+                json!({
+                    "role": if m.role == "user" { "user" } else { "assistant" },
+                    "content": m.content
+                })
+            })
             .collect();
 
         // Anthropic does not allow both temperature and top_p simultaneously.
@@ -665,7 +696,7 @@ impl LlmClient {
         provider: LlmProvider,
     ) -> Result<LlmResponse> {
         let status = response.status();
-        
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::Error::new(LlmHttpError {
@@ -890,9 +921,7 @@ mod tests {
     fn test_breaker_state_accessor() {
         let client = test_client();
         client.breaker_failures.store(3, Ordering::SeqCst);
-        client
-            .breaker_open_until_ms
-            .store(12345, Ordering::SeqCst);
+        client.breaker_open_until_ms.store(12345, Ordering::SeqCst);
         let (fails, open_until) = client.breaker_state();
         assert_eq!(fails, 3);
         assert_eq!(open_until, 12345);

@@ -479,11 +479,7 @@ pub fn infer_failure_metadata(
         return ("semantic_fail".into(), "Semantic check failed".into(), sj);
     }
     if score < 0.55 {
-        return (
-            "low_score".into(),
-            format!("Low score {:.2}", score),
-            sj,
-        );
+        return ("low_score".into(), format!("Low score {:.2}", score), sj);
     }
     (
         "low_score".into(),
@@ -1464,12 +1460,14 @@ mod tests {
     #[test]
     fn test_strip_claim_evidence_format() {
         // Basic Claim/Evidence stripping
-        let input = "Claim: The collaboration module is available.\nEvidence: [msg:msg_0_1773260333]";
+        let input =
+            "Claim: The collaboration module is available.\nEvidence: [msg:msg_0_1773260333]";
         let result = strip_claim_evidence_format(input);
         assert_eq!(result, "The collaboration module is available.");
 
         // Multiple Claim/Evidence blocks
-        let input2 = "Claim: First point.\nEvidence: [msg:1]\nClaim: Second point.\nEvidence: [msg:2]";
+        let input2 =
+            "Claim: First point.\nEvidence: [msg:1]\nClaim: Second point.\nEvidence: [msg:2]";
         let result2 = strip_claim_evidence_format(input2);
         assert_eq!(result2, "First point.\nSecond point.");
 

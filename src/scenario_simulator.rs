@@ -195,7 +195,9 @@ impl ScenarioSimulator {
             .filter(|l| !l.is_empty())
             .map(|l| {
                 // Strip leading dash/bullet/number
-                let s = l.trim_start_matches(|c: char| c == '-' || c == '•' || c == '*' || c.is_ascii_digit() || c == '.');
+                let s = l.trim_start_matches(|c: char| {
+                    c == '-' || c == '•' || c == '*' || c.is_ascii_digit() || c == '.'
+                });
                 s.trim().to_string()
             })
             .filter(|s| !s.is_empty())
@@ -307,10 +309,18 @@ impl ScenarioSimulator {
                         prediction.push_str(trimmed);
                     }
                     "factors" if trimmed.starts_with('-') || trimmed.starts_with('•') => {
-                        key_factors.push(trimmed.trim_start_matches(|c: char| c == '-' || c == '•' || c == ' ').to_string());
+                        key_factors.push(
+                            trimmed
+                                .trim_start_matches(|c: char| c == '-' || c == '•' || c == ' ')
+                                .to_string(),
+                        );
                     }
                     "risks" if trimmed.starts_with('-') || trimmed.starts_with('•') => {
-                        risks.push(trimmed.trim_start_matches(|c: char| c == '-' || c == '•' || c == ' ').to_string());
+                        risks.push(
+                            trimmed
+                                .trim_start_matches(|c: char| c == '-' || c == '•' || c == ' ')
+                                .to_string(),
+                        );
                     }
                     _ => {}
                 }
@@ -332,11 +342,7 @@ impl ScenarioSimulator {
     }
 
     /// Synthesize all branches into a unified analysis.
-    async fn synthesize(
-        &self,
-        topic: &str,
-        branches: &[ScenarioBranch],
-    ) -> Result<String, String> {
+    async fn synthesize(&self, topic: &str, branches: &[ScenarioBranch]) -> Result<String, String> {
         if branches.is_empty() {
             return Ok("No branches to synthesize.".to_string());
         }

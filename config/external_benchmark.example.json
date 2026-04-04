@@ -1,6 +1,11 @@
 {
   "name": "example_tb2_placeholder",
+  "labels": {
+    "benchmark": "smoke"
+  },
+  "setup_commands": [],
   "command": ["echo", "{\"pass\": true, \"score\": 1.0}"],
   "cwd": null,
+  "env": {},
   "timeout_sec": 3600
 }

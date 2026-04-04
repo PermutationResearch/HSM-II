@@ -99,10 +99,7 @@ impl Tool for PredictionTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let topic = params
-            .get("topic")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let topic = params.get("topic").and_then(|v| v.as_str()).unwrap_or("");
         if topic.is_empty() {
             return ToolOutput::error("topic is required");
         }
@@ -125,27 +122,22 @@ impl Tool for PredictionTool {
             })
             .unwrap_or_default();
 
-        let variables: Option<Vec<String>> = params
-            .get("variables")
-            .and_then(|v| {
-                if let Some(arr) = v.as_array() {
-                    Some(
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect(),
-                    )
-                } else if let Some(s) = v.as_str() {
-                    serde_json::from_str::<Vec<String>>(s).ok()
-                } else {
-                    None
-                }
-            });
+        let variables: Option<Vec<String>> = params.get("variables").and_then(|v| {
+            if let Some(arr) = v.as_array() {
+                Some(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                )
+            } else if let Some(s) = v.as_str() {
+                serde_json::from_str::<Vec<String>>(s).ok()
+            } else {
+                None
+            }
+        });
 
         let sim = self.simulator.lock().await;
-        match sim
-            .simulate(topic, &seeds, variables.as_deref())
-            .await
-        {
+        match sim.simulate(topic, &seeds, variables.as_deref()).await {
             Ok(report) => {
                 let formatted = Self::format_report(&report);
                 ToolOutput::success(formatted)

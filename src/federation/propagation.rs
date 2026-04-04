@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,7 +158,8 @@ impl PropagationEngine {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        self.seen.retain(|_, ts| now.saturating_sub(*ts) < max_age_ms);
+        self.seen
+            .retain(|_, ts| now.saturating_sub(*ts) < max_age_ms);
     }
 
     /// Get the envelope ID for dedup (origin + timestamp + payload discriminant hash)

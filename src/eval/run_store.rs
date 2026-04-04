@@ -136,10 +136,10 @@ pub fn insert_index_jsonl_line(conn: &Connection, line: &str) -> anyhow::Result<
     let hash = hash_index_line(line);
     let v: serde_json::Value = serde_json::from_str(line).context("JSONL line parse")?;
     let run_dir = v.get("run_dir").and_then(|x| x.as_str()).map(String::from);
-    let created_unix = v
-        .get("created_unix")
-        .and_then(|x| x.as_u64())
-        .or_else(|| v.get("created_unix").and_then(|x| x.as_i64().map(|i| i as u64)));
+    let created_unix = v.get("created_unix").and_then(|x| x.as_u64()).or_else(|| {
+        v.get("created_unix")
+            .and_then(|x| x.as_i64().map(|i| i as u64))
+    });
     let harness = v.get("harness").and_then(|x| x.as_str()).map(String::from);
     let best_candidate = v
         .get("best_candidate")
@@ -147,7 +147,10 @@ pub fn insert_index_jsonl_line(conn: &Connection, line: &str) -> anyhow::Result<
         .map(String::from);
     let objective_score = v.get("objective_score").and_then(|x| x.as_f64());
     let keyword_delta = v.get("keyword_delta").and_then(|x| x.as_f64());
-    let git_commit = v.get("git_commit").and_then(|x| x.as_str()).map(String::from);
+    let git_commit = v
+        .get("git_commit")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     let raw = line.to_string();
 
     conn.execute(

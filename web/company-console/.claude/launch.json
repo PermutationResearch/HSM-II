@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "company-console",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["scripts/run-next-with-path.sh", "dev", "-p", "3050"],
+      "port": 3050
+    }
+  ]
+}

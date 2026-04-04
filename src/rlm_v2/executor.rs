@@ -90,14 +90,14 @@ impl RlmExecutor {
     pub fn new(config: SandboxConfig) -> Self {
         let mut registry = ToolRegistry::new();
         crate::tools::register_all_tools(&mut registry);
-        
+
         Self {
             tool_registry: Arc::new(registry),
             config,
             execution_history: Vec::new(),
         }
     }
-    
+
     /// Create executor with custom tool registry
     pub fn with_registry(registry: Arc<ToolRegistry>, config: SandboxConfig) -> Self {
         Self {
@@ -106,15 +106,16 @@ impl RlmExecutor {
             execution_history: Vec::new(),
         }
     }
-    
+
     /// Execute an RLM action
-    pub async fn execute_action(&mut self, action: &RlmAction) -> Result<ExecutionResult, RlmError> {
+    pub async fn execute_action(
+        &mut self,
+        action: &RlmAction,
+    ) -> Result<ExecutionResult, RlmError> {
         let start = Instant::now();
-        
+
         match action {
-            RlmAction::ExecuteTools { tool_calls } => {
-                self.execute_tools(tool_calls).await
-            }
+            RlmAction::ExecuteTools { tool_calls } => self.execute_tools(tool_calls).await,
             RlmAction::SubQueries { .. } => {
                 // Sub-queries are handled by the runtime, not the executor
                 Ok(ExecutionResult {
@@ -124,31 +125,30 @@ impl RlmExecutor {
                     duration_ms: start.elapsed().as_millis() as u64,
                 })
             }
-            RlmAction::Final { answer } => {
-                Ok(ExecutionResult {
-                    success: true,
-                    tool_results: Vec::new(),
-                    output_summary: format!("FINAL: {}", answer.answer),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                })
-            }
-            RlmAction::RequestContext { request } => {
-                Ok(ExecutionResult {
-                    success: true,
-                    tool_results: Vec::new(),
-                    output_summary: format!("Context requested: {}", request),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                })
-            }
+            RlmAction::Final { answer } => Ok(ExecutionResult {
+                success: true,
+                tool_results: Vec::new(),
+                output_summary: format!("FINAL: {}", answer.answer),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }),
+            RlmAction::RequestContext { request } => Ok(ExecutionResult {
+                success: true,
+                tool_results: Vec::new(),
+                output_summary: format!("Context requested: {}", request),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }),
         }
     }
-    
+
     /// Execute multiple tool calls
-    async fn execute_tools(&mut self, tool_calls: &[RlmToolCall]) -> Result<ExecutionResult, RlmError> {
+    async fn execute_tools(
+        &mut self,
+        tool_calls: &[RlmToolCall],
+    ) -> Result<ExecutionResult, RlmError> {
         let start = Instant::now();
         let mut results = Vec::new();
         let mut overall_success = true;
-        
+
         for call in tool_calls {
             // Check if tool is allowed
             if !self.is_tool_allowed(&call.tool_name) {
@@ -156,12 +156,15 @@ impl RlmExecutor {
                     call_id: call.call_id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Tool '{}' is not allowed in sandbox", call.tool_name)),
+                    error: Some(format!(
+                        "Tool '{}' is not allowed in sandbox",
+                        call.tool_name
+                    )),
                 });
                 overall_success = false;
                 continue;
             }
-            
+
             // Check for blocked patterns in parameters
             if let Some(blocked) = self.check_blocked_patterns(&call.parameters) {
                 results.push(RlmToolResult {
@@ -173,14 +176,15 @@ impl RlmExecutor {
                 overall_success = false;
                 continue;
             }
-            
+
             // Execute tool with timeout
             let tool_start = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(self.config.timeout_secs),
-                self.execute_single_tool(call)
-            ).await;
-            
+                self.execute_single_tool(call),
+            )
+            .await;
+
             let tool_result = match result {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => RlmToolResult {
@@ -193,14 +197,17 @@ impl RlmExecutor {
                     call_id: call.call_id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Tool execution timed out after {}s", self.config.timeout_secs)),
+                    error: Some(format!(
+                        "Tool execution timed out after {}s",
+                        self.config.timeout_secs
+                    )),
                 },
             };
-            
+
             if !tool_result.success {
                 overall_success = false;
             }
-            
+
             // Record execution
             self.execution_history.push(ExecutionRecord {
                 timestamp: chrono::Utc::now(),
@@ -208,13 +215,13 @@ impl RlmExecutor {
                 success: tool_result.success,
                 duration_ms: tool_start.elapsed().as_millis() as u64,
             });
-            
+
             results.push(tool_result);
         }
-        
+
         // Build output summary
         let output_summary = self.summarize_results(&results);
-        
+
         Ok(ExecutionResult {
             success: overall_success,
             tool_results: results,
@@ -222,17 +229,15 @@ impl RlmExecutor {
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
-    
+
     /// Execute a single tool
     async fn execute_single_tool(&self, call: &RlmToolCall) -> Result<RlmToolResult, RlmError> {
-        let tool = self.tool_registry
-            .get(&call.tool_name)
-            .ok_or_else(|| RlmError::ToolExecutionFailed(
-                format!("Tool '{}' not found", call.tool_name)
-            ))?;
-        
+        let tool = self.tool_registry.get(&call.tool_name).ok_or_else(|| {
+            RlmError::ToolExecutionFailed(format!("Tool '{}' not found", call.tool_name))
+        })?;
+
         let output = tool.execute(call.parameters.clone()).await;
-        
+
         Ok(RlmToolResult {
             call_id: call.call_id.clone(),
             success: output.success,
@@ -240,48 +245,52 @@ impl RlmExecutor {
             error: output.error,
         })
     }
-    
+
     /// Check if a tool is allowed
     fn is_tool_allowed(&self, tool_name: &str) -> bool {
         // Check specific tool permissions
         if !self.config.allow_shell && tool_name == "bash" {
             return false;
         }
-        
-        if !self.config.allow_network && 
-           matches!(tool_name, "web_search" | "http_request" | "browser_navigate") {
+
+        if !self.config.allow_network
+            && matches!(
+                tool_name,
+                "web_search" | "http_request" | "browser_navigate"
+            )
+        {
             return false;
         }
-        
+
         // Check allowed list
         self.config.allowed_tools.iter().any(|t| t == tool_name)
     }
-    
+
     /// Check for blocked patterns in parameters
     fn check_blocked_patterns(&self, params: &Value) -> Option<String> {
         let params_str = params.to_string();
-        
+
         for pattern in &self.config.blocked_patterns {
             if params_str.contains(pattern) {
                 return Some(pattern.clone());
             }
         }
-        
+
         None
     }
-    
+
     /// Summarize tool execution results
     fn summarize_results(&self, results: &[RlmToolResult]) -> String {
         let success_count = results.iter().filter(|r| r.success).count();
         let error_count = results.len() - success_count;
-        
+
         let mut summary = format!(
             "Executed {} tools: {} succeeded, {} failed",
             results.len(),
             success_count,
             error_count
         );
-        
+
         for result in results {
             if !result.success {
                 summary.push_str(&format!(
@@ -294,20 +303,20 @@ impl RlmExecutor {
                 summary.push_str(&format!("\n- {} output: {}...", result.call_id, preview));
             }
         }
-        
+
         summary
     }
-    
+
     /// Get execution history
     pub fn get_history(&self) -> &[ExecutionRecord] {
         &self.execution_history
     }
-    
+
     /// Clear execution history
     pub fn clear_history(&mut self) {
         self.execution_history.clear();
     }
-    
+
     /// Get available tools
     pub fn available_tools(&self) -> Vec<(String, String)> {
         self.tool_registry
@@ -316,10 +325,12 @@ impl RlmExecutor {
             .map(|(n, d)| (n.to_string(), d.to_string()))
             .collect()
     }
-    
+
     /// Get tool schema
     pub fn get_tool_schema(&self, tool_name: &str) -> Option<Value> {
-        self.tool_registry.get(tool_name).map(|t| t.parameters_schema())
+        self.tool_registry
+            .get(tool_name)
+            .map(|t| t.parameters_schema())
     }
 }
 
@@ -377,14 +388,14 @@ pub fn create_full_sandbox() -> SandboxConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sandbox_config() {
         let config = SandboxConfig::default();
         assert!(config.allowed_tools.contains(&"read_file".to_string()));
         assert!(config.timeout_secs > 0);
     }
-    
+
     #[test]
     fn test_readonly_sandbox() {
         let config = create_readonly_sandbox();
@@ -393,12 +404,12 @@ mod tests {
         assert!(config.allowed_tools.contains(&"read_file".to_string()));
         assert!(!config.allowed_tools.contains(&"write_file".to_string()));
     }
-    
+
     #[test]
     fn test_blocked_patterns() {
         let config = SandboxConfig::default();
         let params = serde_json::json!({"command": "rm -rf /"});
-        
+
         // This would need the executor instance to check properly
         // Just verify the pattern exists
         assert!(config.blocked_patterns.contains(&"rm -rf /".to_string()));

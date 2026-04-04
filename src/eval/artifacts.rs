@@ -120,9 +120,8 @@ pub fn write_jsonl<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
 
 pub fn write_manifest(run_dir: &Path, manifest: &RunManifest) -> io::Result<()> {
     let p = run_dir.join(&manifest.artifact_paths.manifest);
-    let j = serde_json::to_string_pretty(manifest).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })?;
+    let j = serde_json::to_string_pretty(manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     std::fs::write(p, j)
 }
 
@@ -142,8 +141,5 @@ pub fn append_runs_index(index_path: &Path, summary: &serde_json::Value) -> io::
 
 /// Default index path next to a `runs/run_*` directory.
 pub fn default_runs_index(run_dir: &Path) -> PathBuf {
-    run_dir
-        .parent()
-        .unwrap_or(run_dir)
-        .join("runs_index.jsonl")
+    run_dir.parent().unwrap_or(run_dir).join("runs_index.jsonl")
 }

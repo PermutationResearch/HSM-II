@@ -1,4 +1,4 @@
-//! Lightweight HTTP API for the agent console dashboard (trail, memory listing, graph, search, autoDream, email paste).
+//! Lightweight HTTP API for the company console dashboard (trail, memory listing, graph, search, autoDream, email paste).
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
@@ -158,14 +158,14 @@ async fn root_landing() -> Html<&'static str> {
   </style>
 </head>
 <body>
-  <h1>HSM agent console API</h1>
+  <h1>HSM company console API</h1>
   <p>This port is mostly JSON APIs for the dashboard. Use the links below or open the Next.js UI.</p>
   <ul>
     <li><a href="/api/health"><code>GET /api/health</code></a> — quick check</li>
     <li><a href="/api/company/health"><code>GET /api/company/health</code></a> — Company OS / Postgres (requires <code>HSM_COMPANY_OS_DATABASE_URL</code>)</li>
     <li><a href="/api/console/stats"><code>GET /api/console/stats</code></a> — sample JSON</li>
   </ul>
-  <p>Full UI: from the repo run <code>cd web/agent-console && npm run dev</code> → open <a href="http://localhost:3050">http://localhost:3050</a> (set <code>NEXT_PUBLIC_API_BASE</code> to this host if needed).</p>
+  <p>Full UI: from the repo run <code>cd web/company-console && npm run dev</code> → open <a href="http://localhost:3050">http://localhost:3050</a> (set <code>NEXT_PUBLIC_API_BASE</code> to this host if needed).</p>
 </body>
 </html>"#,
     )
@@ -376,7 +376,9 @@ async fn get_search(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut trail_hits = Vec::new();
     for (i, row) in trail_rows.iter().enumerate() {
-        let s = serde_json::to_string(row).unwrap_or_default().to_lowercase();
+        let s = serde_json::to_string(row)
+            .unwrap_or_default()
+            .to_lowercase();
         if s.contains(&needle) {
             trail_hits.push(json!({
                 "index": i,

@@ -139,7 +139,6 @@ impl EmailClient {
         tracing::info!(email_id, label, "add_label not implemented for IMAP");
         Ok(())
     }
-
 }
 
 fn mock_fetch(limit: usize) -> Vec<Email> {
@@ -201,10 +200,7 @@ fn fetch_imap_pairs(
             if let Some(body) = msg.body() {
                 let raw = body.to_vec();
                 let email = raw_uid_to_email(uid, &raw)?;
-                out.push(ImapFetchedMessage {
-                    email,
-                    rfc822: raw,
-                });
+                out.push(ImapFetchedMessage { email, rfc822: raw });
             }
         }
     }
@@ -241,7 +237,10 @@ fn raw_uid_to_email(uid: u32, raw: &[u8]) -> anyhow::Result<Email> {
     let body = crate::tools::email_tools::summarize_eml_raw(raw).unwrap_or_else(|e| {
         format!(
             "(could not summarize RFC822: {e})\n\n{}",
-            String::from_utf8_lossy(raw).chars().take(4000).collect::<String>()
+            String::from_utf8_lossy(raw)
+                .chars()
+                .take(4000)
+                .collect::<String>()
         )
     });
     let body = truncate_chars(&body, 24_000);
@@ -250,11 +249,7 @@ fn raw_uid_to_email(uid: u32, raw: &[u8]) -> anyhow::Result<Email> {
         id: uid.to_string(),
         thread_id,
         from,
-        to: if to.is_empty() {
-            Vec::new()
-        } else {
-            vec![to]
-        },
+        to: if to.is_empty() { Vec::new() } else { vec![to] },
         subject,
         body,
         timestamp: current_timestamp(),

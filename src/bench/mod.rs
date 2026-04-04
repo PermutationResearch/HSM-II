@@ -181,16 +181,8 @@ impl BenchSuite {
     fn compute_result(name: &str, iterations: u64, durations: &[Duration]) -> BenchResult {
         let total: Duration = durations.iter().sum();
         let avg = total / iterations as u32;
-        let min = durations
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(Duration::ZERO);
-        let max = durations
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(Duration::ZERO);
+        let min = durations.iter().copied().min().unwrap_or(Duration::ZERO);
+        let max = durations.iter().copied().max().unwrap_or(Duration::ZERO);
         let total_secs = total.as_secs_f64();
         let ops = if total_secs > 0.0 {
             iterations as f64 / total_secs
@@ -346,7 +338,9 @@ pub fn bench_context_ranking(suite: &mut BenchSuite) {
         .collect();
 
     // Pre-compute a query embedding
-    let query_emb: Vec<f32> = (0..embedding_dim).map(|d| (d as f32 + 1.0) / 32.0).collect();
+    let query_emb: Vec<f32> = (0..embedding_dim)
+        .map(|d| (d as f32 + 1.0) / 32.0)
+        .collect();
 
     // Benchmark: cosine similarity ranking over 500 skills
     suite.bench("context/cosine_rank_500_skills", 500, || {
@@ -365,11 +359,7 @@ pub fn bench_context_ranking(suite: &mut BenchSuite) {
                     .map(|x| (*x as f64).powi(2))
                     .sum::<f64>()
                     .sqrt();
-                let norm_s: f64 = emb
-                    .iter()
-                    .map(|x| (*x as f64).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
+                let norm_s: f64 = emb.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
                 let cosine = if norm_q * norm_s > 0.0 {
                     dot / (norm_q * norm_s)
                 } else {
@@ -399,11 +389,7 @@ pub fn bench_context_ranking(suite: &mut BenchSuite) {
                     .map(|x| (*x as f64).powi(2))
                     .sum::<f64>()
                     .sqrt();
-                let norm_s: f64 = emb
-                    .iter()
-                    .map(|x| (*x as f64).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
+                let norm_s: f64 = emb.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
                 let cosine = if norm_q * norm_s > 0.0 {
                     dot / (norm_q * norm_s)
                 } else {
@@ -430,7 +416,9 @@ pub fn bench_context_ranking(suite: &mut BenchSuite) {
                 .collect()
         })
         .collect();
-    let big_query: Vec<f32> = (0..big_dim).map(|d| (d as f32 + 1.0) / big_dim as f32).collect();
+    let big_query: Vec<f32> = (0..big_dim)
+        .map(|d| (d as f32 + 1.0) / big_dim as f32)
+        .collect();
 
     suite.bench("context/cosine_rank_500_dim768", 200, || {
         let mut scored: Vec<(usize, f64)> = big_embeddings
@@ -447,11 +435,7 @@ pub fn bench_context_ranking(suite: &mut BenchSuite) {
                     .map(|x| (*x as f64).powi(2))
                     .sum::<f64>()
                     .sqrt();
-                let norm_s: f64 = emb
-                    .iter()
-                    .map(|x| (*x as f64).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
+                let norm_s: f64 = emb.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
                 let cosine = if norm_q * norm_s > 0.0 {
                     dot / (norm_q * norm_s)
                 } else {
@@ -645,9 +629,10 @@ pub fn bench_cost_reduction(suite: &mut BenchSuite) {
     size_result
         .metadata
         .insert("json_bytes".to_string(), json_size.to_string());
-    size_result
-        .metadata
-        .insert("json_pretty_bytes".to_string(), json_pretty_size.to_string());
+    size_result.metadata.insert(
+        "json_pretty_bytes".to_string(),
+        json_pretty_size.to_string(),
+    );
     size_result
         .metadata
         .insert("bincode_bytes".to_string(), bincode_size.to_string());
@@ -680,7 +665,11 @@ pub fn bench_embedding_ops(suite: &mut BenchSuite) {
 
     // L2 norm
     suite.bench("embedding/l2_norm_768", 10000, || {
-        let norm: f64 = vec_a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let norm: f64 = vec_a
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
         std::hint::black_box(norm);
     });
 
@@ -691,8 +680,16 @@ pub fn bench_embedding_ops(suite: &mut BenchSuite) {
             .zip(vec_b.iter())
             .map(|(a, b)| (*a as f64) * (*b as f64))
             .sum();
-        let norm_a: f64 = vec_a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-        let norm_b: f64 = vec_b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let norm_a: f64 = vec_a
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm_b: f64 = vec_b
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let cosine = if norm_a * norm_b > 0.0 {
             dot / (norm_a * norm_b)
         } else {
@@ -725,7 +722,11 @@ pub fn bench_embedding_ops(suite: &mut BenchSuite) {
         .collect();
 
     suite.bench("embedding/batch_cosine_100x768", 500, || {
-        let norm_q: f64 = vec_a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let norm_q: f64 = vec_a
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let mut scores: Vec<f64> = Vec::with_capacity(100);
         for emb in &batch {
             let dot: f64 = vec_a
@@ -786,9 +787,7 @@ mod tests {
     #[test]
     fn bench_with_result_prevents_elision() {
         let mut suite = BenchSuite::new();
-        suite.bench_with_result("test/sum", 5, || -> u64 {
-            (0..1000u64).sum()
-        });
+        suite.bench_with_result("test/sum", 5, || -> u64 { (0..1000u64).sum() });
         assert_eq!(suite.results.len(), 1);
         assert_eq!(suite.results[0].iterations, 5);
     }

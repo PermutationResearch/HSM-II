@@ -8,7 +8,7 @@ This document maps **your gap table** to **concrete phases** and repo touchpoint
 
 | Layer | Choice | Notes |
 |--------|--------|--------|
-| **UI** | Next.js (extend `web/agent-console`) or new `web/company-os` | Task board, company switcher, budgets, governance timeline; mobile-friendly layout |
+| **UI** | Next.js (extend `web/company-console`) or new `web/company-os` | Task board, company switcher, budgets, governance timeline; mobile-friendly layout |
 | **API** | Extend `hsm_console` (Axum) or sidecar service | Same Rust codebase as `EnhancedPersonalAgent` for shared auth + spend hooks later |
 | **Store** | PostgreSQL v1 (`documentation/schemas/company_os_v1.sql`) | Company-scoped tables; migrations via your preferred runner |
 | **Workers** | Existing: `personal_agent`, Hermes, `hsm_a2a_adapter` | Register as `agent_bindings` rows; heartbeats hit API |
@@ -20,7 +20,7 @@ Sync path: **import/export** `config/operations.yaml` ↔ DB (`operations_yaml_s
 - **Migrations:** `migrations/20250401120000__company_os.sql` (applied automatically when the URL below is set).
 - **API (Axum, `hsm_console`):** `GET /api/company/health`, `GET|POST /api/company/companies`, `GET|POST .../companies/:id/goals`, `GET|POST .../companies/:id/tasks`, `POST /api/company/tasks/:id/checkout`.
 - **Env:** `HSM_COMPANY_OS_DATABASE_URL` — if unset, company routes return 503 with a JSON hint.
-- **Console UI:** `web/agent-console` → **Company OS** tab (list companies, create company, list/create tasks).
+- **Console UI:** `web/company-console` → **Company OS** tab (list companies, create company, list/create tasks).
 - **Dashboard:** `GET /api/console/stats` includes `tasks_in_progress` from Postgres when configured and `company_os: true/false`.
 
 Still **not** done: spend ledger writes on LLM calls, governance UI, mobile shell, template marketplace import/export.
@@ -30,7 +30,7 @@ Still **not** done: spend ledger writes on LLM calls, governance UI, mobile shel
 ### 1. Company OS UI (task-manager, dashboard, portfolio)
 
 - **MVP:** Company list + task list + task detail (spec, goal breadcrumb, state) + spend summary panel (read-only from `spend_events`).
-- **Repo:** new routes under `web/agent-console` (or parallel app); `NEXT_PUBLIC_API_BASE` → console Axum port.
+- **Repo:** new routes under `web/company-console` (or parallel app); `NEXT_PUBLIC_API_BASE` → console Axum port.
 - **API:** `GET/POST /api/company/companies`, `.../tasks`, `.../tasks/:id/checkout`, `.../goals` tree.
 
 ### 2. Persistence (Postgres, migrations, company-scoped entities)

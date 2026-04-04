@@ -104,15 +104,8 @@ pub async fn run_anti_sycophancy_loop(
     let max = cfg.max_rounds.max(1);
     for r in 0..max {
         let heur = sycophancy_heuristic(&draft);
-        let critic_raw = call_critic(
-            &llm,
-            &cfg,
-            user_message,
-            context,
-            &draft,
-            &aggregated,
-        )
-        .await?;
+        let critic_raw =
+            call_critic(&llm, &cfg, user_message, context, &draft, &aggregated).await?;
         let critic = parse_critic_output(&critic_raw);
         let excerpt: String = draft.chars().take(480).collect();
         rounds.push(AntiSycophancyRoundLog {
@@ -123,7 +116,8 @@ pub async fn run_anti_sycophancy_loop(
         });
 
         let combined_risk = (critic.risk_score * 0.75 + heur * 0.25).clamp(0.0, 1.0);
-        let accept = critic.verdict == CriticVerdict::Accept || combined_risk < cfg.risk_stop_threshold;
+        let accept =
+            critic.verdict == CriticVerdict::Accept || combined_risk < cfg.risk_stop_threshold;
         if accept {
             stopped_reason = if turns_early_ok(combined_risk, &critic) {
                 "low_risk_or_accept"
@@ -145,15 +139,7 @@ pub async fn run_anti_sycophancy_loop(
             }
         }
 
-        draft = revise_draft(
-            &llm,
-            &cfg,
-            user_message,
-            context,
-            &draft,
-            &aggregated,
-        )
-        .await?;
+        draft = revise_draft(&llm, &cfg, user_message, context, &draft, &aggregated).await?;
     }
 
     Ok(AntiSycophancyRunResult {
@@ -232,15 +218,7 @@ async fn revise_draft(
         "\n\nRewrite into a single improved answer. Shorter is fine if it improves clarity.",
     );
 
-    chat(
-        llm,
-        cfg,
-        REVISE_SYSTEM,
-        &user,
-        cfg.temperature_revise,
-        4096,
-    )
-    .await
+    chat(llm, cfg, REVISE_SYSTEM, &user, cfg.temperature_revise, 4096).await
 }
 
 async fn chat(
@@ -281,9 +259,7 @@ fn parse_critic_output(raw: &str) -> CriticParse {
             mode = "issues";
             continue;
         }
-        if t.eq_ignore_ascii_case("REVISED_DIRECTIVES:")
-            || t.starts_with("REVISED_DIRECTIVES:")
-        {
+        if t.eq_ignore_ascii_case("REVISED_DIRECTIVES:") || t.starts_with("REVISED_DIRECTIVES:") {
             mode = "dirs";
             continue;
         }

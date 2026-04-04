@@ -116,7 +116,10 @@ impl DistillationRouter {
 
         match &tier {
             ModelTier::Local { .. } => {
-                debug!("Routing to local model (confidence={:.2}, complexity={:.2})", confidence, complexity);
+                debug!(
+                    "Routing to local model (confidence={:.2}, complexity={:.2})",
+                    confidence, complexity
+                );
                 let result = local_llm.generate(prompt).await;
                 Ok((result.text, tier))
             }
@@ -131,7 +134,10 @@ impl DistillationRouter {
                 );
 
                 // Try frontier API
-                match self.call_frontier(prompt, provider, model, api_key_env).await {
+                match self
+                    .call_frontier(prompt, provider, model, api_key_env)
+                    .await
+                {
                     Ok(response) => Ok((response, tier)),
                     Err(e) => {
                         warn!("Frontier model failed, falling back to local: {}", e);
@@ -148,7 +154,12 @@ impl DistillationRouter {
             ModelTier::Auto => {
                 // Auto delegates to select_tier which never returns Auto
                 let result = local_llm.generate(prompt).await;
-                Ok((result.text, ModelTier::Local { model: self.local_model.clone() }))
+                Ok((
+                    result.text,
+                    ModelTier::Local {
+                        model: self.local_model.clone(),
+                    },
+                ))
             }
         }
     }
@@ -161,9 +172,8 @@ impl DistillationRouter {
         model: &str,
         api_key_env: &str,
     ) -> anyhow::Result<String> {
-        let api_key = std::env::var(api_key_env).map_err(|_| {
-            anyhow::anyhow!("API key env var {} not set", api_key_env)
-        })?;
+        let api_key = std::env::var(api_key_env)
+            .map_err(|_| anyhow::anyhow!("API key env var {} not set", api_key_env))?;
 
         let (url, body) = match provider {
             "anthropic" => {

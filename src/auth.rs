@@ -73,7 +73,7 @@ impl Default for RateLimitConfig {
 /// JWT Claims
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // Subject (user ID)
+    pub sub: String,    // Subject (user ID)
     pub key_id: String, // API key ID
     pub permissions: Vec<Permission>,
     pub iat: i64, // Issued at
@@ -94,16 +94,16 @@ struct RateLimitState {
 impl RateLimitState {
     fn is_allowed(&mut self, config: &RateLimitConfig) -> bool {
         let now = Utc::now();
-        
+
         // Clean old entries
         let minute_ago = now - Duration::minutes(1);
         let hour_ago = now - Duration::hours(1);
         let day_ago = now - Duration::days(1);
-        
+
         self.minute_window.retain(|&t| t > minute_ago);
         self.hour_window.retain(|&t| t > hour_ago);
         self.day_window.retain(|&t| t > day_ago);
-        
+
         // Check limits
         if self.minute_window.len() >= config.requests_per_minute as usize {
             return false;
@@ -114,12 +114,12 @@ impl RateLimitState {
         if self.day_window.len() >= config.requests_per_day as usize {
             return false;
         }
-        
+
         // Record request
         self.minute_window.push(now);
         self.hour_window.push(now);
         self.day_window.push(now);
-        
+
         true
     }
 }
@@ -136,20 +136,21 @@ pub struct AuthManager {
 
 impl AuthManager {
     pub fn new() -> Self {
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| {
-                let random = Uuid::new_v4().to_string();
-                warn!("JWT_SECRET not set, using random value. Sessions won't persist across restarts!");
-                random
-            });
-        
+        let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| {
+            let random = Uuid::new_v4().to_string();
+            warn!(
+                "JWT_SECRET not set, using random value. Sessions won't persist across restarts!"
+            );
+            random
+        });
+
         Self {
             keys: Arc::new(RwLock::new(HashMap::new())),
             rate_limits: Arc::new(RwLock::new(HashMap::new())),
             jwt_secret,
         }
     }
-    
+
     /// Create a new API key
     pub async fn create_key(
         &self,
@@ -161,7 +162,7 @@ impl AuthManager {
     ) -> Result<String> {
         let key_id = Uuid::new_v4().to_string();
         let key_plain = format!("hsk_{}", Uuid::new_v4().to_string().replace("-", ""));
-        
+
         // Hash the key
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
@@ -169,7 +170,7 @@ impl AuthManager {
             .hash_password(key_plain.as_bytes(), &salt)
             .map_err(|e| anyhow!("Failed to hash key: {}", e))?
             .to_string();
-        
+
         let api_key = ApiKey {
             id: key_id.clone(),
             key_hash,
@@ -184,40 +185,41 @@ impl AuthManager {
             is_active: true,
             tenant_id: None,
         };
-        
+
         let key_id_log = key_id.clone();
         self.keys.write().await.insert(key_id, api_key);
-        
+
         info!(key_id = %key_id_log, "Created new API key");
-        
+
         // Return the plain key (only time it's visible)
         Ok(key_plain)
     }
-    
+
     /// Validate an API key and return JWT token
     pub async fn validate_key(&self, key_plain: &str) -> Result<String> {
         // Extract key ID from prefix if present
         let keys = self.keys.read().await;
-        
+
         for (key_id, api_key) in keys.iter() {
             if !api_key.is_active {
                 continue;
             }
-            
+
             // Check expiration
             if let Some(expires) = api_key.expires_at {
                 if Utc::now() > expires {
                     continue;
                 }
             }
-            
+
             // Verify hash
-            let parsed_hash = PasswordHash::new(&api_key.key_hash)
-                .map_err(|e| anyhow!("Invalid hash: {}", e))?;
-            
+            let parsed_hash =
+                PasswordHash::new(&api_key.key_hash).map_err(|e| anyhow!("Invalid hash: {}", e))?;
+
             if Argon2::default()
                 .verify_password(key_plain.as_bytes(), &parsed_hash)
-                .is_ok() {
+                .is_ok()
+            {
                 // Clone what we need before releasing lock
                 let key_id_clone = key_id.clone();
                 let permissions_clone = api_key.permissions.clone();
@@ -230,10 +232,10 @@ impl AuthManager {
                 );
             }
         }
-        
+
         Err(anyhow!("Invalid API key"))
     }
-    
+
     /// Generate JWT token
     fn generate_jwt(
         &self,
@@ -260,7 +262,7 @@ impl AuthManager {
         )
         .map_err(|e| anyhow!("Failed to encode JWT: {}", e))
     }
-    
+
     /// Validate JWT token
     pub fn validate_jwt(&self, token: &str) -> Result<Claims> {
         decode::<Claims>(
@@ -271,26 +273,25 @@ impl AuthManager {
         .map(|data| data.claims)
         .map_err(|e| anyhow!("Invalid token: {}", e))
     }
-    
+
     /// Check rate limit
     pub async fn check_rate_limit(&self, key_id: &str) -> Result<()> {
         let keys = self.keys.read().await;
-        let key = keys.get(key_id)
-            .ok_or_else(|| anyhow!("Key not found"))?;
-        
+        let key = keys.get(key_id).ok_or_else(|| anyhow!("Key not found"))?;
+
         let config = key.rate_limit.clone();
         drop(keys);
-        
+
         let mut rate_limits = self.rate_limits.write().await;
         let state = rate_limits.entry(key_id.to_string()).or_default();
-        
+
         if state.is_allowed(&config) {
             Ok(())
         } else {
             Err(anyhow!("Rate limit exceeded"))
         }
     }
-    
+
     /// Revoke an API key
     pub async fn revoke_key(&self, key_id: &str) -> Result<()> {
         let mut keys = self.keys.write().await;
@@ -302,12 +303,12 @@ impl AuthManager {
             Err(anyhow!("Key not found"))
         }
     }
-    
+
     /// Get key info
     pub async fn get_key(&self, key_id: &str) -> Option<ApiKey> {
         self.keys.read().await.get(key_id).cloned()
     }
-    
+
     /// List all keys
     pub async fn list_keys(&self) -> Vec<ApiKey> {
         self.keys.read().await.values().cloned().collect()
@@ -355,7 +356,7 @@ pub async fn require_auth(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    
+
     let token = match token {
         Some(t) => t,
         None => {
@@ -363,7 +364,7 @@ pub async fn require_auth(
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
-    
+
     // Validate JWT
     let claims = match state.auth.validate_jwt(token) {
         Ok(c) => c,
@@ -372,13 +373,13 @@ pub async fn require_auth(
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
-    
+
     // Check rate limit
     if let Err(e) = state.auth.check_rate_limit(&claims.key_id).await {
         warn!(error = %e, key_id = %claims.key_id, "Rate limit exceeded");
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    
+
     // Add user to request extensions
     let user = AuthenticatedUser {
         key_id: claims.key_id,
@@ -430,7 +431,7 @@ pub async fn create_api_key(
             _ => None,
         })
         .collect();
-    
+
     let key = state
         .auth
         .create_key(
@@ -445,7 +446,7 @@ pub async fn create_api_key(
             error!(error = %e, "Failed to create API key");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    
+
     Ok(Json(CreateKeyResponse {
         key_id: Uuid::new_v4().to_string(),
         key,
@@ -459,7 +460,7 @@ pub async fn authenticate(
     axum::extract::Json(body): axum::extract::Json<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let api_key = body.get("api_key").ok_or(StatusCode::BAD_REQUEST)?;
-    
+
     match state.auth.validate_key(api_key).await {
         Ok(token) => Ok(Json(json!({
             "token": token,
@@ -505,7 +506,8 @@ impl PersistentAuthManager {
             let data = std::fs::read_to_string(&keys_file)?;
             let keys: Vec<ApiKey> = serde_json::from_str(&data)?;
             // Inject keys directly into the inner AuthManager's map
-            let keys_map: HashMap<String, ApiKey> = keys.into_iter().map(|k| (k.id.clone(), k)).collect();
+            let keys_map: HashMap<String, ApiKey> =
+                keys.into_iter().map(|k| (k.id.clone(), k)).collect();
             // We need to get past the RwLock — use try_write since we're in startup
             let rt = tokio::runtime::Handle::try_current();
             if let Ok(handle) = rt {
@@ -566,7 +568,11 @@ impl PersistentAuthManager {
             tenant_id: Some(tenant_id.to_string()),
         };
 
-        self.inner.keys.write().await.insert(key_id.clone(), api_key);
+        self.inner
+            .keys
+            .write()
+            .await
+            .insert(key_id.clone(), api_key);
         self.persist().await?;
 
         info!(key_id = %key_id, tenant_id = %tenant_id, "Created tenant API key");
@@ -683,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn test_api_key_lifecycle() {
         let auth = AuthManager::new();
-        
+
         // Create key
         let key = auth
             .create_key(
@@ -695,13 +701,13 @@ mod tests {
             )
             .await
             .unwrap();
-        
+
         assert!(key.starts_with("hsk_"));
-        
+
         // Validate key
         let jwt = auth.validate_key(&key).await.unwrap();
         assert!(!jwt.is_empty());
-        
+
         // Validate JWT
         let claims = auth.validate_jwt(&jwt).unwrap();
         assert!(claims.permissions.contains(&Permission::Read));
@@ -710,7 +716,7 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiting() {
         let auth = AuthManager::new();
-        
+
         let key = auth
             .create_key(
                 "Rate Limit Test".to_string(),
@@ -725,14 +731,14 @@ mod tests {
             )
             .await
             .unwrap();
-        
+
         let jwt = auth.validate_key(&key).await.unwrap();
         let claims = auth.validate_jwt(&jwt).unwrap();
-        
+
         // First two requests should pass
         assert!(auth.check_rate_limit(&claims.key_id).await.is_ok());
         assert!(auth.check_rate_limit(&claims.key_id).await.is_ok());
-        
+
         // Third should fail
         assert!(auth.check_rate_limit(&claims.key_id).await.is_err());
     }

@@ -1021,14 +1021,8 @@ impl App {
             chat_context_summary: None,
             chat_input: String::new(),
             chat_models: vec![
-                (
-                    "QwenEncoder 480B Cloud",
-                    "qwen3-coder:480b-cloud",
-                ),
-                (
-                    "llama3.2",
-                    "llama3.2",
-                ),
+                ("QwenEncoder 480B Cloud", "qwen3-coder:480b-cloud"),
+                ("llama3.2", "llama3.2"),
             ],
             selected_model: 0, // Default to qwen3-coder:480b-cloud
             chat_tx,
@@ -7387,8 +7381,7 @@ impl App {
                     // When a council output is positive AND cited agents, those
                     // citations propagated into a real positive outcome.
                     if confidence >= 0.5 && !citations.is_empty() {
-                        self.world
-                            .record_cascade_citations(&citations, true);
+                        self.world.record_cascade_citations(&citations, true);
                         // Also record downstream success for cited agents —
                         // their contribution enabled a successful council output.
                         for &(agent_id, _) in &citations {

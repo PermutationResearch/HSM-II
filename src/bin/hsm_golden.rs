@@ -10,8 +10,8 @@
 use clap::Parser;
 
 use hyper_stigmergy::embedded_graph_store::EmbeddedGraphStore;
-use hyper_stigmergy::HyperStigmergicMorphogenesis;
 use hyper_stigmergy::persistence::lbug_world_store;
+use hyper_stigmergy::HyperStigmergicMorphogenesis;
 
 #[derive(Parser)]
 #[command(name = "hsm_golden")]
@@ -38,6 +38,9 @@ fn main() -> anyhow::Result<()> {
 
     let world = HyperStigmergicMorphogenesis::new(4);
     let n = EmbeddedGraphStore::save_world(&world, None)?;
-    println!("hsm_golden: saved primary Ladybug world ({} bytes checkpoint payload).", n);
+    println!(
+        "hsm_golden: saved primary Ladybug world ({} bytes checkpoint payload).",
+        n
+    );
     Ok(())
 }

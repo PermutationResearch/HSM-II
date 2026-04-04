@@ -2,14 +2,26 @@
   "benchmarks": [
     {
       "name": "smoke_json_pass",
+      "labels": {
+        "benchmark": "smoke",
+        "format": "json"
+      },
+      "setup_commands": [],
       "command": ["echo", "{\"pass\": true, \"score\": 1.0}"],
       "cwd": null,
+      "env": {},
       "timeout_sec": 60
     },
     {
       "name": "smoke_exit_zero",
+      "labels": {
+        "benchmark": "smoke",
+        "format": "exit_code"
+      },
+      "setup_commands": [],
       "command": ["true"],
       "cwd": null,
+      "env": {},
       "timeout_sec": 60
     }
   ]

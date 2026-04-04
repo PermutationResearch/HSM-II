@@ -9,16 +9,16 @@
 //! - Differential rendering support
 
 pub mod agent_loop;
+pub mod plugin_lifecycle;
 pub mod renderer;
 pub mod schemas;
-pub mod plugin_lifecycle;
 pub mod session;
 pub mod streaming;
 pub mod tools;
 
 pub use agent_loop::AgentLoop;
+pub use plugin_lifecycle::{PluginManager, PluginManifest, PluginStateIndex};
 pub use renderer::{DifferentialRenderer, MarkdownRenderer, RenderUpdate};
-pub use plugin_lifecycle::{PluginManifest, PluginManager, PluginStateIndex};
 pub use schemas::{
     ToolParameter, ToolProviderKind, ToolProviderMetadata, ToolProviderRuntime, ToolRegistry,
     ToolSchema, WasmCapability,

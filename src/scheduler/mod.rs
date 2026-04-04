@@ -143,10 +143,15 @@ pub struct CronJob {
 
 impl CronJob {
     /// Create a new cron job
-    pub fn new(name: &str, cron_expr: &str, job_type: JobType, payload: impl Serialize) -> Result<Self> {
+    pub fn new(
+        name: &str,
+        cron_expr: &str,
+        job_type: JobType,
+        payload: impl Serialize,
+    ) -> Result<Self> {
         let schedule = CronSchedule::from_str(cron_expr)?;
         let next_run = schedule.upcoming(Utc).next();
-        
+
         Ok(Self {
             name: name.to_string(),
             schedule,
@@ -236,7 +241,7 @@ impl Default for SchedulerConfig {
 }
 
 /// Simple in-memory job queue for HSM-II
-/// 
+///
 /// Note: This is a lightweight implementation. For production with high
 /// volume, consider using apalis with Redis or a proper message queue.
 pub struct JobScheduler {
@@ -270,7 +275,10 @@ impl JobScheduler {
         // Start job workers
         self.start_workers().await;
 
-        info!("Job scheduler started with {} workers", self.config.worker_count);
+        info!(
+            "Job scheduler started with {} workers",
+            self.config.worker_count
+        );
         Ok(())
     }
 
@@ -288,7 +296,7 @@ impl JobScheduler {
     /// Schedule a job to run at a specific time
     pub async fn schedule_at(&self, job: Job, run_at: DateTime<Utc>) -> Result<()> {
         let delay = run_at.signed_duration_since(Utc::now());
-        
+
         if delay.num_seconds() <= 0 {
             // Run immediately
             self.schedule(job).await?;
@@ -297,15 +305,20 @@ impl JobScheduler {
             let queue = self.job_queue.clone();
             let job_id = job.id.clone();
             let job_type = job.job_type.clone();
-            
+
             tokio::spawn(async move {
-                tokio::time::sleep(delay.to_std().unwrap_or(tokio::time::Duration::from_secs(0))).await;
+                tokio::time::sleep(
+                    delay
+                        .to_std()
+                        .unwrap_or(tokio::time::Duration::from_secs(0)),
+                )
+                .await;
                 let mut q = queue.write().await;
                 q.push(job);
                 info!(job_id = %job_id, job_type = %job_type, "Delayed job enqueued");
             });
         }
-        
+
         Ok(())
     }
 
@@ -386,7 +399,7 @@ impl JobScheduler {
                                     let mut queue = job_queue.write().await;
                                     queue.push(job);
                                     drop(queue);
-                                    
+
                                     info!(cron_name = %name, "Cron job triggered");
 
                                     cron_job.last_run = Some(now);
@@ -452,7 +465,7 @@ impl JobScheduler {
                                         error = %result.message,
                                         "Job failed"
                                     );
-                                    
+
                                     // Retry logic could go here
                                 }
                             }
@@ -483,10 +496,10 @@ mod tests {
             message: "Hello".to_string(),
         };
         let job = Job::new(JobType::Custom("test".to_string()), &payload).unwrap();
-        
+
         assert_eq!(job.job_type.to_string(), "custom:test");
         assert_eq!(job.priority, JobPriority::Normal);
-        
+
         let parsed: TestPayload = job.parse_payload().unwrap();
         assert_eq!(parsed.message, "Hello");
     }
@@ -497,9 +510,11 @@ mod tests {
             "test_job",
             "0 */5 * * * *", // Every 5 minutes
             JobType::Heartbeat,
-            &TestPayload { message: "ping".to_string() },
+            &TestPayload {
+                message: "ping".to_string(),
+            },
         );
-        
+
         assert!(cron.is_ok());
         let job = cron.unwrap();
         assert_eq!(job.name, "test_job");

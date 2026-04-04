@@ -14,10 +14,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         }
     }
 
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.tmp.{}.{}",

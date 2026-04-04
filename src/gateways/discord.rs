@@ -5,8 +5,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serenity::all::{
-    Context as SerenityContext, EventHandler, GatewayIntents, Message as DiscordMessage,
-    Ready, ActivityData
+    ActivityData, Context as SerenityContext, EventHandler, GatewayIntents,
+    Message as DiscordMessage, Ready,
 };
 use serenity::Client;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ impl RealDiscordBot {
     pub async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()> {
         let token = self.config.token.clone();
         let config = self.config.clone();
-        
+
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
         self.handler = Some(handler.clone());
@@ -78,7 +78,8 @@ impl RealDiscordBot {
                 let token_clone = token.clone();
                 let mut client = match Client::builder(token_clone, intents)
                     .event_handler(discord_handler.clone())
-                    .await {
+                    .await
+                {
                     Ok(c) => c,
                     Err(e) => {
                         error!(error = %e, "Failed to create Discord client, retrying in 10s");
@@ -133,22 +134,23 @@ impl RealDiscordBot {
     pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut remaining = content;
-        
+
         while !remaining.is_empty() {
             if remaining.len() <= max_len {
                 chunks.push(remaining.to_string());
                 break;
             }
-            
+
             // Try to split at newline
-            let split_point = remaining[..max_len].rfind('\n')
+            let split_point = remaining[..max_len]
+                .rfind('\n')
                 .map(|i| i + 1)
                 .unwrap_or(max_len);
-            
+
             chunks.push(remaining[..split_point].to_string());
             remaining = &remaining[split_point..];
         }
-        
+
         chunks
     }
 }
@@ -164,7 +166,7 @@ struct DiscordEventHandler {
 impl EventHandler for DiscordEventHandler {
     async fn ready(&self, ctx: SerenityContext, ready: Ready) {
         info!(username = %ready.user.name, "Discord bot connected");
-        
+
         let activity = ActivityData::playing(&self.config.presence_text);
         ctx.set_presence(Some(activity), serenity::all::OnlineStatus::Online);
     }
@@ -191,7 +193,7 @@ impl EventHandler for DiscordEventHandler {
             attachments: vec![],
             reply_to: msg.referenced_message.as_ref().map(|m| m.id.to_string()),
         };
-        
+
         debug!(user = %msg.author.name, content = %msg.content, "Discord message");
 
         match self.inner_handler.handle(gateway_msg).await {
@@ -207,9 +209,10 @@ impl EventHandler for DiscordEventHandler {
             }
             Err(e) => {
                 error!(error = %e, "Error handling message");
-                let _ = msg.channel_id.say(&_ctx.http, 
-                    "❌ Error processing your message."
-                ).await;
+                let _ = msg
+                    .channel_id
+                    .say(&_ctx.http, "❌ Error processing your message.")
+                    .await;
             }
         }
     }
@@ -218,6 +221,9 @@ impl EventHandler for DiscordEventHandler {
 impl DiscordEventHandler {
     fn is_channel_allowed(&self, channel_id: &str) -> bool {
         self.config.allowed_channels.contains(&"all".to_string())
-            || self.config.allowed_channels.contains(&channel_id.to_string())
+            || self
+                .config
+                .allowed_channels
+                .contains(&channel_id.to_string())
     }
 }

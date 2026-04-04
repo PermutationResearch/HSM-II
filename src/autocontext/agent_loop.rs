@@ -20,8 +20,8 @@ use super::harness::PlaybookHarness;
 use super::storage::AutoContextStore;
 use super::validation::{ValidationPipeline, ValidationResult};
 use super::{
-    current_timestamp, Generation, Hint, KnowledgeBase, Playbook, RunRecord, Step,
-    Strategy, StrategySource,
+    current_timestamp, Generation, Hint, KnowledgeBase, Playbook, RunRecord, Step, Strategy,
+    StrategySource,
 };
 
 // ── Configuration ───────────────────────────────────────────────────────────
@@ -177,9 +177,7 @@ impl AutoContextLoop {
 
         // ── Phase 1: COMPETITOR — generate strategies ───────────────────
         let context = self.retrieve_context(scenario);
-        let strategies = self
-            .competitor_phase(scenario, &context, llm)
-            .await;
+        let strategies = self.competitor_phase(scenario, &context, llm).await;
         let strat_count = strategies.len();
         info!("  Competitor: {} strategies generated", strat_count);
 
@@ -199,7 +197,10 @@ impl AutoContextLoop {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let best_score = run_records.first().map(|r| r.composite_score).unwrap_or(0.0);
+        let best_score = run_records
+            .first()
+            .map(|r| r.composite_score)
+            .unwrap_or(0.0);
         let evaluated_count = run_records.len();
         info!(
             "  Analyst: {} runs evaluated, best={:.3}",
@@ -230,7 +231,10 @@ impl AutoContextLoop {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let best_score = run_records.first().map(|r| r.composite_score).unwrap_or(0.0);
+        let best_score = run_records
+            .first()
+            .map(|r| r.composite_score)
+            .unwrap_or(0.0);
         generation.best_score = best_score;
         generation.run_records = run_records;
 
@@ -322,18 +326,17 @@ impl AutoContextLoop {
         let mut record = RunRecord::new(strategy.clone());
 
         // Build a temporary playbook to execute via harness
-        let temp_pb = Playbook::new(
-            &strategy.description,
-            &strategy.description,
-            scenario,
-        )
-        .with_steps(strategy.steps.clone());
+        let temp_pb = Playbook::new(&strategy.description, &strategy.description, scenario)
+            .with_steps(strategy.steps.clone());
 
         // Execute through harness
         let mut context = HashMap::new();
         context.insert("query".to_string(), scenario.to_string());
 
-        let result = self.harness.execute(&temp_pb, tool_registry, llm, &context).await;
+        let result = self
+            .harness
+            .execute(&temp_pb, tool_registry, llm, &context)
+            .await;
         record.artifacts = result.artifacts;
         record.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -342,7 +345,9 @@ impl AutoContextLoop {
         let success_score = if result.success { 1.0 } else { 0.0 };
         let speed_score = (1.0 - (record.duration_ms as f64 / 30_000.0).min(1.0)).max(0.0);
 
-        record.scores.insert("completion".to_string(), completion_score);
+        record
+            .scores
+            .insert("completion".to_string(), completion_score);
         record.scores.insert("success".to_string(), success_score);
         record.scores.insert("speed".to_string(), speed_score);
 
@@ -354,7 +359,11 @@ impl AutoContextLoop {
 
         debug!(
             "  Analyst: '{}' → score={:.3} (completion={:.2}, success={:.2}, speed={:.2})",
-            strategy.description, record.composite_score, completion_score, success_score, speed_score
+            strategy.description,
+            record.composite_score,
+            completion_score,
+            success_score,
+            speed_score
         );
 
         record
@@ -383,10 +392,7 @@ impl AutoContextLoop {
                  Provide ONLY an improved step-by-step plan. Each line should be one step.\n\
                  Format: STEP_NUMBER. DESCRIPTION (tool:TOOL_NAME if applicable)\n\
                  Keep it to 2-5 steps.",
-                scenario,
-                run.strategy.description,
-                run.composite_score,
-                run.feedback,
+                scenario, run.strategy.description, run.composite_score, run.feedback,
             );
 
             let result = llm.generate(&prompt).await;
@@ -439,7 +445,10 @@ impl AutoContextLoop {
             // Build a playbook candidate
             let mut pb = Playbook::new(
                 &winner.strategy.description,
-                format!("Auto-generated from gen #{} score {:.3}", gen_id, winner.composite_score),
+                format!(
+                    "Auto-generated from gen #{} score {:.3}",
+                    gen_id, winner.composite_score
+                ),
                 &scenario,
             )
             .with_steps(winner.strategy.steps.clone());
@@ -457,9 +466,7 @@ impl AutoContextLoop {
                     .knowledge_base
                     .playbooks
                     .iter()
-                    .find(|p| {
-                        p.scenario_pattern == scenario && p.name == pb.name
-                    })
+                    .find(|p| p.scenario_pattern == scenario && p.name == pb.name)
                     .map(|p| p.id.clone());
 
                 if let Some(existing_id) = existing {
@@ -501,7 +508,12 @@ impl AutoContextLoop {
         self.knowledge_base.total_runs += generation.run_records.len() as u64;
         self.knowledge_base.last_updated = current_timestamp();
 
-        (playbooks_created, playbooks_updated, hints_created, any_validated)
+        (
+            playbooks_created,
+            playbooks_updated,
+            hints_created,
+            any_validated,
+        )
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -611,7 +623,10 @@ impl AutoContextLoop {
             Step::llm_step(
                 0,
                 "Analyze the scenario",
-                format!("Analyze this scenario and break it into sub-tasks: {}", scenario),
+                format!(
+                    "Analyze this scenario and break it into sub-tasks: {}",
+                    scenario
+                ),
                 "analysis produced",
             ),
             Step::llm_step(
@@ -688,11 +703,7 @@ impl AutoContextLoop {
             0.3 + run.composite_score * 0.3
         };
 
-        Some(Hint::new(
-            &run.feedback,
-            scenario,
-            confidence.min(1.0),
-        ))
+        Some(Hint::new(&run.feedback, scenario, confidence.min(1.0)))
     }
 
     /// Parse step descriptions from LLM output.

@@ -165,6 +165,33 @@ cargo run --bin personal_agent -- start --telegram &
 cargo run --bin hypergraphd
 ```
 
+#### External Rust Harnesses
+`hsm_outer_loop` can now build and run external Rust harnesses from JSON specs, including checked-out side projects such as `claw-code`.
+
+```bash
+cargo run --bin hsm_outer_loop -- external-batch --spec config/external_claw_code.example.json
+```
+
+The external spec supports:
+- `labels`: structured metadata for later comparison (`company_pack`, `preset`, `seed`, `benchmark`)
+- `setup_commands`: run build steps before the benchmark command
+- `cwd`: run inside the external repo workspace
+- `env`: inject per-harness environment variables
+
+Example: point [`external_claw_code.example.json`](/Users/cno/hyper-stigmergic-morphogenesisII/config/external_claw_code.example.json) at your local `claw-code/rust` checkout, then let `hsm_outer_loop` build `claw-cli` and smoke-test the release binary inside the harness pipeline.
+
+For long-horizon startup stress tests, [`external_yc_bench.example.json`](/Users/cno/hyper-stigmergic-morphogenesisII/config/external_yc_bench.example.json) shows how to run `yc-bench` and tag the result with `company_pack`, `preset`, and `seed` so you can compare marketplace companies using the same scenario.
+
+Full marketplace grids (18 Paperclip-class packs, `hsm_market_*`, medium preset) live in `config/external_yc_bench_seed7.json` … `seed10.json`. Edit each file’s `command` (path to `uv`), `cwd` (your local `yc-bench` checkout), and export `OPENROUTER_API_KEY` in the shell (`env` in those specs is empty so the child inherits your environment). Then run, for example:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed9.json
+cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed10.json
+```
+
+Results are written under `runs/external_batch_<timestamp>.json` and picked up by the company console `GET /api/companies-sh/yc-bench` aggregator.
+
 ---
 
 ## 🧠 What HSM-II Does
@@ -300,45 +327,7 @@ If one provider fails, the system automatically switches to another. No single p
 
 ## 🏗️ System Architecture
 
-```
-╔═══════════════════════════════════════════════════════════════════════╗
-║                         HSM-II SYSTEM                                 ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
-║       │    AGENTS    │  │   COUNCIL    │  │     CASS     │            ║
-║       │              │  │              │  │   (Skills)   │            ║
-║       │ • Roles      │  │ • Debate     │  │              │            ║
-║       │ • Drives     │  │ • Vote       │  │ • Harvest    │            ║
-║       │ • Coherence  │  │ • Evidence   │  │ • Distill    │            ║
-║       │ • Beliefs    │  │ • Decide     │  │ • Promote    │            ║
-║       └──────────────┘  └──────────────┘  └──────────────┘            ║
-║              │                 │                 │                    ║
-║              └─────────────────┼─────────────────┘                    ║
-║                                ▼                                      ║
-║                   ┌──────────────────────────┐                        ║
-║                   │   HYPERGRAPH MEMORY      │                        ║
-║                   │   (Stigmergic Field)     │                        ║
-║                   │                          │                        ║
-║                   │ • Nodes (beliefs)        │                        ║
-║                   │ • Hyperedges (emergent)  │                        ║
-║                   │ • Ontological tags       │                        ║
-║                   │ • Visibility scopes      │                        ║
-║                   └──────────────────────────┘                        ║
-║                                │                                      ║
-║              ┌─────────────────┼─────────────────┐                    ║
-║              ▼                 ▼                 ▼                    ║
-║       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            ║
-║       │     DKS      │  │    SOCIAL    │  │  FEDERATION  │            ║
-║       │              │  │    MEMORY    │  │              │            ║
-║       │ • Selection  │  │              │  │ • Trust      │            ║
-║       │ • Replication│  │ • Promises   │  │ • Conflict   │            ║
-║       │ • Mutation   │  │ • Reputation │  │ • Sync       │            ║
-║       │ • Flux       │  │ • Evidence   │  │ • Consensus  │            ║
-║       └──────────────┘  └──────────────┘  └──────────────┘            ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-```
+HSM-II is documented as **one world model** with **five living layers** (world, reasoning, execution, intelligence, federation). The machine-readable blueprint lives in [`architecture/hsm-ii-blueprint.ron`](architecture/hsm-ii-blueprint.ron); curated notes and commands are in [**ARCHITECTURE.md**](ARCHITECTURE.md). The **exact** Markdown emitted by `blueprint_markdown()` is checked in as [`ARCHITECTURE.generated.md`](ARCHITECTURE.generated.md) and verified by `cargo test --lib`—regenerate with `./scripts/generate-architecture-md.sh` after RON edits. **GET** `/api/architecture` returns that blueprint plus optional runtime counts when the API has a mounted world. The thin dashboard at `web/` includes **`/architecture`** (server fetch to `HSM_API_URL`). Generate a report locally with `cargo run -q --bin hsm_archviz` (from the repo root).
 
 ---
 
@@ -349,6 +338,8 @@ If one provider fails, the system automatically switches to another. No single p
 | [EASY_START.md](documentation/guides/EASY_START.md) | Get running in 5 minutes |
 | [DEPLOYMENT.md](documentation/guides/DEPLOYMENT.md) | Production deployment guide |
 | [COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md) | CLI reference |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Curated blueprint notes (Mermaid + API links) |
+| [ARCHITECTURE.generated.md](ARCHITECTURE.generated.md) | Generated from RON; must match `cargo test --lib` |
 | [ANTIFRAGILE_ARCHITECTURE.md](documentation/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
 | [PERSONAL_AGENT_README.md](documentation/guides/PERSONAL_AGENT_README.md) | Your AI companion |
 | [HERMES_INTEGRATION.md](documentation/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |

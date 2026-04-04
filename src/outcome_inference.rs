@@ -58,9 +58,7 @@ pub enum TaskEvent {
         timestamp: DateTime<Utc>,
     },
     /// Brand context was updated — could indicate dissatisfaction with output.
-    BrandUpdated {
-        timestamp: DateTime<Utc>,
-    },
+    BrandUpdated { timestamp: DateTime<Utc> },
     /// Campaign created — positive signal if domain matches recent task.
     CampaignCreated {
         domain: String,
@@ -155,11 +153,11 @@ pub struct InferenceConfig {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            decay_timeout_secs: 3600,       // 1 hour
+            decay_timeout_secs: 3600, // 1 hour
             inferred_confidence: 0.4,
             decay_confidence: 0.15,
-            signal_window_secs: 1800,       // 30 min window for signals
-            resubmission_threshold: 0.6,    // 60% word overlap = resubmission
+            signal_window_secs: 1800,    // 30 min window for signals
+            resubmission_threshold: 0.6, // 60% word overlap = resubmission
         }
     }
 }
@@ -305,7 +303,10 @@ impl OutcomeInferenceEngine {
                 }
                 // Match domain or check if task description relates to campaign domain.
                 let domain_match = task.domain.as_deref() == Some(domain)
-                    || task.description.to_lowercase().contains(&domain.to_lowercase());
+                    || task
+                        .description
+                        .to_lowercase()
+                        .contains(&domain.to_lowercase());
                 if domain_match && self.in_signal_window(task.submitted_at, now) {
                     task.signals.push(BehavioralSignal {
                         kind: SignalKind::CampaignInDomain,
@@ -368,23 +369,22 @@ impl OutcomeInferenceEngine {
                     continue;
                 }
 
-                let outcome = if age_secs >= self.config.decay_timeout_secs
-                    && task.signals.is_empty()
-                {
-                    // No signals at all after timeout → decay default.
-                    InferredOutcome {
-                        success: false,
-                        quality: 0.3,
-                        confidence: self.config.decay_confidence,
-                        source: OutcomeSource::DecayDefault,
-                    }
-                } else if !task.signals.is_empty() {
-                    // Has signals — compute from behavioral evidence.
-                    self.infer_from_signals(&task.signals)
-                } else {
-                    // Still within timeout, has no signals — skip for now.
-                    continue;
-                };
+                let outcome =
+                    if age_secs >= self.config.decay_timeout_secs && task.signals.is_empty() {
+                        // No signals at all after timeout → decay default.
+                        InferredOutcome {
+                            success: false,
+                            quality: 0.3,
+                            confidence: self.config.decay_confidence,
+                            source: OutcomeSource::DecayDefault,
+                        }
+                    } else if !task.signals.is_empty() {
+                        // Has signals — compute from behavioral evidence.
+                        self.infer_from_signals(&task.signals)
+                    } else {
+                        // Still within timeout, has no signals — skip for now.
+                        continue;
+                    };
 
                 results.push(InferredTaskOutcome {
                     tenant_id: tenant_id.clone(),
@@ -566,17 +566,115 @@ fn word_overlap_ratio(a: &str, b: &str) -> f64 {
 /// Takes the most distinctive noun-like words.
 fn extract_domain(description: &str) -> String {
     const STOP_WORDS: &[&str] = &[
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
-        "by", "from", "as", "is", "was", "are", "were", "be", "been", "being", "have", "has",
-        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
-        "shall", "can", "this", "that", "these", "those", "i", "we", "you", "he", "she",
-        "it", "they", "my", "our", "your", "his", "her", "its", "their", "about", "up",
-        "into", "through", "during", "before", "after", "above", "below", "between",
-        "under", "again", "further", "then", "once", "here", "there", "when", "where",
-        "why", "how", "all", "each", "every", "both", "few", "more", "most", "other",
-        "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too",
-        "very", "just", "because", "if", "while", "new", "write", "create", "make",
-        "build", "implement", "design", "develop", "please",
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "is",
+        "was",
+        "are",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "we",
+        "you",
+        "he",
+        "she",
+        "it",
+        "they",
+        "my",
+        "our",
+        "your",
+        "his",
+        "her",
+        "its",
+        "their",
+        "about",
+        "up",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "if",
+        "while",
+        "new",
+        "write",
+        "create",
+        "make",
+        "build",
+        "implement",
+        "design",
+        "develop",
+        "please",
     ];
 
     let lower = description.to_lowercase();
@@ -604,14 +702,21 @@ mod tests {
     #[test]
     fn test_word_overlap_ratio() {
         assert!((word_overlap_ratio("write a blog post", "write a blog post") - 1.0).abs() < 0.01);
-        assert!((word_overlap_ratio("write a blog post", "write a blog article") - 0.6).abs() < 0.1);
-        assert!((word_overlap_ratio("completely different", "nothing alike here") - 0.0).abs() < 0.01);
+        assert!(
+            (word_overlap_ratio("write a blog post", "write a blog article") - 0.6).abs() < 0.1
+        );
+        assert!(
+            (word_overlap_ratio("completely different", "nothing alike here") - 0.0).abs() < 0.01
+        );
         assert!((word_overlap_ratio("", "") - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_extract_domain() {
-        assert_eq!(extract_domain("write a blog post about product launch"), "blog_post_product");
+        assert_eq!(
+            extract_domain("write a blog post about product launch"),
+            "blog_post_product"
+        );
         assert_eq!(extract_domain("design the homepage UI"), "homepage");
         assert_eq!(extract_domain(""), "general");
     }
@@ -645,9 +750,7 @@ mod tests {
             .await;
 
         // User creates a campaign in the blog domain.
-        engine
-            .record_campaign_created("tenant-1", "blog")
-            .await;
+        engine.record_campaign_created("tenant-1", "blog").await;
 
         // Sweep — should infer positive outcome.
         let outcomes = engine.sweep().await;
@@ -683,7 +786,11 @@ mod tests {
 
         // User re-submits the same task.
         engine
-            .record_task_resubmission("tenant-1", "task-2", "write a blog post about our product launch")
+            .record_task_resubmission(
+                "tenant-1",
+                "task-2",
+                "write a blog post about our product launch",
+            )
             .await;
 
         // Sweep — should infer negative outcome.
@@ -824,10 +931,7 @@ mod tests {
         ];
 
         // One positive (0.3) + one strong negative (0.7) = net -0.4 / 2 = -0.2 → clamped to 0.0
-        let engine = OutcomeInferenceEngine::new(
-            Path::new("/tmp/test"),
-            config,
-        );
+        let engine = OutcomeInferenceEngine::new(Path::new("/tmp/test"), config);
         let outcome = engine.infer_from_signals(&engine_signals);
         assert!(!outcome.success);
     }

@@ -76,7 +76,8 @@ pub fn sync_property_graph_on_connection(
 pub fn sync_property_graph(path: &Path, graph: &PropertyGraphSnapshot) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {:?}", parent))?;
         }
     }
 

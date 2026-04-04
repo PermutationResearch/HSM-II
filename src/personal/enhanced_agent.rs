@@ -22,29 +22,35 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
-use async_trait::async_trait;
 
-use crate::{
-    CASS, CouncilMember, Proposal, RalphCouncil, RalphConfig,
-    DKSSystem, DKSConfig, DKSTickResult, HyperStigmergicMorphogenesis,
-    EmbeddedGraphStore, AgentId, Role,
-    trace2skill::{self, ToolStepRecord, TrajectoryRecord},
-    cass::{ContextSnapshot, embedding::EmbeddingEngine},
-    council::{CouncilEvidence, CouncilEvidenceKind, CouncilFactory, ModeConfig,
-              StigmergicCouncilContext, Decision, RalphVerdict},
-    personal::{gateway::{Message, Platform}, prompt_defaults},
-    tools::{Tool, ToolRegistry, ToolCall as ToolCallEntry, RlmProcessTool},
-    rlm::LivingPrompt,
-    ollama_client::{OllamaClient, OllamaConfig},
-    social_memory::DataSensitivity,
-    autocontext::{AutoContextLoop, AutoContextStore, LoopConfig},
-};
-use crate::hyper_stigmergy::{HyperEdge, Belief, BeliefSource, Experience, ExperienceOutcome};
+use hermes_bridge::HermesClient;
+
 use super::business_pack::BusinessPack;
+use crate::hyper_stigmergy::{Belief, BeliefSource, Experience, ExperienceOutcome, HyperEdge};
+use crate::{
+    autocontext::{AutoContextLoop, AutoContextStore, LoopConfig},
+    cass::{embedding::EmbeddingEngine, ContextSnapshot},
+    council::{
+        CouncilEvidence, CouncilEvidenceKind, CouncilFactory, Decision, ModeConfig, RalphVerdict,
+        StigmergicCouncilContext,
+    },
+    ollama_client::{OllamaClient, OllamaConfig},
+    personal::{
+        gateway::{Message, Platform},
+        prompt_defaults,
+    },
+    rlm::LivingPrompt,
+    social_memory::DataSensitivity,
+    tools::{RlmProcessTool, Tool, ToolCall as ToolCallEntry, ToolRegistry},
+    trace2skill::{self, ToolStepRecord, TrajectoryRecord},
+    AgentId, CouncilMember, DKSConfig, DKSSystem, DKSTickResult, EmbeddedGraphStore,
+    HyperStigmergicMorphogenesis, Proposal, RalphConfig, RalphCouncil, Role, CASS,
+};
 
 /// Max bytes of `MEMORY.md` injected per turn (keeps room for business pack + tools).
 const MAX_MEMORY_MD_INJECT_BYTES: usize = 12 * 1024;
@@ -81,6 +87,12 @@ pub struct EnhancedAgentConfig {
     /// Append each turn to `memory/journal/`. Override with `HSM_MEMORY_JOURNAL=1`.
     #[serde(default)]
     pub memory_journal: bool,
+    /// Enable Hermes bridge for real tool execution (web, terminal, browser). Override with `HSM_HERMES=1`.
+    #[serde(default)]
+    pub enable_hermes: bool,
+    /// Hermes Agent endpoint URL. Override with `HSM_HERMES_ENDPOINT`.
+    #[serde(default)]
+    pub hermes_endpoint: Option<String>,
 }
 
 impl Default for EnhancedAgentConfig {
@@ -96,6 +108,8 @@ impl Default for EnhancedAgentConfig {
             business_persona: None,
             heartbeat_interval_secs: None,
             memory_journal: false,
+            enable_hermes: false,
+            hermes_endpoint: None,
         }
     }
 }
@@ -179,6 +193,20 @@ pub struct EnhancedPersonalAgent {
     pub task_trail: super::task_trail::TaskTrail,
     /// Keyword → persona / system template (`config/prompt_routes.yaml`).
     prompt_router: Option<super::agent_memory_pipeline::PromptRouter>,
+    /// Hermes-style multi-turn agentic execution enabled (uses existing LLM + tool_registry).
+    pub hermes_enabled: bool,
+    /// Optional Hermes extension server client (for when the Hermes Agent daemon is running).
+    pub hermes_client: Option<HermesClient>,
+
+    // ── Honcho cross-session user inference ───────────────────────────────────
+    /// Shared HybridMemory used exclusively by the Honcho inference worker.
+    /// Stores `EntitySummary` entries for each peer across all sessions.
+    pub honcho_memory: std::sync::Arc<tokio::sync::RwLock<crate::memory::HybridMemory>>,
+    /// How many turns have been processed this process lifetime (drives inference cadence).
+    honcho_turn_count: u32,
+    /// Pre-rendered peer context block injected into the system prompt.
+    /// Refreshed at session start and after each inference pass.
+    pub honcho_peer_repr: Option<String>,
 }
 
 /// Tracks agent contributions for JouleWork compensation
@@ -228,10 +256,10 @@ impl EnhancedPersonalAgent {
     /// Initialize or load existing enhanced agent
     pub async fn initialize(base_path: impl AsRef<Path>) -> Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
-        
+
         // Ensure directory structure
         Self::ensure_structure(&base_path).await?;
-        
+
         // Try to load from LadybugDB first
         let (world, config) = if EmbeddedGraphStore::exists() {
             info!("Loading world from LadybugDB...");
@@ -354,9 +382,7 @@ impl EnhancedPersonalAgent {
             || agents_md_excerpt.is_some()
             || prompt_template_excerpt.is_some()
         {
-            info!(
-                "Loaded Hermes-style instruction excerpts (MEMORY/USER/AGENTS/prompt.template)"
-            );
+            info!("Loaded Hermes-style instruction excerpts (MEMORY/USER/AGENTS/prompt.template)");
         }
 
         let prompt_router = super::agent_memory_pipeline::PromptRouter::try_load(
@@ -364,7 +390,50 @@ impl EnhancedPersonalAgent {
         )
         .await;
 
-        info!("EnhancedPersonalAgent initialized with {} agents", world.agents.len());
+        // Hermes-style multi-turn agentic mode — uses existing LLM + tool_registry
+        let hermes_enabled = config.enable_hermes
+            || std::env::var("HSM_HERMES")
+                .map(|v| v.trim() == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+        // Optionally connect to the Hermes extension server for NousResearch tool ecosystem
+        let hermes_endpoint = config
+            .hermes_endpoint
+            .clone()
+            .or_else(|| std::env::var("HSM_HERMES_ENDPOINT").ok());
+        let hermes_client = if let Some(ref ep) = hermes_endpoint {
+            match hermes_bridge::HermesClientBuilder::new().endpoint(ep).build() {
+                Ok(client) => {
+                    info!("Hermes server client ready (endpoint: {})", ep);
+                    Some(client)
+                }
+                Err(e) => {
+                    warn!("Hermes server client init failed: {} — will use native tool loop", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if hermes_enabled {
+            if hermes_client.is_some() {
+                info!("Hermes agentic mode: server + native fallback (LLM: OpenRouter/Qwen)");
+            } else {
+                info!("Hermes agentic mode: native tool loop (LLM: OpenRouter/Qwen)");
+            }
+        }
+
+        info!(
+            "EnhancedPersonalAgent initialized with {} agents",
+            world.agents.len()
+        );
+
+        // ── Honcho: load or create shared HybridMemory ──────────────────────
+        let honcho_home = base_path.join("honcho");
+        let honcho_hybrid_mem =
+            crate::honcho::HonchoInferenceWorker::load_or_create_memory(&honcho_home).await;
+        let honcho_memory = std::sync::Arc::new(tokio::sync::RwLock::new(honcho_hybrid_mem));
 
         Ok(Self {
             base_path,
@@ -393,6 +462,11 @@ impl EnhancedPersonalAgent {
             last_autodream_tick: Instant::now(),
             task_trail,
             prompt_router,
+            hermes_enabled,
+            hermes_client,
+            honcho_memory,
+            honcho_turn_count: 0,
+            honcho_peer_repr: None,
         })
     }
 
@@ -423,11 +497,9 @@ impl EnhancedPersonalAgent {
             MAX_MEMORY_MD_INJECT_BYTES,
         )
         .await;
-        self.user_md_excerpt = Self::load_markdown_excerpt(
-            &self.base_path.join("USER.md"),
-            MAX_USER_MD_INJECT_BYTES,
-        )
-        .await;
+        self.user_md_excerpt =
+            Self::load_markdown_excerpt(&self.base_path.join("USER.md"), MAX_USER_MD_INJECT_BYTES)
+                .await;
         self.agents_md_excerpt = Self::load_markdown_excerpt(
             &self.base_path.join("AGENTS.md"),
             MAX_AGENTS_MD_INJECT_BYTES,
@@ -487,9 +559,7 @@ impl EnhancedPersonalAgent {
             || std::env::var("HSM_MEMORY_JOURNAL")
                 .map(|v| {
                     let t = v.trim();
-                    t == "1"
-                        || t.eq_ignore_ascii_case("true")
-                        || t.eq_ignore_ascii_case("yes")
+                    t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
                 })
                 .unwrap_or(false)
     }
@@ -568,6 +638,14 @@ impl EnhancedPersonalAgent {
             out.push_str(u);
             out.push('\n');
         }
+        // ── Honcho: inferred cross-session peer representation ─────────────
+        if let Some(ref repr) = self.honcho_peer_repr {
+            if !repr.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(repr);
+                out.push('\n');
+            }
+        }
         if let Some(ref a) = self.agents_md_excerpt {
             out.push_str("\n\n## Agent instructions (AGENTS.md)\n\n");
             out.push_str(a);
@@ -627,7 +705,8 @@ impl EnhancedPersonalAgent {
                 s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
             })
             .unwrap_or(false);
-        self.draft_email_reply_with_options(inbound_raw, simple).await
+        self.draft_email_reply_with_options(inbound_raw, simple)
+            .await
     }
 
     /// Same as [`Self::draft_email_reply`], but `simple` is explicit (e.g. HTTP API) instead of only `HSM_EMAIL_DRAFT_SIMPLE`.
@@ -724,11 +803,7 @@ impl EnhancedPersonalAgent {
 
             if let Some(idx) = text.find("FINAL_DRAFT") {
                 let rest = text[idx + "FINAL_DRAFT".len()..].trim();
-                let body = rest
-                    .strip_prefix(':')
-                    .map(str::trim)
-                    .unwrap_or(rest)
-                    .trim();
+                let body = rest.strip_prefix(':').map(str::trim).unwrap_or(rest).trim();
                 if !body.is_empty() {
                     return Ok(body.to_string());
                 }
@@ -755,10 +830,8 @@ impl EnhancedPersonalAgent {
                                 .clone()
                                 .unwrap_or_else(|| "tool failed".into())
                         };
-                        scratch.push_str(&format!(
-                            "\n--- tool `{}` ---\n{}\n",
-                            tool_name, tool_out
-                        ));
+                        scratch
+                            .push_str(&format!("\n--- tool `{}` ---\n{}\n", tool_name, tool_out));
                         user_msg = format!(
                             "Accumulated tool output:{scratch}\n\n\
                             Either call **one** more tool as JSON (tools: {:?}), or output `FINAL_DRAFT` and the reply body.\n",
@@ -793,25 +866,27 @@ impl EnhancedPersonalAgent {
     }
 
     /// Create a new world with configured agents
-    pub(crate) async fn create_new_world(config: &EnhancedAgentConfig) -> Result<HyperStigmergicMorphogenesis> {
+    pub(crate) async fn create_new_world(
+        config: &EnhancedAgentConfig,
+    ) -> Result<HyperStigmergicMorphogenesis> {
         let mut world = HyperStigmergicMorphogenesis::new(config.agent_count);
-        
+
         // Assign specific roles to agents
         let roles = vec![
-            Role::Architect,   // Structure and coherence
-            Role::Catalyst,    // Innovation and novelty
-            Role::Chronicler,  // Memory and documentation
-            Role::Critic,      // Risk assessment
-            Role::Explorer,    // Diversity and exploration
+            Role::Architect,  // Structure and coherence
+            Role::Catalyst,   // Innovation and novelty
+            Role::Chronicler, // Memory and documentation
+            Role::Critic,     // Risk assessment
+            Role::Explorer,   // Diversity and exploration
         ];
-        
+
         for (i, agent) in world.agents.iter_mut().enumerate() {
             if i < roles.len() {
                 agent.role = roles[i].clone();
                 agent.description = format!("{:?} specializing in personal assistance", roles[i]);
             }
         }
-        
+
         // Initialize with some default beliefs
         let content0 = "The user is a human seeking assistance from a multi-agent system";
         let (l0_0, l1_0) = crate::memory::derive_hierarchy(content0);
@@ -852,7 +927,7 @@ impl EnhancedPersonalAgent {
             evidence_belief_ids: Vec::new(),
             human_committed: false,
         });
-        
+
         // Create initial hyperedges for connectivity
         for i in 0..config.agent_count.min(5) {
             let next = (i + 1) % config.agent_count;
@@ -875,7 +950,7 @@ impl EnhancedPersonalAgent {
 
         Ok(world)
     }
-    
+
     /// Initialize runtime services
     /// Reload `world.skill_bank` from `EmbeddedGraphStore` if `HSM_SKILL_BANK_RELOAD_SECS` elapsed.
     async fn maybe_reload_skill_bank_from_disk(&mut self) {
@@ -905,25 +980,26 @@ impl EnhancedPersonalAgent {
                 } else {
                     self.services.cass = cass;
                     self.services.cass_initialized = true;
-                    info!("Skill bank reloaded from disk (HSM_SKILL_BANK_RELOAD_SECS={})", interval);
+                    info!(
+                        "Skill bank reloaded from disk (HSM_SKILL_BANK_RELOAD_SECS={})",
+                        interval
+                    );
                 }
             }
             Err(e) => warn!("Skill bank reload skipped: {}", e),
         }
     }
 
-    async fn initialize_services(
-        world: &HyperStigmergicMorphogenesis,
-    ) -> Result<RuntimeServices> {
+    async fn initialize_services(world: &HyperStigmergicMorphogenesis) -> Result<RuntimeServices> {
         // Initialize DKS
         let dks = DKSSystem::new(DKSConfig::default());
-        
+
         // Initialize CASS with skill bank from world
         let cass = CASS::new(world.skill_bank.clone());
-        
+
         // Initialize embedding engine
         let embedding_engine = EmbeddingEngine::new();
-        
+
         Ok(RuntimeServices {
             dks,
             cass,
@@ -932,7 +1008,7 @@ impl EnhancedPersonalAgent {
             cass_initialized: false,
         })
     }
-    
+
     /// Process incoming message with full HSM-II pipeline
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
         self.maybe_reload_skill_bank_from_disk().await;
@@ -950,7 +1026,7 @@ impl EnhancedPersonalAgent {
 
         let start_time = Instant::now();
         let message_id = msg.id.clone();
-        
+
         // Create message context
         let mut context = MessageContext {
             message_id: message_id.clone(),
@@ -964,7 +1040,7 @@ impl EnhancedPersonalAgent {
             start_time,
             joulework_contributions: HashMap::new(),
         };
-        
+
         // Check for special commands first
         let response = if msg.content.trim_start().starts_with("/email answer")
             || msg.content.trim_start().starts_with("/email reply")
@@ -1038,19 +1114,40 @@ impl EnhancedPersonalAgent {
         } else if self.should_use_ralph(&msg.content) {
             // Auto-detect coding tasks for Ralph Loop
             info!("Auto-detected coding task, using Ralph Loop");
-            self.process_with_ralph(&msg, &mut context, &msg.content).await?
+            self.process_with_ralph(&msg, &mut context, &msg.content)
+                .await?
         } else if self.should_use_rlm(&msg.content) {
             // Auto-detect large document processing
             info!("Auto-detected document processing, using RLM");
             self.process_with_rlm(&msg, &mut context).await?
+        } else if msg.content.starts_with("/hermes ") || msg.content.trim() == "/hermes" {
+            // Explicit Hermes execution command
+            let task = msg.content.trim_start_matches("/hermes").trim().to_string();
+            if task.is_empty() {
+                AgentResponse {
+                    content: "Usage: /hermes <task>\n\nRuns the task through the Hermes Agent with real tools (web search, terminal, browser).\nRequires Hermes Agent running at HSM_HERMES_ENDPOINT (default: http://localhost:8000).".to_string(),
+                    primary_agent: 0,
+                    council_used: false,
+                    confidence: 1.0,
+                    skills_used: vec![],
+                    joulework_contributions: HashMap::new(),
+                    processing_time_ms: 0,
+                }
+            } else {
+                self.process_with_hermes(&msg, &mut context, &task).await?
+            }
         } else if self.should_use_council(&msg.content) && self.config.enable_council {
             // Complex decision - use council
             self.process_with_council(&msg, &mut context).await?
+        } else if self.should_use_hermes(&msg.content) && self.hermes_enabled {
+            // Auto-detected real-world task (web, terminal, files) — route to Hermes
+            let content = msg.content.clone();
+            self.process_with_hermes(&msg, &mut context, &content).await?
         } else {
             // Simple query - use single agent with CASS skills
             self.process_with_skills(&msg, &mut context).await?
         };
-        
+
         // Track JouleWork contributions
         self.track_contributions(&context, &response).await?;
 
@@ -1081,8 +1178,10 @@ impl EnhancedPersonalAgent {
         }
 
         // Update chat history for conversation context (keep last 20 exchanges)
-        self.chat_history.push(("user".to_string(), msg.content.clone()));
-        self.chat_history.push(("assistant".to_string(), response.content.clone()));
+        self.chat_history
+            .push(("user".to_string(), msg.content.clone()));
+        self.chat_history
+            .push(("assistant".to_string(), response.content.clone()));
         if self.chat_history.len() > 40 {
             // Trim oldest messages, keep last 40 entries (20 exchanges)
             let drain_count = self.chat_history.len() - 40;
@@ -1098,18 +1197,27 @@ impl EnhancedPersonalAgent {
                 &mut self.living_prompt,
                 &msg.content,
                 &response.content,
-            ).await;
+            )
+            .await;
             if extracted_count > 0 {
-                info!("Post-chat extraction: learned {} new belief(s)", extracted_count);
+                info!(
+                    "Post-chat extraction: learned {} new belief(s)",
+                    extracted_count
+                );
             }
         }
 
         // Social memory: record promise if agent committed to something
         {
-            let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let now_ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let lower_resp = response.content.to_lowercase();
-            let made_commitment = lower_resp.contains("i'll ") || lower_resp.contains("i will ")
-                || lower_resp.contains("let me ") || lower_resp.contains("here's what i'll do");
+            let made_commitment = lower_resp.contains("i'll ")
+                || lower_resp.contains("i will ")
+                || lower_resp.contains("let me ")
+                || lower_resp.contains("here's what i'll do");
             if made_commitment {
                 let agent_id = response.primary_agent;
                 let promise_id = self.world.social_memory.record_promise(
@@ -1121,15 +1229,24 @@ impl EnhancedPersonalAgent {
                     now_ts,
                     None,
                 );
-                info!("Social memory: recorded promise {} from agent {}", promise_id, agent_id);
+                info!(
+                    "Social memory: recorded promise {} from agent {}",
+                    promise_id, agent_id
+                );
             }
 
             // Resolve previous promises if response indicates completion
-            let completed = lower_resp.contains("done") || lower_resp.contains("completed")
-                || lower_resp.contains("here's the result") || lower_resp.contains("finished");
+            let completed = lower_resp.contains("done")
+                || lower_resp.contains("completed")
+                || lower_resp.contains("here's the result")
+                || lower_resp.contains("finished");
             if completed {
                 // Find and resolve pending promises from this agent
-                let pending: Vec<String> = self.world.social_memory.promises.iter()
+                let pending: Vec<String> = self
+                    .world
+                    .social_memory
+                    .promises
+                    .iter()
                     .filter(|(_, p)| p.status == crate::social_memory::PromiseStatus::Pending)
                     .map(|(id, _)| id.clone())
                     .collect();
@@ -1191,21 +1308,30 @@ impl EnhancedPersonalAgent {
         {
             let _coherence = self.world.global_coherence();
             let outcome = if response.confidence > 0.7 {
-                ExperienceOutcome::Positive { coherence_delta: response.confidence - 0.5 }
+                ExperienceOutcome::Positive {
+                    coherence_delta: response.confidence - 0.5,
+                }
             } else {
-                ExperienceOutcome::Negative { coherence_delta: response.confidence - 0.5 }
+                ExperienceOutcome::Negative {
+                    coherence_delta: response.confidence - 0.5,
+                }
             };
             let desc = msg.content[..msg.content.len().min(200)].to_string();
             let (exp_l0, exp_l1) = crate::memory::derive_hierarchy(&desc);
             let exp = Experience {
                 id: self.world.experiences.len(),
                 description: desc,
-                context: format!("council={} skills={:?} confidence={:.2}",
-                    response.council_used, response.skills_used, response.confidence),
+                context: format!(
+                    "council={} skills={:?} confidence={:.2}",
+                    response.council_used, response.skills_used, response.confidence
+                ),
                 abstract_l0: Some(exp_l0),
                 overview_l1: Some(exp_l1),
                 outcome,
-                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
                 tick: self.world.tick_count,
                 embedding: None,
             };
@@ -1218,8 +1344,11 @@ impl EnhancedPersonalAgent {
                     &self.world.improvement_history,
                 );
                 if result.new_skills > 0 {
-                    info!("CASS: Distilled {} new skills from {} experiences",
-                        result.new_skills, self.world.experiences.len());
+                    info!(
+                        "CASS: Distilled {} new skills from {} experiences",
+                        result.new_skills,
+                        self.world.experiences.len()
+                    );
                     self.agent_metrics.skills_distilled += result.new_skills as u64;
                 }
             }
@@ -1229,8 +1358,10 @@ impl EnhancedPersonalAgent {
         if self.config.enable_dks && (response.council_used || response.confidence > 0.8) {
             let dks_tick = self.services.dks.tick();
             self.services.last_dks_tick = Some(dks_tick);
-            info!("DKS: Event-driven evolution tick (council={}, confidence={:.2})",
-                response.council_used, response.confidence);
+            info!(
+                "DKS: Event-driven evolution tick (council={}, confidence={:.2})",
+                response.council_used, response.confidence
+            );
         }
 
         // RLM: Feed message into living prompt for context tracking
@@ -1263,9 +1394,13 @@ impl EnhancedPersonalAgent {
                 "Processed {} messages. Confidence: {:.2}. Skills used: {:?}",
                 self.messages_since_reflection, response.confidence, response.skills_used
             );
-            self.living_prompt.evolve(&summary, coherence_before, coherence_after);
+            self.living_prompt
+                .evolve(&summary, coherence_before, coherence_after);
             self.messages_since_reflection = 0;
-            info!("RLM: Living prompt evolved (coherence {:.4} → {:.4})", coherence_before, coherence_after);
+            info!(
+                "RLM: Living prompt evolved (coherence {:.4} → {:.4})",
+                coherence_before, coherence_after
+            );
         }
 
         self.post_turn_hooks(&msg, &response);
@@ -1287,6 +1422,50 @@ impl EnhancedPersonalAgent {
                     tracing::warn!(target: "hsm_memory_extract", "{}", e);
                 }
             });
+        }
+
+        // ── Honcho: cross-session user inference (HSM_HONCHO=1) ──────────────
+        // Runs an async inference pass over today's journal every N turns,
+        // extracting a psychological profile of the user and upserting it into
+        // the EntitySummary network of the shared HybridMemory.
+        if std::env::var("HSM_HONCHO")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false)
+        {
+            self.honcho_turn_count = self.honcho_turn_count.saturating_add(1);
+            let interval: u32 = std::env::var("HSM_HONCHO_INTERVAL")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(10);
+
+            // Load peer representation on the first turn of a session
+            if self.honcho_turn_count == 1 || self.honcho_peer_repr.is_none() {
+                let worker = crate::honcho::HonchoInferenceWorker::new(
+                    &self.base_path,
+                    std::sync::Arc::clone(&self.honcho_memory),
+                );
+                let peer_id = msg.user_id.clone();
+                match worker.load_peer_context(&peer_id).await {
+                    Ok(repr) => {
+                        let block = repr.render_context(4096);
+                        self.honcho_peer_repr = if block.is_empty() { None } else { Some(block) };
+                    }
+                    Err(e) => warn!("honcho: load_peer_context failed: {e}"),
+                }
+            }
+
+            // Every N turns: fire-and-forget inference pass
+            if self.honcho_turn_count % interval == 0 {
+                let worker = crate::honcho::HonchoInferenceWorker::new(
+                    &self.base_path,
+                    std::sync::Arc::clone(&self.honcho_memory),
+                );
+                let peer_id = msg.user_id.clone();
+                worker.spawn_post_session_from_journal(peer_id);
+            }
         }
 
         // Save if needed
@@ -1316,70 +1495,320 @@ impl EnhancedPersonalAgent {
 
         Ok(response.content)
     }
-    
+
     /// Determine if message requires council deliberation
     fn should_use_council(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
-        
+
         // Keywords that suggest complexity
         let complex_keywords = [
-            "should i", "decide", "choose between", "compare", "analyze",
-            "strategy", "plan", "design", "architecture", "important",
-            "consequences", "risk", "complex", "multi-step", "coordinate",
+            "should i",
+            "decide",
+            "choose between",
+            "compare",
+            "analyze",
+            "strategy",
+            "plan",
+            "design",
+            "architecture",
+            "important",
+            "consequences",
+            "risk",
+            "complex",
+            "multi-step",
+            "coordinate",
         ];
-        
+
         // Check for complex indicators
         let has_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));
         let is_long = content.len() > 200;
         let has_multiple_questions = content.matches('?').count() > 1;
-        
+
         has_complex_keyword || (is_long && has_multiple_questions)
     }
-    
+
     /// Determine if message should use Ralph Loop (coding tasks)
     fn should_use_ralph(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
 
         // Keywords that suggest coding/development tasks
         let coding_keywords = [
-            "code", "program", "function", "implement", "refactor",
-            "bug", "fix", "debug", "error", "compile", "build",
-            "write a script", "create a tool", "develop", "class",
-            "rust", "python", "javascript", "typescript", "java",
-            "file processing", "parse", "extract", "transform",
+            "code",
+            "program",
+            "function",
+            "implement",
+            "refactor",
+            "bug",
+            "fix",
+            "debug",
+            "error",
+            "compile",
+            "build",
+            "write a script",
+            "create a tool",
+            "develop",
+            "class",
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "java",
+            "file processing",
+            "parse",
+            "extract",
+            "transform",
         ];
-        
+
         // Check for coding indicators
         let has_coding_keyword = coding_keywords.iter().any(|kw| lower.contains(kw));
-        let mentions_file_with_code = lower.contains("file") && (lower.contains("code") || lower.contains("script"));
-        let asks_for_implementation = lower.contains("implement") || lower.contains("write") || lower.contains("create");
-        
+        let mentions_file_with_code =
+            lower.contains("file") && (lower.contains("code") || lower.contains("script"));
+        let asks_for_implementation =
+            lower.contains("implement") || lower.contains("write") || lower.contains("create");
+
         // Ralph is best for implementation tasks that may need iteration
         (has_coding_keyword && asks_for_implementation) || mentions_file_with_code
     }
-    
+
     /// Determine if message should use RLM (large document processing)
     fn should_use_rlm(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
-        
+
         // Keywords that suggest large document processing
         let document_keywords = [
-            "summarize", "analyze document", "process file",
-            "read file", "extract from", "scan document",
-            "large text", "long document", "multiple files",
-            "directory", "folder", "codebase", "repository",
+            "summarize",
+            "analyze document",
+            "process file",
+            "read file",
+            "extract from",
+            "scan document",
+            "large text",
+            "long document",
+            "multiple files",
+            "directory",
+            "folder",
+            "codebase",
+            "repository",
         ];
-        
+
         // File extensions that suggest large documents
         let document_extensions = [".txt", ".md", ".pdf", ".doc", ".csv", ".json", ".xml"];
-        
+
         let has_doc_keyword = document_keywords.iter().any(|kw| lower.contains(kw));
         let mentions_file = document_extensions.iter().any(|ext| lower.contains(ext));
-        let mentions_directory = lower.contains("/") || lower.contains("\\") || lower.contains("directory");
-        
+        let mentions_directory =
+            lower.contains("/") || lower.contains("\\") || lower.contains("directory");
+
         has_doc_keyword || mentions_file || mentions_directory
     }
-    
+
+    /// Determine if message should be routed to Hermes for real tool execution
+    fn should_use_hermes(&self, content: &str) -> bool {
+        let lower = content.to_lowercase();
+        let real_world_keywords = [
+            "search the web",
+            "google",
+            "browse",
+            "open browser",
+            "download",
+            "fetch url",
+            "visit website",
+            "run command",
+            "run terminal",
+            "execute shell",
+            "bash command",
+            "curl",
+            "install package",
+            "npm install",
+            "pip install",
+            "cargo install",
+            "take screenshot",
+        ];
+        real_world_keywords.iter().any(|kw| lower.contains(kw))
+    }
+
+    /// Multi-turn agentic execution with two strategies:
+    /// 1. If Hermes extension server is available → delegate to NousResearch Hermes (web, browser, terminal)
+    /// 2. Otherwise → native multi-turn tool loop via existing LLM (OpenRouter/Qwen) + tool_registry
+    async fn process_with_hermes(
+        &mut self,
+        _msg: &Message,
+        context: &mut MessageContext,
+        task: &str,
+    ) -> Result<AgentResponse> {
+        let start = Instant::now();
+
+        // Strategy 1: Try the Hermes extension server if available
+        if let Some(ref hermes) = self.hermes_client {
+            info!("Hermes server mode: delegating to extension server");
+            context.skills_accessed.push("hermes_server".to_string());
+            match hermes.execute(task).await {
+                Ok(output) => {
+                    info!("Hermes server completed task in {:.1}s", start.elapsed().as_secs_f64());
+                    return Ok(AgentResponse {
+                        content: format!("{output}\n\n---\n*Hermes server, {:.1}s*", start.elapsed().as_secs_f64()),
+                        primary_agent: 0,
+                        council_used: false,
+                        confidence: 0.9,
+                        skills_used: vec!["hermes_server".to_string()],
+                        joulework_contributions: HashMap::new(),
+                        processing_time_ms: start.elapsed().as_millis() as u64,
+                    });
+                }
+                Err(e) => {
+                    warn!("Hermes server failed ({}), falling back to native tool loop", e);
+                }
+            }
+        }
+
+        // Strategy 2: Native multi-turn tool loop (OpenRouter/Qwen + tool_registry)
+        let max_turns: usize = std::env::var("HSM_HERMES_MAX_TURNS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+
+        info!("Hermes native loop: {}", &task[..task.len().min(80)]);
+        context.skills_accessed.push("hermes_agentic".to_string());
+
+        // Build tool schema list for the system prompt
+        let tools_description = self
+            .tool_registry
+            .list_tools()
+            .iter()
+            .map(|(name, desc)| format!("- {}: {}", name, desc))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system_prompt = format!(
+            "You are an autonomous agent with access to real tools. Complete the user's task by calling tools as needed.\n\n\
+             ## Available Tools\n{tools_description}\n\n\
+             ## Tool Calling Format\n\
+             To call a tool, respond with ONLY a JSON object:\n\
+             {{\"tool\": \"tool_name\", \"parameters\": {{\"param\": \"value\"}}}}\n\n\
+             ## Rules\n\
+             - Call ONE tool at a time, wait for the result, then decide next step.\n\
+             - When the task is COMPLETE, respond with a normal text summary (no JSON).\n\
+             - If a tool fails, try an alternative approach.\n\
+             - Be concise. Do not explain what you will do — just do it."
+        );
+
+        let mut conversation: Vec<(String, String)> = Vec::new();
+        let mut current_query = task.to_string();
+        let mut final_content = String::new();
+        let mut tools_executed: Vec<String> = Vec::new();
+
+        for turn in 0..max_turns {
+            let llm_result = self
+                .llm
+                .chat(&system_prompt, &current_query, &conversation)
+                .await;
+
+            if llm_result.timed_out || llm_result.text.is_empty() {
+                if turn == 0 {
+                    final_content = format!(
+                        "LLM unavailable for agentic execution of: '{}'",
+                        task
+                    );
+                }
+                break;
+            }
+
+            let response_text = Self::clean_response(&llm_result.text);
+
+            // Try to parse a tool call from the response
+            let json_candidate = Self::extract_tool_call_json(&response_text);
+            if let Some(json) = json_candidate {
+                if let (Some(tool_name), Some(params)) = (
+                    json.get("tool").and_then(|v| v.as_str()),
+                    json.get("parameters"),
+                ) {
+                    if self.tool_registry.has(tool_name) {
+                        info!("Hermes turn {}: calling tool {}", turn + 1, tool_name);
+                        let call = ToolCallEntry {
+                            name: tool_name.to_string(),
+                            parameters: params.clone(),
+                            call_id: uuid::Uuid::new_v4().to_string(),
+                        };
+
+                        let result = self.tool_registry.execute(call).await;
+                        tools_executed.push(tool_name.to_string());
+
+                        // Record for trace2skill
+                        let args_redacted = serde_json::to_string(
+                            &trace2skill::redact_params(&result.call.parameters),
+                        )
+                        .unwrap_or_else(|_| "{}".to_string());
+                        let result_summary = trace2skill::summarize_tool_output(
+                            result.output.success,
+                            &result.output.result,
+                            result.output.error.as_deref(),
+                        );
+                        context.tool_steps.push(ToolStepRecord {
+                            name: tool_name.to_string(),
+                            args_redacted,
+                            ok: result.output.success,
+                            result_summary,
+                        });
+
+                        let tool_output = if result.output.success {
+                            result.output.result.clone()
+                        } else {
+                            format!(
+                                "ERROR: {}",
+                                result.output.error.as_deref().unwrap_or("Tool execution failed")
+                            )
+                        };
+
+                        // Feed tool result back as next user message
+                        conversation.push(("assistant".to_string(), response_text.clone()));
+                        current_query = format!(
+                            "Tool '{}' returned:\n{}\n\nContinue with the task or provide the final answer.",
+                            tool_name, tool_output
+                        );
+                        continue;
+                    } else {
+                        warn!("Hermes turn {}: unknown tool '{}'", turn + 1, tool_name);
+                        conversation.push(("assistant".to_string(), response_text.clone()));
+                        current_query = format!(
+                            "Tool '{}' does not exist. Pick from the available tools list.",
+                            tool_name
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // No tool call detected — this is the final answer
+            final_content = response_text;
+            break;
+        }
+
+        if final_content.is_empty() {
+            final_content = "Hermes agentic loop ended without a final answer (max turns reached).".to_string();
+        }
+
+        let suffix = if !tools_executed.is_empty() {
+            format!(
+                "\n\n---\n*Hermes: {} tool calls ({}) in {:.1}s*",
+                tools_executed.len(),
+                tools_executed.join(", "),
+                start.elapsed().as_secs_f64()
+            )
+        } else {
+            String::new()
+        };
+
+        Ok(AgentResponse {
+            content: format!("{final_content}{suffix}"),
+            primary_agent: 0,
+            council_used: false,
+            confidence: if tools_executed.is_empty() { 0.6 } else { 0.85 },
+            skills_used: vec!["hermes_agentic".to_string()],
+            joulework_contributions: HashMap::new(),
+            processing_time_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
     /// Process message using Ralph Loop (worker-reviewer pattern)
     async fn process_with_ralph(
         &mut self,
@@ -1388,9 +1817,9 @@ impl EnhancedPersonalAgent {
         task: &str,
     ) -> Result<AgentResponse> {
         info!("Using Ralph Loop for message: {}", msg.id);
-        
+
         let start = Instant::now();
-        
+
         // Create Ralph Council
         let council_id = uuid::Uuid::new_v4();
         let config = RalphConfig {
@@ -1398,16 +1827,16 @@ impl EnhancedPersonalAgent {
             state_dir: self.base_path.join("ralph"),
             ..Default::default()
         };
-        
+
         let mut ralph = RalphCouncil::new(council_id, config);
-        
+
         // Run Ralph Loop
         match ralph.execute(task).await {
             Ok((verdict, decision)) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
-                
+
                 context.council_used = true;
-                
+
                 let content = match verdict {
                     RalphVerdict::Ship => {
                         format!(
@@ -1434,7 +1863,7 @@ impl EnhancedPersonalAgent {
                         )
                     }
                 };
-                
+
                 Ok(AgentResponse {
                     content,
                     primary_agent: 0,
@@ -1459,7 +1888,7 @@ impl EnhancedPersonalAgent {
             }
         }
     }
-    
+
     /// Process message using RLM for large documents
     async fn process_with_rlm(
         &mut self,
@@ -1467,12 +1896,12 @@ impl EnhancedPersonalAgent {
         _context: &mut MessageContext,
     ) -> Result<AgentResponse> {
         info!("Using RLM for message: {}", msg.id);
-        
+
         let start = Instant::now();
-        
+
         // Extract file path from message
         let file_path = self.extract_file_path(&msg.content);
-        
+
         if file_path.is_none() {
             return Ok(AgentResponse {
                 content: "📄 **RLM Document Processing**\n\nPlease specify a file path.\n\nExample: `Process this file: ./documents/report.txt`".to_string(),
@@ -1484,10 +1913,10 @@ impl EnhancedPersonalAgent {
                 processing_time_ms: 0,
             });
         }
-        
+
         let file_path = file_path.unwrap();
         let query = self.extract_query(&msg.content);
-        
+
         // Use RLM tool
         let tool = RlmProcessTool::new();
         let params = json!({
@@ -1495,21 +1924,18 @@ impl EnhancedPersonalAgent {
             "query": query,
             "source_type": "file"
         });
-        
+
         let output = tool.execute(params).await;
-        
+
         let content = if output.success {
-            format!(
-                "📊 **RLM Analysis Complete**\n\n{}",
-                output.result
-            )
+            format!("📊 **RLM Analysis Complete**\n\n{}", output.result)
         } else {
             format!(
                 "❌ **RLM Processing Failed**\n\nError: {}",
                 output.error.unwrap_or_else(|| "Unknown error".to_string())
             )
         };
-        
+
         Ok(AgentResponse {
             content,
             primary_agent: 0,
@@ -1520,7 +1946,7 @@ impl EnhancedPersonalAgent {
             processing_time_ms: start.elapsed().as_millis() as u64,
         })
     }
-    
+
     /// Process RLM command with explicit arguments
     async fn process_with_rlm_command(
         &mut self,
@@ -1528,7 +1954,7 @@ impl EnhancedPersonalAgent {
         _context: &mut MessageContext,
     ) -> Result<AgentResponse> {
         let args = msg.content.trim_start_matches("/rlm").trim();
-        
+
         if args.is_empty() {
             return Ok(AgentResponse {
                 content: "Usage: /rlm <file_path> [query]\n\nExample: `/rlm ./document.txt summarize this`".to_string(),
@@ -1540,29 +1966,35 @@ impl EnhancedPersonalAgent {
                 processing_time_ms: 0,
             });
         }
-        
+
         // Parse args: first token is path, rest is query
         let parts: Vec<&str> = args.splitn(2, ' ').collect();
         let file_path = parts[0];
-        let query = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "Analyze this document".to_string());
-        
+        let query = parts
+            .get(1)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Analyze this document".to_string());
+
         let start = Instant::now();
-        
+
         let tool = RlmProcessTool::new();
         let params = json!({
             "source": file_path,
             "query": query,
             "source_type": "file"
         });
-        
+
         let output = tool.execute(params).await;
-        
+
         let content = if output.success {
             output.result
         } else {
-            format!("Error: {}", output.error.unwrap_or_else(|| "Unknown error".to_string()))
+            format!(
+                "Error: {}",
+                output.error.unwrap_or_else(|| "Unknown error".to_string())
+            )
         };
-        
+
         Ok(AgentResponse {
             content,
             primary_agent: 0,
@@ -1573,7 +2005,7 @@ impl EnhancedPersonalAgent {
             processing_time_ms: start.elapsed().as_millis() as u64,
         })
     }
-    
+
     /// Process tool command
     async fn process_tool_command(
         &mut self,
@@ -1581,14 +2013,15 @@ impl EnhancedPersonalAgent {
         _context: &mut MessageContext,
     ) -> Result<AgentResponse> {
         let args = msg.content.trim_start_matches("/tool").trim();
-        
+
         if args.is_empty() {
             // List available tools
             let tools = self.tool_registry.list_tools();
-            let tool_list: Vec<String> = tools.iter()
+            let tool_list: Vec<String> = tools
+                .iter()
                 .map(|(name, desc)| format!("- `{}`: {}", name, desc))
                 .collect();
-            
+
             return Ok(AgentResponse {
                 content: format!(
                     "🔧 **Available Tools** ({} total)\n\n{}\n\nUsage: `/tool <tool_name> <parameters>`",
@@ -1603,26 +2036,29 @@ impl EnhancedPersonalAgent {
                 processing_time_ms: 0,
             });
         }
-        
+
         // Parse tool name and parameters
         let parts: Vec<&str> = args.splitn(2, ' ').collect();
         let tool_name = parts[0];
         let params_str = parts.get(1).unwrap_or(&"{}");
-        
+
         // Try to parse parameters as JSON
         let params = serde_json::from_str(params_str).unwrap_or_else(|_| {
             // If not valid JSON, use as single parameter
             json!({ "input": params_str })
         });
-        
+
         let start = Instant::now();
-        
+
         // Execute tool
         let output = if let Some(tool) = self.tool_registry.get(tool_name) {
             tool.execute(params).await
         } else {
             return Ok(AgentResponse {
-                content: format!("❌ Unknown tool: `{}`\n\nUse `/tool` to list available tools.", tool_name),
+                content: format!(
+                    "❌ Unknown tool: `{}`\n\nUse `/tool` to list available tools.",
+                    tool_name
+                ),
                 primary_agent: 0,
                 council_used: false,
                 confidence: 0.0,
@@ -1631,13 +2067,17 @@ impl EnhancedPersonalAgent {
                 processing_time_ms: 0,
             });
         };
-        
+
         let content = if output.success {
             format!("✅ **Tool Result: {}**\n\n{}", tool_name, output.result)
         } else {
-            format!("❌ **Tool Error: {}**\n\n{}", tool_name, output.error.unwrap_or_else(|| "Unknown error".to_string()))
+            format!(
+                "❌ **Tool Error: {}**\n\n{}",
+                tool_name,
+                output.error.unwrap_or_else(|| "Unknown error".to_string())
+            )
         };
-        
+
         Ok(AgentResponse {
             content,
             primary_agent: 0,
@@ -1648,7 +2088,7 @@ impl EnhancedPersonalAgent {
             processing_time_ms: start.elapsed().as_millis() as u64,
         })
     }
-    
+
     /// Extract file path from message content
     fn extract_file_path(&self, content: &str) -> Option<String> {
         // Look for common file path patterns
@@ -1656,31 +2096,34 @@ impl EnhancedPersonalAgent {
             r"(?:file|path|document)[\s:]+([\w./\\~]+\.\w+)",
             r"(?:from|in|at)[\s:]+([\w./\\~]+\.\w+)",
         ];
-        
+
         for pattern in &patterns {
             if let Ok(re) = regex::Regex::new(pattern) {
                 if let Some(caps) = re.captures(content) {
                     if let Some(path) = caps.get(1) {
                         let path_str = path.as_str();
                         // Verify it looks like a file path
-                        if path_str.contains('.') || path_str.starts_with('/') || path_str.starts_with("./") {
+                        if path_str.contains('.')
+                            || path_str.starts_with('/')
+                            || path_str.starts_with("./")
+                        {
                             return Some(path_str.to_string());
                         }
                     }
                 }
             }
         }
-        
+
         // Fallback: look for words that look like paths
         for word in content.split_whitespace() {
             if (word.contains('/') || word.contains("\\")) && word.contains('.') {
                 return Some(word.to_string());
             }
         }
-        
+
         None
     }
-    
+
     /// Extract query from message content
     fn extract_query(&self, content: &str) -> String {
         // Remove file paths and common filler words
@@ -1689,11 +2132,11 @@ impl EnhancedPersonalAgent {
             .filter(|w| !(w.contains('/') || w.contains("\\")))
             .collect::<Vec<_>>()
             .join(" ");
-        
+
         // Extract action words
         let actions = ["summarize", "analyze", "extract", "find", "process", "read"];
         let lower = without_paths.to_lowercase();
-        
+
         for action in &actions {
             if lower.contains(action) {
                 // Return from the action word onwards
@@ -1702,11 +2145,11 @@ impl EnhancedPersonalAgent {
                 }
             }
         }
-        
+
         // Default query
         "Analyze this document".to_string()
     }
-    
+
     /// Process message using council deliberation with automatic mode selection
     async fn process_with_council(
         &mut self,
@@ -1716,7 +2159,10 @@ impl EnhancedPersonalAgent {
         info!("Using council deliberation for message: {}", msg.id);
 
         // Create members from world agents
-        let members: Vec<CouncilMember> = self.world.agents.iter()
+        let members: Vec<CouncilMember> = self
+            .world
+            .agents
+            .iter()
             .take(5)
             .map(|a| CouncilMember {
                 agent_id: a.id,
@@ -1755,8 +2201,10 @@ impl EnhancedPersonalAgent {
         // Use CouncilFactory for automatic mode selection (Debate/Orchestrate/Simple/LLM)
         // instead of hardcoding CouncilMode::Debate
         let mut council = self.council_factory.create_council(&proposal, members)?;
-        info!("Council mode selected: {:?} (complexity={:.2}, urgency={:.2})",
-              council.mode, proposal.complexity, proposal.urgency);
+        info!(
+            "Council mode selected: {:?} (complexity={:.2}, urgency={:.2})",
+            council.mode, proposal.complexity, proposal.urgency
+        );
 
         // Run evaluation
         let start = Instant::now();
@@ -1769,7 +2217,10 @@ impl EnhancedPersonalAgent {
 
         // Track agent contributions
         for member in &council.members {
-            let jw = self.world.agents.get(member.agent_id as usize)
+            let jw = self
+                .world
+                .agents
+                .get(member.agent_id as usize)
                 .map(|a| a.calculate_jw(self.world.global_coherence(), 3))
                 .unwrap_or(0.5);
             context.joulework_contributions.insert(member.agent_id, jw);
@@ -1827,7 +2278,7 @@ impl EnhancedPersonalAgent {
             processing_time_ms: deliberation_time,
         })
     }
-    
+
     /// Process message using CASS skills, tool execution, and single agent
     async fn process_with_skills(
         &mut self,
@@ -1854,7 +2305,13 @@ impl EnhancedPersonalAgent {
         let context_snapshot = ContextSnapshot {
             timestamp: current_timestamp(),
             active_agents: self.world.agents.iter().map(|a| a.id).collect(),
-            dominant_roles: self.world.agents.iter().take(3).map(|a| a.role.clone()).collect(),
+            dominant_roles: self
+                .world
+                .agents
+                .iter()
+                .take(3)
+                .map(|a| a.role.clone())
+                .collect(),
             current_goals: vec![msg.content.clone()],
             recent_skills_used: vec![],
             system_load: 0.5,
@@ -1865,7 +2322,11 @@ impl EnhancedPersonalAgent {
         self.services.cass.update_context(context_snapshot.clone());
 
         // Search for skills
-        let skill_matches = self.services.cass.search(&msg.content, Some(context_snapshot), 3).await;
+        let skill_matches = self
+            .services
+            .cass
+            .search(&msg.content, Some(context_snapshot), 3)
+            .await;
 
         // Select agent based on message type
         let selected_agent = self.select_agent_for_message(&msg.content);
@@ -1874,14 +2335,17 @@ impl EnhancedPersonalAgent {
         // Build enriched system prompt with RLM LivingPrompt + tool schemas
         let enriched_prompt = self.living_prompt.render();
         let mem = self.persistent_memory_addon();
-        let tools_description = self.tool_registry.list_tools()
+        let tools_description = self
+            .tool_registry
+            .list_tools()
             .iter()
             .map(|(name, desc)| format!("- {}: {}", name, desc))
             .collect::<Vec<_>>()
             .join("\n");
 
         let belief_context = if !beliefs.is_empty() {
-            let belief_strs: Vec<String> = beliefs.iter()
+            let belief_strs: Vec<String> = beliefs
+                .iter()
                 .take(3)
                 .map(|b| format!("- [{:.0}%] {}", b.confidence * 100.0, b.content))
                 .collect();
@@ -1893,7 +2357,10 @@ impl EnhancedPersonalAgent {
         let skill_context = if !skill_matches.is_empty() {
             let best = &skill_matches[0];
             context.skills_accessed.push(best.skill.id.clone());
-            format!("\n\n## Matched Skill: {} (score: {:.2})\n{}", best.skill.title, best.semantic_score, best.skill.principle)
+            format!(
+                "\n\n## Matched Skill: {} (score: {:.2})\n{}",
+                best.skill.title, best.semantic_score, best.skill.principle
+            )
         } else {
             String::new()
         };
@@ -1901,16 +2368,36 @@ impl EnhancedPersonalAgent {
         // Inject AutoContext hints for this query
         let ac_ctx = self.autocontext.retrieve_context(&msg.content);
         let autocontext_section = if !ac_ctx.hints.is_empty() || !ac_ctx.playbooks.is_empty() {
-            let hints_text = ac_ctx.hints.iter().take(3)
+            let hints_text = ac_ctx
+                .hints
+                .iter()
+                .take(3)
                 .map(|h| format!("- [hint {:.0}%] {}", h.confidence * 100.0, h.content))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let pb_text = ac_ctx.playbooks.iter().take(2)
-                .map(|p| format!("- [playbook {:.0}%] {}: {}", p.quality_score * 100.0, p.name, p.description))
+            let pb_text = ac_ctx
+                .playbooks
+                .iter()
+                .take(2)
+                .map(|p| {
+                    format!(
+                        "- [playbook {:.0}%] {}: {}",
+                        p.quality_score * 100.0,
+                        p.name,
+                        p.description
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("\n\n## AutoContext Guidance\n{}{}", hints_text,
-                if pb_text.is_empty() { String::new() } else { format!("\n{}", pb_text) })
+            format!(
+                "\n\n## AutoContext Guidance\n{}{}",
+                hints_text,
+                if pb_text.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", pb_text)
+                }
+            )
         } else {
             String::new()
         };
@@ -1962,11 +2449,17 @@ impl EnhancedPersonalAgent {
 
         // Generate response with tool-aware prompt
         let start = Instant::now();
-        let llm_result = self.llm.chat(&system_prompt, &msg.content, &self.chat_history).await;
+        let llm_result = self
+            .llm
+            .chat(&system_prompt, &msg.content, &self.chat_history)
+            .await;
 
         let mut final_content = if llm_result.timed_out || llm_result.text.is_empty() {
             // LLM unavailable fallback
-            format!("I'd like to help with '{}', but the LLM is currently unavailable.", msg.content)
+            format!(
+                "I'd like to help with '{}', but the LLM is currently unavailable.",
+                msg.content
+            )
         } else {
             Self::clean_response(&llm_result.text)
         };
@@ -1979,7 +2472,10 @@ impl EnhancedPersonalAgent {
             if let Some(tool_name) = json.get("tool").and_then(|v| v.as_str()) {
                 if let Some(params) = json.get("parameters") {
                     if self.tool_registry.has(tool_name) {
-                        info!("Tool call detected: {} with params: {:?}", tool_name, params);
+                        info!(
+                            "Tool call detected: {} with params: {:?}",
+                            tool_name, params
+                        );
                         let call = ToolCallEntry {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
@@ -1989,11 +2485,10 @@ impl EnhancedPersonalAgent {
                         let result = self.tool_registry.execute(call).await;
                         tool_used = true;
 
-                        let args_redacted =
-                            serde_json::to_string(&trace2skill::redact_params(
-                                &result.call.parameters,
-                            ))
-                            .unwrap_or_else(|_| "{}".to_string());
+                        let args_redacted = serde_json::to_string(&trace2skill::redact_params(
+                            &result.call.parameters,
+                        ))
+                        .unwrap_or_else(|_| "{}".to_string());
                         let result_summary = trace2skill::summarize_tool_output(
                             result.output.success,
                             &result.output.result,
@@ -2009,10 +2504,17 @@ impl EnhancedPersonalAgent {
                         let tool_output = if result.output.success {
                             result.output.result.clone()
                         } else {
-                            result.output.error.clone().unwrap_or_else(|| "Tool execution failed".to_string())
+                            result
+                                .output
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "Tool execution failed".to_string())
                         };
 
-                        info!("Tool {} executed: success={}", tool_name, result.output.success);
+                        info!(
+                            "Tool {} executed: success={}",
+                            tool_name, result.output.success
+                        );
 
                         // Feed tool result back to LLM for synthesis
                         let synthesis_prompt = format!(
@@ -2020,7 +2522,10 @@ impl EnhancedPersonalAgent {
                              Now provide a helpful, concise response to the user based on this result.",
                             tool_name, tool_output
                         );
-                        let synthesis = self.llm.chat(&system_prompt, &synthesis_prompt, &self.chat_history).await;
+                        let synthesis = self
+                            .llm
+                            .chat(&system_prompt, &synthesis_prompt, &self.chat_history)
+                            .await;
                         final_content = if synthesis.timed_out || synthesis.text.is_empty() {
                             // Fallback: return raw tool output
                             format!("[Tool: {}]\n{}", tool_name, tool_output)
@@ -2057,17 +2562,25 @@ impl EnhancedPersonalAgent {
             content: final_content,
             primary_agent: selected_agent,
             council_used: false,
-            confidence: if !skill_matches.is_empty() { skill_matches[0].semantic_score } else { 0.6 },
-            skills_used: skill_matches.into_iter().take(1).map(|s| s.skill.id).collect(),
+            confidence: if !skill_matches.is_empty() {
+                skill_matches[0].semantic_score
+            } else {
+                0.6
+            },
+            skills_used: skill_matches
+                .into_iter()
+                .take(1)
+                .map(|s| s.skill.id)
+                .collect(),
             joulework_contributions: context.joulework_contributions.clone(),
             processing_time_ms: processing_time,
         })
     }
-    
+
     /// Select best agent for a message based on content
     fn select_agent_for_message(&self, content: &str) -> AgentId {
         let lower = content.to_lowercase();
-        
+
         // Map content to roles
         let target_role = if lower.contains("code") || lower.contains("program") {
             Role::Coder
@@ -2075,16 +2588,22 @@ impl EnhancedPersonalAgent {
             Role::Chronicler
         } else if lower.contains("risk") || lower.contains("safe") || lower.contains("check") {
             Role::Critic
-        } else if lower.contains("explore") || lower.contains("discover") || lower.contains("find") {
+        } else if lower.contains("explore") || lower.contains("discover") || lower.contains("find")
+        {
             Role::Explorer
-        } else if lower.contains("structure") || lower.contains("organize") || lower.contains("plan") {
+        } else if lower.contains("structure")
+            || lower.contains("organize")
+            || lower.contains("plan")
+        {
             Role::Architect
         } else {
             Role::Catalyst // Default - handles general queries
         };
-        
+
         // Find agent with matching role and highest JW
-        self.world.agents.iter()
+        self.world
+            .agents
+            .iter()
             .filter(|a| a.role == target_role)
             .max_by(|a, b| {
                 let jwa = a.calculate_jw(self.world.global_coherence(), 3);
@@ -2094,7 +2613,7 @@ impl EnhancedPersonalAgent {
             .map(|a| a.id)
             .unwrap_or(0)
     }
-    
+
     /// True if the model output is (mostly) a single JSON tool call — not acceptable as email body.
     fn response_looks_like_tool_json(text: &str) -> bool {
         let t = text.trim();
@@ -2144,8 +2663,12 @@ impl EnhancedPersonalAgent {
     fn clean_response(text: &str) -> String {
         let mut cleaned = text.to_string();
         for token in &[
-            "<|end_header_id|>", "<|start_header_id|>", "<|eot_id|>",
-            "<|begin_of_text|>", "<|end_of_text|>", "<|finetune_right_pad_id|>",
+            "<|end_header_id|>",
+            "<|start_header_id|>",
+            "<|eot_id|>",
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|finetune_right_pad_id|>",
         ] {
             cleaned = cleaned.replace(token, "");
         }
@@ -2163,9 +2686,30 @@ impl EnhancedPersonalAgent {
     fn extract_search_keywords(&self, content: &str) -> Vec<String> {
         let lower = content.to_lowercase();
         let low_confidence = [
-            "discuss", "talk", "mention", "say", "tell", "yesterday", "last week", "recently",
-            "thing", "stuff", "issue", "problem", "conversation", "chat", "question", "did", "do",
-            "does", "what", "when", "where", "who", "why", "how",
+            "discuss",
+            "talk",
+            "mention",
+            "say",
+            "tell",
+            "yesterday",
+            "last week",
+            "recently",
+            "thing",
+            "stuff",
+            "issue",
+            "problem",
+            "conversation",
+            "chat",
+            "question",
+            "did",
+            "do",
+            "does",
+            "what",
+            "when",
+            "where",
+            "who",
+            "why",
+            "how",
         ];
         lower
             .split_whitespace()
@@ -2179,16 +2723,26 @@ impl EnhancedPersonalAgent {
     }
 
     /// Get relevant beliefs from world based on content (public for CLI access)
-    pub async fn get_relevant_beliefs(&self, content: &str) -> Result<Vec<crate::hyper_stigmergy::Belief>> {
+    pub async fn get_relevant_beliefs(
+        &self,
+        content: &str,
+    ) -> Result<Vec<crate::hyper_stigmergy::Belief>> {
         // Use extracted keywords when available (filters noise like "what", "when")
         let keywords = self.extract_search_keywords(content);
         let words: Vec<String> = if keywords.is_empty() {
-            content.to_lowercase().split_whitespace().map(|s| s.to_string()).collect()
+            content
+                .to_lowercase()
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             keywords
         };
 
-        let relevant: Vec<_> = self.world.beliefs.iter()
+        let relevant: Vec<_> = self
+            .world
+            .beliefs
+            .iter()
             .filter(|b| {
                 let belief_lower = b.content.to_lowercase();
                 let belief_words: Vec<&str> = belief_lower.split_whitespace().collect();
@@ -2200,7 +2754,7 @@ impl EnhancedPersonalAgent {
 
         Ok(relevant)
     }
-    
+
     /// Track JouleWork contributions
     pub(crate) async fn track_contributions(
         &mut self,
@@ -2210,7 +2764,7 @@ impl EnhancedPersonalAgent {
         if !self.config.track_joulework {
             return Ok(());
         }
-        
+
         for (agent_id, jw_score) in &response.joulework_contributions {
             if let Some(agent) = self.world.agents.get(*agent_id as usize) {
                 let record = JouleWorkRecord {
@@ -2229,16 +2783,18 @@ impl EnhancedPersonalAgent {
                     },
                     jw_score: *jw_score,
                     coherence_delta: 0.0, // Would track actual coherence change
-                    description: format!("Processed message: {}", 
-                        context.content.chars().take(50).collect::<String>()),
+                    description: format!(
+                        "Processed message: {}",
+                        context.content.chars().take(50).collect::<String>()
+                    ),
                 };
-                
+
                 self.agent_metrics.joulework_history.push(record);
             }
         }
-        
+
         self.agent_metrics.total_messages_processed += 1;
-        
+
         Ok(())
     }
 
@@ -2285,7 +2841,7 @@ impl EnhancedPersonalAgent {
             .insert(context.message_id.clone(), context);
         Ok(())
     }
-    
+
     /// Save state to LadybugDB if interval elapsed
     pub async fn maybe_save(&mut self) -> Result<()> {
         let elapsed = self.last_save.elapsed().as_secs();
@@ -2295,14 +2851,17 @@ impl EnhancedPersonalAgent {
         }
         Ok(())
     }
-    
+
     /// Start gateway for external communication
     /// Returns a channel receiver for processing messages
-    pub async fn start_gateway(&mut self, config: crate::personal::gateway::Config) -> Result<mpsc::Receiver<(Message, oneshot::Sender<String>)>> {
+    pub async fn start_gateway(
+        &mut self,
+        config: crate::personal::gateway::Config,
+    ) -> Result<mpsc::Receiver<(Message, oneshot::Sender<String>)>> {
         use crate::personal::gateway::Gateway;
-        
+
         let mut gateway = Gateway::new(config);
-        
+
         // Create channel for message passing (avoids circular reference)
         let (tx, rx) = mpsc::channel::<(Message, oneshot::Sender<String>)>(100);
 
@@ -2316,7 +2875,7 @@ impl EnhancedPersonalAgent {
 
         // Store gateway to keep it alive (critical fix!)
         self.gateway = Some(gateway);
-        
+
         Ok(rx)
     }
 
@@ -2341,7 +2900,7 @@ impl EnhancedPersonalAgent {
         info!("Save complete");
         Ok(())
     }
-    
+
     /// Get current world statistics
     pub fn get_stats(&self) -> WorldStats {
         WorldStats {
@@ -2354,7 +2913,7 @@ impl EnhancedPersonalAgent {
             council_invocations: self.agent_metrics.council_invocations,
         }
     }
-    
+
     /// Ensure directory structure exists
     async fn ensure_structure(base_path: &Path) -> Result<()> {
         tokio::fs::create_dir_all(base_path).await?;
@@ -2363,7 +2922,7 @@ impl EnhancedPersonalAgent {
         tokio::fs::create_dir_all(base_path.join("metrics")).await?;
         Ok(())
     }
-    
+
     /// Load configuration
     async fn load_config(base_path: &Path) -> Result<EnhancedAgentConfig> {
         let config_path = base_path.join("config.json");
@@ -2374,7 +2933,7 @@ impl EnhancedPersonalAgent {
             Ok(EnhancedAgentConfig::default())
         }
     }
-    
+
     /// Save configuration
     async fn save_config(&self) -> Result<()> {
         let config_path = self.base_path.join("config.json");
@@ -2387,7 +2946,7 @@ impl EnhancedPersonalAgent {
         .map_err(|e| anyhow::anyhow!(e))??;
         Ok(())
     }
-    
+
     /// Load metrics
     async fn load_metrics(base_path: &Path) -> Result<AgentMetrics> {
         let metrics_path = base_path.join("metrics").join("joulework.json");
@@ -2404,7 +2963,7 @@ impl EnhancedPersonalAgent {
             Ok(AgentMetrics::default())
         }
     }
-    
+
     /// Save metrics
     async fn save_metrics(&self) -> Result<()> {
         let metrics_path = self.base_path.join("metrics").join("joulework.json");

@@ -6,9 +6,9 @@
 //! Inspired by mcp_agent_mail architecture but integrated with HSM-II's
 //! native storage system.
 
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::hyper_stigmergy::{Belief, BeliefSource};
 
@@ -94,12 +94,12 @@ impl LadybugEmailStorage {
             base_path: base_path.as_ref().to_path_buf(),
         }
     }
-    
+
     /// Store an email in LadybugDB
     pub async fn store_email(&self, email: &StoredEmail) -> Result<()> {
         // Convert email to a belief for storage
         let _belief_id = format!("email_{}", email.id);
-        
+
         let content = format!(
             "Email from {} to {} on {}: {} - {}",
             email.from,
@@ -110,12 +110,14 @@ impl LadybugEmailStorage {
             email.subject,
             email.body_text.chars().take(200).collect::<String>()
         );
-        
+
         // Create belief
         let _belief = Belief {
             id: 0, // Will be assigned by world
             content: content.clone(),
-            confidence: email.classification.as_ref()
+            confidence: email
+                .classification
+                .as_ref()
                 .map(|c| c.confidence as f64)
                 .unwrap_or(0.7),
             source: BeliefSource::Observation,
@@ -137,31 +139,32 @@ impl LadybugEmailStorage {
             evidence_belief_ids: Vec::new(),
             human_committed: false,
         };
-        
+
         // Store as serialized JSON in the email folder
-        let email_path = self.base_path
+        let email_path = self
+            .base_path
             .join("emails")
             .join(&email.folder)
             .join(format!("{}.json", email.id));
-        
+
         tokio::fs::create_dir_all(email_path.parent().unwrap()).await?;
         let json = serde_json::to_string_pretty(email)?;
         tokio::fs::write(email_path, json).await?;
-        
+
         Ok(())
     }
-    
+
     /// Retrieve email by ID
     pub async fn get_email(&self, email_id: &str) -> Result<Option<StoredEmail>> {
         // Search in all folders
         let emails_dir = self.base_path.join("emails");
-        
+
         if !emails_dir.exists() {
             return Ok(None);
         }
-        
+
         let mut entries = tokio::fs::read_dir(emails_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 let email_path = entry.path().join(format!("{}.json", email_id));
@@ -172,41 +175,38 @@ impl LadybugEmailStorage {
                 }
             }
         }
-        
+
         Ok(None)
     }
-    
+
     /// Semantic search over emails
     pub async fn semantic_search(&self, query: &str, limit: usize) -> Result<Vec<StoredEmail>> {
         // For now, simple keyword search
         // In production, this would use the embedding index
         let emails_dir = self.base_path.join("emails");
-        
+
         if !emails_dir.exists() {
             return Ok(vec![]);
         }
-        
+
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
-        
+
         let mut entries = tokio::fs::read_dir(emails_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 let folder = entry.path();
                 let mut files = tokio::fs::read_dir(folder).await?;
-                
+
                 while let Some(file) = files.next_entry().await? {
                     if file.file_type().await?.is_file() {
                         let content = tokio::fs::read_to_string(file.path()).await?;
                         if let Ok(email) = serde_json::from_str::<StoredEmail>(&content) {
-                            let searchable = format!(
-                                "{} {} {}",
-                                email.subject,
-                                email.from,
-                                email.body_text
-                            ).to_lowercase();
-                            
+                            let searchable =
+                                format!("{} {} {}", email.subject, email.from, email.body_text)
+                                    .to_lowercase();
+
                             if searchable.contains(&query_lower) {
                                 results.push(email);
                                 if results.len() >= limit {
@@ -218,24 +218,28 @@ impl LadybugEmailStorage {
                 }
             }
         }
-        
+
         // Sort by timestamp (newest first)
         results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        
+
         Ok(results)
     }
-    
+
     /// Get emails by folder
-    pub async fn get_emails_by_folder(&self, folder: &str, limit: usize) -> Result<Vec<StoredEmail>> {
+    pub async fn get_emails_by_folder(
+        &self,
+        folder: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredEmail>> {
         let folder_path = self.base_path.join("emails").join(folder);
-        
+
         if !folder_path.exists() {
             return Ok(vec![]);
         }
-        
+
         let mut results = Vec::new();
         let mut entries = tokio::fs::read_dir(folder_path).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_file() {
                 let content = tokio::fs::read_to_string(entry.path()).await?;
@@ -247,28 +251,28 @@ impl LadybugEmailStorage {
                 }
             }
         }
-        
+
         // Sort by timestamp
         results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        
+
         Ok(results)
     }
-    
+
     /// Get thread by ID
     pub async fn get_thread(&self, thread_id: &str) -> Result<Vec<StoredEmail>> {
         let emails_dir = self.base_path.join("emails");
         let mut thread = Vec::new();
-        
+
         if !emails_dir.exists() {
             return Ok(thread);
         }
-        
+
         let mut entries = tokio::fs::read_dir(emails_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 let mut files = tokio::fs::read_dir(entry.path()).await?;
-                
+
                 while let Some(file) = files.next_entry().await? {
                     if file.file_type().await?.is_file() {
                         let content = tokio::fs::read_to_string(file.path()).await?;
@@ -281,47 +285,51 @@ impl LadybugEmailStorage {
                 }
             }
         }
-        
+
         // Sort by timestamp
         thread.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        
+
         Ok(thread)
     }
-    
+
     /// Store email classification
-    pub async fn store_classification(&self, email_id: &str, classification: &EmailClassification) -> Result<()> {
+    pub async fn store_classification(
+        &self,
+        email_id: &str,
+        classification: &EmailClassification,
+    ) -> Result<()> {
         if let Some(mut email) = self.get_email(email_id).await? {
             email.classification = Some(classification.clone());
             self.store_email(&email).await?;
         }
         Ok(())
     }
-    
+
     /// Get storage statistics
     pub async fn get_stats(&self) -> Result<StorageStats> {
         let emails_dir = self.base_path.join("emails");
-        
+
         if !emails_dir.exists() {
             return Ok(StorageStats::default());
         }
-        
+
         let mut total_emails = 0;
         let mut folder_counts = HashMap::new();
         let mut classified = 0;
-        
+
         let mut entries = tokio::fs::read_dir(emails_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 let folder_name = entry.file_name().to_string_lossy().to_string();
                 let mut count = 0;
                 let mut files = tokio::fs::read_dir(entry.path()).await?;
-                
+
                 while let Some(file) = files.next_entry().await? {
                     if file.file_type().await?.is_file() {
                         count += 1;
                         total_emails += 1;
-                        
+
                         // Check if classified
                         let content = tokio::fs::read_to_string(file.path()).await?;
                         if let Ok(email) = serde_json::from_str::<StoredEmail>(&content) {
@@ -331,38 +339,38 @@ impl LadybugEmailStorage {
                         }
                     }
                 }
-                
+
                 folder_counts.insert(folder_name, count);
             }
         }
-        
+
         Ok(StorageStats {
             total_emails,
             folder_counts,
             classified,
         })
     }
-    
+
     /// Vacuum and compact storage (remove duplicates, clean up)
     pub async fn vacuum(&self) -> Result<VacuumResult> {
         let emails_dir = self.base_path.join("emails");
-        
+
         if !emails_dir.exists() {
             return Ok(VacuumResult::default());
         }
-        
+
         let mut duplicates_removed = 0;
         let mut errors_fixed = 0;
-        
+
         // Simple vacuum: remove duplicate IDs
         let mut seen_ids = std::collections::HashSet::new();
-        
+
         let mut entries = tokio::fs::read_dir(emails_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 let mut files = tokio::fs::read_dir(entry.path()).await?;
-                
+
                 while let Some(file) = files.next_entry().await? {
                     if file.file_type().await?.is_file() {
                         let content = match tokio::fs::read_to_string(file.path()).await {
@@ -374,7 +382,7 @@ impl LadybugEmailStorage {
                                 continue;
                             }
                         };
-                        
+
                         if let Ok(email) = serde_json::from_str::<StoredEmail>(&content) {
                             if seen_ids.contains(&email.id) {
                                 // Remove duplicate
@@ -388,7 +396,7 @@ impl LadybugEmailStorage {
                 }
             }
         }
-        
+
         Ok(VacuumResult {
             duplicates_removed,
             errors_fixed,
@@ -414,12 +422,12 @@ pub struct VacuumResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_store_and_retrieve() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = LadybugEmailStorage::new(temp_dir.path());
-        
+
         let email = StoredEmail {
             id: "test-123".to_string(),
             thread_id: "thread-456".to_string(),
@@ -437,19 +445,19 @@ mod tests {
             in_reply_to: None,
             references: vec![],
         };
-        
+
         storage.store_email(&email).await.unwrap();
-        
+
         let retrieved = storage.get_email("test-123").await.unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().subject, "Test Email");
     }
-    
+
     #[tokio::test]
     async fn test_semantic_search() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = LadybugEmailStorage::new(temp_dir.path());
-        
+
         // Store a few emails
         for i in 0..5 {
             let email = StoredEmail {
@@ -471,7 +479,7 @@ mod tests {
             };
             storage.store_email(&email).await.unwrap();
         }
-        
+
         let results = storage.semantic_search("keyword", 10).await.unwrap();
         assert_eq!(results.len(), 5);
     }

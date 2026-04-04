@@ -112,7 +112,10 @@ async fn main() -> Result<()> {
         let out_path = drafts_dir.join(out_name);
         let header = format!(
             "# IMAP UID: {}\n# From: {}\n# Subject: {}\n# Source: {}\n\n",
-            uid, item.email.from, item.email.subject, eml_path.display()
+            uid,
+            item.email.from,
+            item.email.subject,
+            eml_path.display()
         );
         tokio::fs::write(&out_path, format!("{header}{draft}")).await?;
         info!(path = %out_path.display(), "wrote draft");

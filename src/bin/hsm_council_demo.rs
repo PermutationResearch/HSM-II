@@ -20,7 +20,9 @@ use hyper_stigmergy::llm::client::{LlmClient, LlmRequest, Message};
 
 #[derive(Parser, Debug)]
 #[command(name = "hsm-council-demo")]
-#[command(about = "Show multi-agent council + optional live LLM orchestration (no Hermes required)")]
+#[command(
+    about = "Show multi-agent council + optional live LLM orchestration (no Hermes required)"
+)]
 struct Cli {
     /// Call the configured LLM: orchestrator decomposes task, then parallel workers (+ synth if --complex).
     #[arg(long, default_value_t = false)]
@@ -155,8 +157,9 @@ async fn run_offline_demos(complex: bool) -> anyhow::Result<()> {
         preferred_tool: Some(GraphToolKind::VectorAnn),
         confidence: 0.82,
         require_council_review: true,
-        rationale: "Vector retrieval cluster matched Explorer-led spikes for similar federation tasks."
-            .into(),
+        rationale:
+            "Vector retrieval cluster matched Explorer-led spikes for similar federation tasks."
+                .into(),
         evidence: vec![CouncilEvidence {
             id: "ev-graph-1".into(),
             kind: CouncilEvidenceKind::GraphQuery,
@@ -223,7 +226,8 @@ fn resolve_model() -> String {
 
 async fn run_live_simple(client: &LlmClient, model: &str) -> anyhow::Result<()> {
     print_banner("Live — orchestrator + 2 parallel workers");
-    let task = "List three concrete steps to add request tracing (trace IDs) to a small Rust axum API.";
+    let task =
+        "List three concrete steps to add request tracing (trace IDs) to a small Rust axum API.";
 
     let orch_sys = "You are an orchestrator. Break the user's task into exactly 2 parallel sub-tasks for different specialists.\n\
         Output format (use these exact prefixes):\n\
@@ -285,12 +289,7 @@ Produce a phased delivery plan: security, data model, infra, and observability m
     println!("Orchestrator (4-way split):\n{decomposition}\n");
 
     let prefixes = ["TASK_A:", "TASK_B:", "TASK_C:", "TASK_D:"];
-    let mut subs = [
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    ];
+    let mut subs = [String::new(), String::new(), String::new(), String::new()];
     for line in decomposition.lines() {
         let t = line.trim();
         for (i, p) in prefixes.iter().enumerate() {

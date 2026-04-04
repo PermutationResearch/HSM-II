@@ -24,7 +24,7 @@ impl Tool for RlmProcessTool {
     fn name(&self) -> &str {
         "rlm_process"
     }
-    
+
     fn description(&self) -> &str {
         r#"Process large documents or codebases using the Recursive Language Model (RLM) pattern.
 
@@ -42,7 +42,7 @@ Unlike direct LLM calls, RLM:
 
 Use this when the context exceeds ~4000 tokens or when dealing with multiple files."#
     }
-    
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -76,43 +76,49 @@ Use this when the context exceeds ~4000 tokens or when dealing with multiple fil
             "required": ["source", "query"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         let source = match params.get("source").and_then(|s| s.as_str()) {
             Some(s) => s,
             None => return ToolOutput::error("Missing required parameter: source"),
         };
-        
+
         let query = match params.get("query").and_then(|q| q.as_str()) {
             Some(q) => q,
             None => return ToolOutput::error("Missing required parameter: query"),
         };
-        
-        let source_type = params.get("source_type").and_then(|s| s.as_str()).unwrap_or("auto");
-        let max_iterations = params.get("max_iterations").and_then(|m| m.as_u64()).unwrap_or(20) as usize;
-        let max_sub_queries = params.get("max_sub_queries").and_then(|m| m.as_u64()).unwrap_or(50) as usize;
-        
+
+        let source_type = params
+            .get("source_type")
+            .and_then(|s| s.as_str())
+            .unwrap_or("auto");
+        let max_iterations = params
+            .get("max_iterations")
+            .and_then(|m| m.as_u64())
+            .unwrap_or(20) as usize;
+        let max_sub_queries = params
+            .get("max_sub_queries")
+            .and_then(|m| m.as_u64())
+            .unwrap_or(50) as usize;
+
         // Load context based on source type
         let context = match self.load_context(source, source_type).await {
             Ok(ctx) => ctx,
             Err(e) => return ToolOutput::error(format!("Failed to load context: {}", e)),
         };
-        
+
         // Configure RLM
         let config = RlmConfig {
             max_iterations,
             max_sub_queries,
             ..Default::default()
         };
-        
+
         // Run RLM
         match run_rlm(query, &context, Some(config)).await {
             Ok(answer) => {
-                let result = format!(
-                    "## RLM Analysis Result\n\n{}",
-                    answer.answer
-                );
-                
+                let result = format!("## RLM Analysis Result\n\n{}", answer.answer);
+
                 let metadata = json!({
                     "confidence": answer.confidence,
                     "reasoning_steps": answer.reasoning.len(),
@@ -120,7 +126,7 @@ Use this when the context exceeds ~4000 tokens or when dealing with multiple fil
                     "context_bytes": context.metadata.total_bytes,
                     "chunks": context.chunks.len(),
                 });
-                
+
                 ToolOutput::success(result).with_metadata(metadata)
             }
             Err(e) => ToolOutput::error(format!("RLM execution failed: {}", e)),
@@ -144,12 +150,20 @@ impl RlmProcessTool {
         } else {
             source_type
         };
-        
+
         match source_type {
-            "file" => RlmContext::from_file(source).await.map_err(|e| anyhow::anyhow!(e)),
-            "directory" => RlmContext::from_directory(source).await.map_err(|e| anyhow::anyhow!(e)),
-            "glob" => RlmContext::from_glob(source).await.map_err(|e| anyhow::anyhow!(e)),
-            "url" => RlmContext::from_url(source).await.map_err(|e| anyhow::anyhow!(e)),
+            "file" => RlmContext::from_file(source)
+                .await
+                .map_err(|e| anyhow::anyhow!(e)),
+            "directory" => RlmContext::from_directory(source)
+                .await
+                .map_err(|e| anyhow::anyhow!(e)),
+            "glob" => RlmContext::from_glob(source)
+                .await
+                .map_err(|e| anyhow::anyhow!(e)),
+            "url" => RlmContext::from_url(source)
+                .await
+                .map_err(|e| anyhow::anyhow!(e)),
             "text" => Ok(RlmContext::from_text(source, "direct_text")),
             _ => Err(anyhow::anyhow!("Unknown source type: {}", source_type)),
         }
@@ -170,7 +184,7 @@ impl Tool for RlmTrajectoryTool {
     fn name(&self) -> &str {
         "rlm_trajectory"
     }
-    
+
     fn description(&self) -> &str {
         r#"View or list RLM execution trajectories.
 
@@ -182,7 +196,7 @@ Trajectories record the full execution history of RLM runs, including:
 
 Use this to debug RLM behavior or analyze performance."#
     }
-    
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -205,35 +219,38 @@ Use this to debug RLM behavior or analyze performance."#
             "required": ["action"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> ToolOutput {
         use crate::rlm_v2::TrajectoryStore;
-        
+
         let action = match params.get("action").and_then(|a| a.as_str()) {
             Some(a) => a,
             None => return ToolOutput::error("Missing required parameter: action"),
         };
-        
+
         let store = TrajectoryStore::new("./rlm_trajectories");
         if let Err(e) = store.initialize().await {
             return ToolOutput::error(format!("Failed to init trajectory store: {}", e));
         }
-        
+
         match action {
             "list" => {
                 let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
                 match store.list().await {
                     Ok(trajs) => {
                         let limited: Vec<_> = trajs.into_iter().take(limit).collect();
-                        let output = limited.iter()
-                            .map(|t| format!(
-                                "{} | {} | {} iters | {} | {:.1}s",
-                                t.id,
-                                t.timestamp.format("%Y-%m-%d %H:%M"),
-                                t.iterations,
-                                if t.success { "✓" } else { "✗" },
-                                t.duration_ms as f64 / 1000.0
-                            ))
+                        let output = limited
+                            .iter()
+                            .map(|t| {
+                                format!(
+                                    "{} | {} | {} iters | {} | {:.1}s",
+                                    t.id,
+                                    t.timestamp.format("%Y-%m-%d %H:%M"),
+                                    t.iterations,
+                                    if t.success { "✓" } else { "✗" },
+                                    t.duration_ms as f64 / 1000.0
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
                         ToolOutput::success(output)
@@ -245,14 +262,17 @@ Use this to debug RLM behavior or analyze performance."#
                 let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(5) as usize;
                 match store.recent(limit).await {
                     Ok(trajs) => {
-                        let output = trajs.iter()
-                            .map(|t| format!(
-                                "{} | {} | {} iters | {}",
-                                t.id,
-                                t.timestamp.format("%Y-%m-%d %H:%M"),
-                                t.iterations,
-                                t.query_preview
-                            ))
+                        let output = trajs
+                            .iter()
+                            .map(|t| {
+                                format!(
+                                    "{} | {} | {} iters | {}",
+                                    t.id,
+                                    t.timestamp.format("%Y-%m-%d %H:%M"),
+                                    t.iterations,
+                                    t.query_preview
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
                         ToolOutput::success(output)
@@ -265,7 +285,7 @@ Use this to debug RLM behavior or analyze performance."#
                     Some(i) => i,
                     None => return ToolOutput::error("Missing trajectory_id for 'view' action"),
                 };
-                
+
                 match store.load(id).await {
                     Ok(Some(traj)) => {
                         let output = crate::rlm_v2::TrajectoryViewer::display_trajectory(&traj);

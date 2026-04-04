@@ -47,11 +47,7 @@ pub struct PartitionDetector {
 }
 
 impl PartitionDetector {
-    pub fn new(
-        local_system: SystemId,
-        heartbeat_interval_ms: u64,
-        failure_threshold: u32,
-    ) -> Self {
+    pub fn new(local_system: SystemId, heartbeat_interval_ms: u64, failure_threshold: u32) -> Self {
         Self {
             local_system,
             peers: HashMap::new(),
@@ -168,10 +164,8 @@ impl PartitionMerger {
     /// Returns the reconciled belief set.
     pub fn merge_beliefs(&self, local: &[Belief], remote: &[Belief]) -> Vec<Belief> {
         // Build index of remote beliefs by id for fast lookup
-        let remote_by_id: HashMap<usize, &Belief> =
-            remote.iter().map(|b| (b.id, b)).collect();
-        let local_by_id: HashMap<usize, &Belief> =
-            local.iter().map(|b| (b.id, b)).collect();
+        let remote_by_id: HashMap<usize, &Belief> = remote.iter().map(|b| (b.id, b)).collect();
+        let local_by_id: HashMap<usize, &Belief> = local.iter().map(|b| (b.id, b)).collect();
 
         let mut merged: HashMap<usize, Belief> = HashMap::new();
 
@@ -350,8 +344,8 @@ mod tests {
 
         // peer-b misses heartbeats for a long time
         let _state = detector.detect(6000); // 5 intervals elapsed since last heartbeat
-        // peer-a also missed since 1000, elapsed = 5000, missed = 5 > 3
-        // Both unreachable => Isolated
+                                            // peer-a also missed since 1000, elapsed = 5000, missed = 5 > 3
+                                            // Both unreachable => Isolated
         assert!(detector.is_partitioned());
     }
 

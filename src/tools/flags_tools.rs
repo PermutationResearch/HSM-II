@@ -1,12 +1,14 @@
 //! Feature Flag Tools for Agents
-//! 
+//!
 //! These tools allow agents to:
 //! - Create feature flags
 //! - Check flag status
 //! - Execute with progressive rollout
 //! - Emergency rollback
 
-use crate::flags::{FeatureFlag, FlagMetadata, FlagStore, EvaluationContext, Operator, TargetingRule};
+use crate::flags::{
+    EvaluationContext, FeatureFlag, FlagMetadata, FlagStore, Operator, TargetingRule,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,12 +29,12 @@ impl super::Tool for CreateFlagTool {
     fn name(&self) -> &str {
         "create_feature_flag"
     }
-    
+
     fn description(&self) -> &str {
         "Create a new feature flag for progressive rollout of agent capabilities. \
          The flag starts disabled (0% rollout) and can be gradually enabled."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -42,7 +44,7 @@ impl super::Tool for CreateFlagTool {
                     "description": "Unique identifier for the flag (e.g., 'semantic_search_v2')"
                 },
                 "description": {
-                    "type": "string", 
+                    "type": "string",
                     "description": "Human-readable description of what this flag controls"
                 },
                 "initial_rollout": {
@@ -70,39 +72,53 @@ impl super::Tool for CreateFlagTool {
             "required": ["key", "description"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> super::ToolOutput {
         let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let initial_rollout = params.get("initial_rollout").and_then(|v| v.as_f64()).unwrap_or(5.0);
-        let rollback_on_error = params.get("rollback_on_error").and_then(|v| v.as_bool()).unwrap_or(true);
-        let error_threshold = params.get("error_threshold").and_then(|v| v.as_f64()).or(Some(0.05));
-        
+        let description = params
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let initial_rollout = params
+            .get("initial_rollout")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(5.0);
+        let rollback_on_error = params
+            .get("rollback_on_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let error_threshold = params
+            .get("error_threshold")
+            .and_then(|v| v.as_f64())
+            .or(Some(0.05));
+
         if key.is_empty() {
             return super::ToolOutput::error("Flag key is required");
         }
-        
+
         // Build targeting rules if cohorts specified
-        let targeting_rules: Vec<TargetingRule> = if let Some(cohorts) = params.get("target_cohorts").and_then(|v| v.as_array()) {
-            let cohort_list: Vec<String> = cohorts.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            
-            if !cohort_list.is_empty() {
-                vec![TargetingRule {
-                    attribute: "cohort".to_string(),
-                    operator: Operator::In,
-                    value: serde_json::json!(cohort_list),
-                }]
+        let targeting_rules: Vec<TargetingRule> =
+            if let Some(cohorts) = params.get("target_cohorts").and_then(|v| v.as_array()) {
+                let cohort_list: Vec<String> = cohorts
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+
+                if !cohort_list.is_empty() {
+                    vec![TargetingRule {
+                        attribute: "cohort".to_string(),
+                        operator: Operator::In,
+                        value: serde_json::json!(cohort_list),
+                    }]
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
-            }
-        } else {
-            vec![]
-        };
-        
+            };
+
         let has_targeting = !targeting_rules.is_empty();
-        
+
         let flag = FeatureFlag {
             key: key.to_string(),
             enabled: initial_rollout > 0.0,
@@ -119,15 +135,15 @@ impl super::Tool for CreateFlagTool {
                 error_threshold,
             },
         };
-        
+
         self.flag_store.set_flag(flag).await;
-        
+
         let cohort_msg = if has_targeting {
             "targeted cohorts".to_string()
         } else {
             "all users".to_string()
         };
-        
+
         super::ToolOutput::success(format!(
             "✅ Created feature flag '{}'\n- Description: {}\n- Initial rollout: {:.0}% for {}\n- Auto-rollback: {} (threshold: {:.0}%)",
             key,
@@ -156,11 +172,11 @@ impl super::Tool for CheckFlagTool {
     fn name(&self) -> &str {
         "check_feature_flag"
     }
-    
+
     fn description(&self) -> &str {
         "Check if a feature flag is enabled for a specific context (agent, user, cohort)."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -185,23 +201,32 @@ impl super::Tool for CheckFlagTool {
             "required": ["key"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> super::ToolOutput {
         let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        
+
         if key.is_empty() {
             return super::ToolOutput::error("Flag key is required");
         }
-        
+
         let ctx = EvaluationContext {
-            agent_id: params.get("agent_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            user_id: params.get("user_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            cohort: params.get("cohort").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            agent_id: params
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            user_id: params
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            cohort: params
+                .get("cohort")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             ..Default::default()
         };
-        
+
         let enabled = self.flag_store.evaluate(key, &ctx).await;
-        
+
         // Get stats if available
         let stats_msg = if let Some(stats) = self.flag_store.get_stats(key).await {
             format!(
@@ -213,12 +238,18 @@ impl super::Tool for CheckFlagTool {
         } else {
             String::new()
         };
-        
-        super::ToolOutput::success(format!(
-            "Flag '{}' is {}",
-            key,
-            if enabled { "✅ ENABLED" } else { "❌ DISABLED" }
-        ) + &stats_msg)
+
+        super::ToolOutput::success(
+            format!(
+                "Flag '{}' is {}",
+                key,
+                if enabled {
+                    "✅ ENABLED"
+                } else {
+                    "❌ DISABLED"
+                }
+            ) + &stats_msg,
+        )
     }
 }
 
@@ -238,12 +269,12 @@ impl super::Tool for UpdateRolloutTool {
     fn name(&self) -> &str {
         "update_flag_rollout"
     }
-    
+
     fn description(&self) -> &str {
         "Update the rollout percentage for a feature flag. Use this to gradually increase \
          or decrease exposure (e.g., 5% → 25% → 50% → 100%)."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -260,40 +291,43 @@ impl super::Tool for UpdateRolloutTool {
             "required": ["key", "rollout_percentage"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> super::ToolOutput {
         let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let percentage = params.get("rollout_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        
+        let percentage = params
+            .get("rollout_percentage")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
         if key.is_empty() {
             return super::ToolOutput::error("Flag key is required");
         }
-        
+
         if percentage < 0.0 || percentage > 100.0 {
             return super::ToolOutput::error("Rollout percentage must be between 0 and 100");
         }
-        
+
         // Get existing flag and update it
         let existing = self.flag_store.get_stats(key).await;
-        
+
         if existing.is_none() {
             return super::ToolOutput::error(&format!("Flag '{}' not found", key));
         }
-        
+
         let existing_flag = existing.unwrap().flag;
         let updated_flag = FeatureFlag {
             enabled: percentage > 0.0,
             rollout_percentage: percentage,
             ..existing_flag
         };
-        
+
         self.flag_store.set_flag(updated_flag).await;
-        
+
         // Progress bar visualization
         let filled = (percentage / 2.0) as usize;
         let empty = 50 - filled;
         let bar = "█".repeat(filled) + &"░".repeat(empty);
-        
+
         super::ToolOutput::success(format!(
             "🚀 Updated rollout for '{}':\n[{}] {:.0}%",
             key, bar, percentage
@@ -317,12 +351,12 @@ impl super::Tool for EmergencyRollbackTool {
     fn name(&self) -> &str {
         "emergency_rollback"
     }
-    
+
     fn description(&self) -> &str {
         "EMERGENCY: Immediately disable a feature flag. Use when a deployment is causing \
          errors, downtime, or unexpected behavior. This takes effect instantly across all nodes."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -339,15 +373,18 @@ impl super::Tool for EmergencyRollbackTool {
             "required": ["key"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> super::ToolOutput {
         let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("No reason provided");
-        
+        let reason = params
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No reason provided");
+
         if key.is_empty() {
             return super::ToolOutput::error("Flag key is required");
         }
-        
+
         if self.flag_store.rollback(key).await {
             super::ToolOutput::success(format!(
                 "🚨 EMERGENCY ROLLBACK COMPLETE\n\nFlag '{}' has been immediately disabled.\nReason: {}\n\nAll traffic is now routed to the stable code path.",
@@ -375,12 +412,12 @@ impl super::Tool for FlagStatsTool {
     fn name(&self) -> &str {
         "get_flag_stats"
     }
-    
+
     fn description(&self) -> &str {
         "Get detailed statistics for a feature flag including evaluation counts, \
          error rates, and health status."
     }
-    
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -393,14 +430,14 @@ impl super::Tool for FlagStatsTool {
             "required": ["key"]
         })
     }
-    
+
     async fn execute(&self, params: Value) -> super::ToolOutput {
         let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        
+
         if key.is_empty() {
             return super::ToolOutput::error("Flag key is required");
         }
-        
+
         match self.flag_store.get_stats(key).await {
             Some(stats) => {
                 let health = if stats.error_rate > 0.1 {
@@ -410,7 +447,7 @@ impl super::Tool for FlagStatsTool {
                 } else {
                     "🟢 HEALTHY"
                 };
-                
+
                 super::ToolOutput::success(format!(
                     "📊 Flag Stats: {}\n\nStatus: {}\nRollout: {:.0}%\nEvaluations: {}\nEnabled: {} ({:.1}%)\nErrors: {} ({:.2}%)\nDescription: {}",
                     key,
@@ -424,7 +461,7 @@ impl super::Tool for FlagStatsTool {
                     stats.flag.metadata.description
                 ))
             }
-            None => super::ToolOutput::error(&format!("Flag '{}' not found or has no stats", key))
+            None => super::ToolOutput::error(&format!("Flag '{}' not found or has no stats", key)),
         }
     }
 }
@@ -444,76 +481,90 @@ pub fn get_flag_tools(flag_store: Arc<FlagStore>) -> Vec<Box<dyn super::Tool>> {
 mod tests {
     use super::*;
     use crate::tools::Tool;
-    
+
     #[tokio::test]
     async fn test_create_flag_tool() {
         let store = Arc::new(FlagStore::new());
         let tool = CreateFlagTool::new(store.clone());
-        
-        let result = tool.execute(serde_json::json!({
-            "key": "test_feature",
-            "description": "A test feature",
-            "initial_rollout": 10.0
-        })).await;
-        
+
+        let result = tool
+            .execute(serde_json::json!({
+                "key": "test_feature",
+                "description": "A test feature",
+                "initial_rollout": 10.0
+            }))
+            .await;
+
         assert!(result.success);
         assert!(result.result.contains("test_feature"));
         assert!(result.result.contains("10%"));
     }
-    
+
     #[tokio::test]
     async fn test_check_flag_tool() {
         let store = Arc::new(FlagStore::new());
         let create_tool = CreateFlagTool::new(store.clone());
         let check_tool = CheckFlagTool::new(store.clone());
-        
+
         // Create flag first
-        create_tool.execute(serde_json::json!({
-            "key": "check_test",
-            "initial_rollout": 100.0
-        })).await;
-        
+        create_tool
+            .execute(serde_json::json!({
+                "key": "check_test",
+                "initial_rollout": 100.0
+            }))
+            .await;
+
         // Check it
-        let result = check_tool.execute(serde_json::json!({
-            "key": "check_test"
-        })).await;
-        
+        let result = check_tool
+            .execute(serde_json::json!({
+                "key": "check_test"
+            }))
+            .await;
+
         assert!(result.success);
         assert!(result.result.contains("ENABLED"));
     }
-    
+
     #[tokio::test]
     async fn test_emergency_rollback_tool() {
         let store = Arc::new(FlagStore::new());
         let create_tool = CreateFlagTool::new(store.clone());
         let rollback_tool = EmergencyRollbackTool::new(store.clone());
         let check_tool = CheckFlagTool::new(store.clone());
-        
+
         // Create and enable flag
-        create_tool.execute(serde_json::json!({
-            "key": "rollback_test",
-            "initial_rollout": 100.0
-        })).await;
-        
+        create_tool
+            .execute(serde_json::json!({
+                "key": "rollback_test",
+                "initial_rollout": 100.0
+            }))
+            .await;
+
         // Verify enabled
-        let check = check_tool.execute(serde_json::json!({
-            "key": "rollback_test"
-        })).await;
+        let check = check_tool
+            .execute(serde_json::json!({
+                "key": "rollback_test"
+            }))
+            .await;
         assert!(check.result.contains("ENABLED"));
-        
+
         // Rollback
-        let result = rollback_tool.execute(serde_json::json!({
-            "key": "rollback_test",
-            "reason": "Test rollback"
-        })).await;
-        
+        let result = rollback_tool
+            .execute(serde_json::json!({
+                "key": "rollback_test",
+                "reason": "Test rollback"
+            }))
+            .await;
+
         assert!(result.success);
         assert!(result.result.contains("EMERGENCY ROLLBACK"));
-        
+
         // Verify disabled
-        let check = check_tool.execute(serde_json::json!({
-            "key": "rollback_test"
-        })).await;
+        let check = check_tool
+            .execute(serde_json::json!({
+                "key": "rollback_test"
+            }))
+            .await;
         assert!(check.result.contains("DISABLED"));
     }
 }

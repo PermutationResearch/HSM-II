@@ -55,7 +55,10 @@ fn props_json(v: &serde_json::Value) -> String {
 }
 
 /// Insert or replace all rows from a projected graph (batched in one transaction).
-pub fn upsert_bipartite_graph(conn: &mut Connection, g: &BipartiteMemoryGraph) -> rusqlite::Result<()> {
+pub fn upsert_bipartite_graph(
+    conn: &mut Connection,
+    g: &BipartiteMemoryGraph,
+) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
 
     {
@@ -141,9 +144,7 @@ pub fn ingest_json_file(db_path: &Path, json_path: &Path) -> anyhow::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::memory_graph::{
-        BeliefSnapshot, BipartiteMemoryGraph, HsmMemorySnapshot,
-    };
+    use super::super::memory_graph::{BeliefSnapshot, BipartiteMemoryGraph, HsmMemorySnapshot};
     use super::super::trace::{BeliefRankEntry, HsmTurnTrace};
     use super::*;
 

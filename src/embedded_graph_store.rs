@@ -190,7 +190,8 @@ impl EmbeddedGraphStore {
         #[cfg(feature = "lbug")]
         {
             let property_graph = world.to_property_graph_snapshot();
-            if let Ok(p) = std::env::var(crate::persistence::ladybug_native::ENV_HSMII_LADYBUG_PATH) {
+            if let Ok(p) = std::env::var(crate::persistence::ladybug_native::ENV_HSMII_LADYBUG_PATH)
+            {
                 let p = p.trim();
                 if !p.is_empty() && !crate::persistence::lbug_world_store::primary_enabled() {
                     if let Err(e) = crate::persistence::ladybug_native::sync_property_graph(

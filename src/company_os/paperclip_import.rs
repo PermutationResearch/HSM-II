@@ -1,8 +1,16 @@
-//! Import Paperclip-style company packs from `hsmii_home` on disk into `company_agents` + context index.
+//! Import Paperclip-style **company packs** from `hsmii_home` on disk into `company_agents` + context index.
+//!
+//! This is **on-disk agent/skill content** for Postgres-backed company views — not the in-process
+//! [`crate::paperclip::IntelligenceLayer`]. The unified `personal_agent` runtime owns goals, DRIs, and
+//! capability tracking for all companies; packs do not replace that layer.
 //!
 //! Layout (e.g. `paperclipai/companies` packs):
 //! - `{hsmii_home}/agents/{id}/AGENTS.md` — YAML front matter + markdown briefing
 //! - `{hsmii_home}/skills/{slug}/SKILL.md` — optional; indexed into `context_markdown`
+//!
+//! `reportsTo` in front matter may be folder id (any case), display `name`, or a rough slug from name;
+//! we normalize lookups. If `agents/` is missing at the stored root but exists under one child
+//! directory (some installers nest one level), we use that child as the pack root.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -36,6 +44,30 @@ struct ParsedAgent {
     dir_id: String,
     fm: AgentFrontmatter,
     briefing: String,
+}
+
+struct ParsedSkill {
+    slug: String,
+    name: String,
+    description: String,
+    body: String,
+}
+
+/// Stable key for agent identity lookups (DB `name` = folder id; reportsTo is usually lowercased in packs).
+fn agent_key(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+fn hyphen_slug_from_words(name: &str) -> String {
+    name.split_whitespace()
+        .map(|w| {
+            w.trim()
+                .trim_matches(|c| c == '-' || c == '_')
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn split_front_matter(raw: &str) -> Result<(String, String)> {
@@ -85,6 +117,63 @@ fn strip_paperclip_skills_block(md: &str) -> String {
     md.to_string()
 }
 
+/// Use `home_path` if it already contains `agents/`; else if exactly one subdir contains `agents/`, use that.
+fn resolve_pack_root(home_path: &Path) -> Result<PathBuf> {
+    let direct = home_path.join("agents");
+    if direct.is_dir() {
+        return Ok(home_path.to_path_buf());
+    }
+
+    let mut nested: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(home_path).with_context(|| format!("read {}", home_path.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if entry.path().join("agents").is_dir() {
+            nested.push(entry.path());
+        }
+    }
+
+    match nested.len() {
+        0 => Err(anyhow!(
+            "no agents/ directory under {} (or under one immediate subfolder)",
+            home_path.display()
+        )),
+        1 => Ok(nested.pop().expect("one element")),
+        _ => Err(anyhow!(
+            "ambiguous pack layout under {}: multiple subfolders contain agents/. Point hsmii_home at the folder that directly contains agents/.",
+            home_path.display()
+        )),
+    }
+}
+
+/// Map normalized `reportsTo` strings -> canonical agent key (lowercase folder id).
+fn build_reports_alias_map(parsed: &[ParsedAgent]) -> HashMap<String, String> {
+    let mut m: HashMap<String, String> = HashMap::new();
+    for p in parsed {
+        let canon = agent_key(&p.dir_id);
+        m.insert(canon.clone(), canon.clone());
+        if let Some(n) =
+            p.fm.name
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        {
+            m.entry(agent_key(n)).or_insert_with(|| canon.clone());
+            let slug = hyphen_slug_from_words(n);
+            if !slug.is_empty() {
+                m.entry(slug).or_insert_with(|| canon.clone());
+            }
+        }
+    }
+    m
+}
+
 /// Reads `hsmii_home`, inserts agents from `agents/*/AGENTS.md`, appends skills index to `context_markdown`.
 pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<serde_json::Value> {
     let home: Option<String> = sqlx::query_scalar("SELECT hsmii_home FROM companies WHERE id = $1")
@@ -105,16 +194,13 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         ));
     }
 
-    let agents_dir = home_path.join("agents");
-    if !agents_dir.is_dir() {
-        return Err(anyhow!(
-            "no agents/ directory under {}",
-            home_path.display()
-        ));
-    }
+    let pack_root = resolve_pack_root(&home_path)?;
+    let agents_dir = pack_root.join("agents");
 
     let mut parsed: Vec<ParsedAgent> = Vec::new();
-    for entry in fs::read_dir(&agents_dir).with_context(|| format!("read {}", agents_dir.display()))? {
+    for entry in
+        fs::read_dir(&agents_dir).with_context(|| format!("read {}", agents_dir.display()))?
+    {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -143,18 +229,22 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         ));
     }
 
-    let agents_existing: Vec<(String, Uuid)> = sqlx::query_as(
-        "SELECT name, id FROM company_agents WHERE company_id = $1",
-    )
-    .bind(company_id)
-    .fetch_all(pool)
-    .await?;
+    let reports_alias = build_reports_alias_map(&parsed);
 
-    let mut id_map: HashMap<String, Uuid> = agents_existing.into_iter().collect();
+    let agents_existing: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT name, id FROM company_agents WHERE company_id = $1")
+            .bind(company_id)
+            .fetch_all(pool)
+            .await?;
+
+    let mut id_map: HashMap<String, Uuid> = HashMap::new();
+    for (name, id) in agents_existing {
+        id_map.insert(agent_key(&name), id);
+    }
 
     let mut pending: Vec<&ParsedAgent> = parsed
         .iter()
-        .filter(|p| !id_map.contains_key(&p.dir_id))
+        .filter(|p| !id_map.contains_key(&agent_key(&p.dir_id)))
         .collect();
     let skipped_existing = parsed.len() - pending.len();
 
@@ -173,29 +263,32 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         let mut made_progress = false;
 
         for a in pending {
-            let mgr = a
-                .fm
-                .reports_to
-                .as_ref()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty() && s != "null");
+            let mgr_raw =
+                a.fm.reports_to
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s.to_lowercase() != "null");
 
-            let ready = match &mgr {
+            let mgr_key = mgr_raw.as_ref().map(|s| {
+                let k = agent_key(s);
+                reports_alias.get(&k).cloned().unwrap_or(k)
+            });
+
+            let ready = match &mgr_key {
                 None => true,
-                Some(m) => id_map.contains_key(m),
+                Some(k) => id_map.contains_key(k),
             };
             if !ready {
                 next.push(a);
                 continue;
             }
 
-            let reports_uuid = mgr.as_ref().and_then(|m| id_map.get(m).copied());
-            let role = a
-                .fm
-                .title
-                .clone()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "paperclip_agent".to_string());
+            let reports_uuid = mgr_key.as_ref().and_then(|k| id_map.get(k).copied());
+            let role =
+                a.fm.title
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "paperclip_agent".to_string());
             let title = a.fm.name.clone().or_else(|| Some(a.dir_id.clone()));
             let caps = if a.fm.skills.is_empty() {
                 None
@@ -231,23 +324,23 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
             .await
             .with_context(|| format!("insert agent {}", a.dir_id))?;
 
-            id_map.insert(a.dir_id.clone(), new_id);
+            id_map.insert(agent_key(&a.dir_id), new_id);
             inserted += 1;
             made_progress = true;
         }
 
         if !made_progress && !next.is_empty() {
             return Err(anyhow!(
-                "cannot resolve manager references (reportsTo) for: {:?}",
+                "cannot resolve manager references (reportsTo) for: {:?}. If those values are not folder ids under agents/, set reportsTo to the agent directory name (see AGENTS.md).",
                 next.iter().map(|x| &x.dir_id).collect::<Vec<_>>()
             ));
         }
         pending = next;
     }
 
-    let skills_dir = home_path.join("skills");
-    let mut skill_count = 0usize;
+    let skills_dir = pack_root.join("skills");
     let mut skills_block = String::new();
+    let mut parsed_skills: Vec<ParsedSkill> = Vec::new();
 
     if skills_dir.is_dir() {
         let mut lines: Vec<String> = vec![
@@ -257,7 +350,7 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
             String::new(),
             format!(
                 "Pack root: `{}`. Skills live under `skills/<slug>/SKILL.md` — edit those files or adjust agents in **Team & roles**.",
-                home_path.display()
+                pack_root.display()
             ),
             String::new(),
         ];
@@ -277,19 +370,47 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
             if !skill_md.is_file() {
                 continue;
             }
-            if let Ok((fm, _body)) = parse_skill_md(&skill_md) {
-                let dn = fm.name.unwrap_or_else(|| slug.clone());
+            if let Ok((fm, body)) = parse_skill_md(&skill_md) {
+                let name = fm.name.unwrap_or_else(|| slug.clone());
                 let desc = fm.description.unwrap_or_default();
                 let one_line: String = desc.split_whitespace().collect::<Vec<_>>().join(" ");
                 let short: String = one_line.chars().take(240).collect();
-                lines.push(format!(
-                    "- **`{dn}`** (`skills/{slug}/`) — {short}"
-                ));
-                skill_count += 1;
+                lines.push(format!("- **`{name}`** (`skills/{slug}/`) — {short}"));
+                parsed_skills.push(ParsedSkill {
+                    slug: slug.clone(),
+                    name,
+                    description: desc,
+                    body,
+                });
             }
         }
         lines.push("<!-- hsm-paperclip-skills-end -->".to_string());
         skills_block = lines.join("\n");
+    }
+
+    let mut skills_saved = 0usize;
+    for skill in &parsed_skills {
+        let skill_path = format!("skills/{}/", skill.slug);
+        sqlx::query(
+            r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
+               VALUES ($1, $2, $3, $4, $5, $6, 'paperclip/v1')
+               ON CONFLICT (company_id, slug) DO UPDATE SET
+                   name        = EXCLUDED.name,
+                   description = EXCLUDED.description,
+                   body        = EXCLUDED.body,
+                   skill_path  = EXCLUDED.skill_path,
+                   updated_at  = now()"#,
+        )
+        .bind(company_id)
+        .bind(&skill.slug)
+        .bind(&skill.name)
+        .bind(&skill.description)
+        .bind(&skill.body)
+        .bind(&skill_path)
+        .execute(pool)
+        .await
+        .with_context(|| format!("upsert skill {}", skill.slug))?;
+        skills_saved += 1;
     }
 
     if !skills_block.is_empty() {
@@ -315,6 +436,7 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
     Ok(json!({
         "agents_inserted": inserted,
         "agents_skipped_existing": skipped_existing,
-        "skills_indexed": skill_count,
+        "skills_saved": skills_saved,
+        "pack_root_resolved": pack_root.display().to_string(),
     }))
 }

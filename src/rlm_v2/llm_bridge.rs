@@ -3,7 +3,7 @@
 //! Handles dispatching parallel sub-queries to Ollama/LLM,
 //! with caching and result aggregation.
 
-use super::{SubQuery, SubQueryResponse, RlmError};
+use super::{RlmError, SubQuery, SubQueryResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -29,8 +29,8 @@ pub struct LlmBridgeConfig {
 
 impl Default for LlmBridgeConfig {
     fn default() -> Self {
-        let endpoint = std::env::var("OLLAMA_HOST")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let endpoint =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
         let model = match std::env::var("OLLAMA_MODEL") {
             Ok(m) if !m.is_empty() && m != "auto" => m,
             _ => "qwen2.5:14b".to_string(),
@@ -69,8 +69,7 @@ INSTRUCTION: {}
 Provide a concise answer based only on this chunk. If the chunk doesn't contain relevant information, say "NO_RELEVANT_INFO".
 
 Answer:"#,
-            self.chunk_content,
-            self.instruction
+            self.chunk_content, self.instruction
         )
     }
 }
@@ -89,22 +88,22 @@ impl QueryCache {
             max_size,
         }
     }
-    
+
     fn compute_key(query: &LlmQuery) -> String {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
-        
+        use std::hash::{Hash, Hasher};
+
         let mut hasher = DefaultHasher::new();
         query.chunk_content.hash(&mut hasher);
         query.instruction.hash(&mut hasher);
         format!("{:x}", hasher.finish())
     }
-    
+
     pub fn get(&self, query: &LlmQuery) -> Option<&SubQueryResponse> {
         let key = Self::compute_key(query);
         self.entries.get(&key)
     }
-    
+
     pub fn insert(&mut self, query: &LlmQuery, response: SubQueryResponse) {
         if self.entries.len() >= self.max_size {
             // Remove oldest entry (simple FIFO)
@@ -115,11 +114,11 @@ impl QueryCache {
         let key = Self::compute_key(query);
         self.entries.insert(key, response);
     }
-    
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-    
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -132,7 +131,7 @@ impl LlmBridge {
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .expect("Failed to build HTTP client");
-        
+
         Self {
             client,
             endpoint: config.endpoint.clone(),
@@ -141,21 +140,21 @@ impl LlmBridge {
             config,
         }
     }
-    
+
     /// Execute a single sub-query
     pub async fn query(&mut self, query: &LlmQuery) -> Result<SubQueryResponse, RlmError> {
         let start = std::time::Instant::now();
-        
+
         // Check cache
         if self.config.enable_cache {
             if let Some(cached) = self.cache.get(query) {
                 return Ok(cached.clone());
             }
         }
-        
+
         // Build prompt
         let prompt = query.build_prompt();
-        
+
         // Call Ollama
         let body = serde_json::json!({
             "model": self.model,
@@ -166,52 +165,57 @@ impl LlmBridge {
                 "num_predict": self.config.max_tokens,
             }
         });
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(format!("{}/api/generate", self.endpoint))
             .json(&body)
             .send()
             .await
             .map_err(|e| RlmError::LlmQueryFailed(format!("HTTP error: {}", e)))?;
-        
+
         if !response.status().is_success() {
-            return Err(RlmError::LlmQueryFailed(
-                format!("Ollama returned status {}", response.status())
-            ));
+            return Err(RlmError::LlmQueryFailed(format!(
+                "Ollama returned status {}",
+                response.status()
+            )));
         }
-        
+
         let json: serde_json::Value = response
             .json()
             .await
             .map_err(|e| RlmError::LlmQueryFailed(format!("JSON parse error: {}", e)))?;
-        
+
         let result = json["response"]
             .as_str()
             .unwrap_or("NO_RESPONSE")
             .to_string();
-        
+
         let duration_ms = start.elapsed().as_millis() as u64;
         let tokens_used = json["eval_count"].as_u64().map(|t| t as usize);
-        
+
         let response = SubQueryResponse {
             query_id: query.id.clone(),
             result,
             tokens_used,
             duration_ms,
         };
-        
+
         // Cache result
         if self.config.enable_cache {
             self.cache.insert(query, response.clone());
         }
-        
+
         Ok(response)
     }
-    
+
     /// Execute multiple sub-queries in parallel
-    pub async fn query_parallel(&mut self, queries: Vec<LlmQuery>) -> Vec<Result<SubQueryResponse, RlmError>> {
+    pub async fn query_parallel(
+        &mut self,
+        queries: Vec<LlmQuery>,
+    ) -> Vec<Result<SubQueryResponse, RlmError>> {
         let mut handles = Vec::new();
-        
+
         for query in queries {
             // Clone necessary data for the async block
             let client = self.client.clone();
@@ -219,11 +223,11 @@ impl LlmBridge {
             let model = self.model.clone();
             let temperature = self.config.temperature;
             let max_tokens = self.config.max_tokens;
-            
+
             let handle = tokio::spawn(async move {
                 let start = std::time::Instant::now();
                 let prompt = query.build_prompt();
-                
+
                 let body = serde_json::json!({
                     "model": model,
                     "prompt": prompt,
@@ -233,33 +237,34 @@ impl LlmBridge {
                         "num_predict": max_tokens,
                     }
                 });
-                
+
                 let response = client
                     .post(format!("{}/api/generate", endpoint))
                     .json(&body)
                     .send()
                     .await
                     .map_err(|e| RlmError::LlmQueryFailed(format!("HTTP error: {}", e)))?;
-                
+
                 if !response.status().is_success() {
-                    return Err(RlmError::LlmQueryFailed(
-                        format!("Ollama returned status {}", response.status())
-                    ));
+                    return Err(RlmError::LlmQueryFailed(format!(
+                        "Ollama returned status {}",
+                        response.status()
+                    )));
                 }
-                
+
                 let json: serde_json::Value = response
                     .json()
                     .await
                     .map_err(|e| RlmError::LlmQueryFailed(format!("JSON parse error: {}", e)))?;
-                
+
                 let result = json["response"]
                     .as_str()
                     .unwrap_or("NO_RESPONSE")
                     .to_string();
-                
+
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let tokens_used = json["eval_count"].as_u64().map(|t| t as usize);
-                
+
                 Ok(SubQueryResponse {
                     query_id: query.id.clone(),
                     result,
@@ -267,22 +272,25 @@ impl LlmBridge {
                     duration_ms,
                 })
             });
-            
+
             handles.push(handle);
         }
-        
+
         // Collect results
         let mut results = Vec::new();
         for handle in handles {
             match handle.await {
                 Ok(result) => results.push(result),
-                Err(e) => results.push(Err(RlmError::LlmQueryFailed(format!("Task panicked: {}", e)))),
+                Err(e) => results.push(Err(RlmError::LlmQueryFailed(format!(
+                    "Task panicked: {}",
+                    e
+                )))),
             }
         }
-        
+
         results
     }
-    
+
     /// Convert RLM SubQuery to LlmQuery
     pub fn to_llm_query(sub_query: &SubQuery, chunk_content: &str) -> LlmQuery {
         LlmQuery {
@@ -292,17 +300,17 @@ impl LlmBridge {
             context_preview: sub_query.context_preview.clone(),
         }
     }
-    
+
     /// Get cache stats
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.cache.len(), self.cache.entries.capacity())
     }
-    
+
     /// Clear cache
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
-    
+
     /// Execute a direct prompt (for main RLM iterations, not sub-queries)
     pub async fn generate_direct(&mut self, prompt: &str) -> Result<String, RlmError> {
         let body = serde_json::json!({
@@ -314,38 +322,40 @@ impl LlmBridge {
                 "num_predict": self.config.max_tokens,
             }
         });
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(format!("{}/api/generate", self.endpoint))
             .json(&body)
             .send()
             .await
             .map_err(|e| RlmError::LlmQueryFailed(format!("HTTP error: {}", e)))?;
-        
+
         if !response.status().is_success() {
-            return Err(RlmError::LlmQueryFailed(
-                format!("Ollama returned status {}", response.status())
-            ));
+            return Err(RlmError::LlmQueryFailed(format!(
+                "Ollama returned status {}",
+                response.status()
+            )));
         }
-        
+
         let json: serde_json::Value = response
             .json()
             .await
             .map_err(|e| RlmError::LlmQueryFailed(format!("JSON parse error: {}", e)))?;
-        
+
         let result = json["response"]
             .as_str()
             .unwrap_or("NO_RESPONSE")
             .to_string();
-        
+
         Ok(result)
     }
-    
+
     /// Get current model
     pub fn model(&self) -> &str {
         &self.model
     }
-    
+
     /// Set model
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
@@ -355,16 +365,19 @@ impl LlmBridge {
 /// Aggregate sub-query results into a coherent response
 pub fn aggregate_results(results: &[SubQueryResponse]) -> String {
     let mut aggregated = String::new();
-    
+
     for result in results {
         // Skip results that indicate no relevant info
         if result.result.contains("NO_RELEVANT_INFO") || result.result.contains("NO_RELEVANT") {
             continue;
         }
-        
-        aggregated.push_str(&format!("[Chunk {}]\n{}\n\n", result.query_id, result.result));
+
+        aggregated.push_str(&format!(
+            "[Chunk {}]\n{}\n\n",
+            result.query_id, result.result
+        ));
     }
-    
+
     if aggregated.is_empty() {
         "No relevant information found in any chunks.".to_string()
     } else {
@@ -388,30 +401,30 @@ pub async fn check_ollama_available(endpoint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_query_cache() {
         let mut cache = QueryCache::new(10);
-        
+
         let query = LlmQuery {
             id: "test".to_string(),
             chunk_content: "test content".to_string(),
             instruction: "summarize".to_string(),
             context_preview: "preview".to_string(),
         };
-        
+
         let response = SubQueryResponse {
             query_id: "test".to_string(),
             result: "result".to_string(),
             tokens_used: Some(100),
             duration_ms: 1000,
         };
-        
+
         assert!(cache.get(&query).is_none());
         cache.insert(&query, response.clone());
         assert!(cache.get(&query).is_some());
     }
-    
+
     #[test]
     fn test_aggregate_results() {
         let results = vec![
@@ -434,7 +447,7 @@ mod tests {
                 duration_ms: 100,
             },
         ];
-        
+
         let aggregated = aggregate_results(&results);
         assert!(aggregated.contains("Found A"));
         assert!(aggregated.contains("Found B"));

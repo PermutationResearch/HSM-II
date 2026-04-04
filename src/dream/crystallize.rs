@@ -27,12 +27,11 @@ pub fn crystallize(
         if let Some(existing) = find_matching_pattern(existing_patterns, motif) {
             // Reinforce: increase observation count, boost confidence
             existing.observation_count += motif.observation_count;
-            existing.confidence =
-                bayesian_update(existing.confidence, motif_raw_confidence(motif));
+            existing.confidence = bayesian_update(existing.confidence, motif_raw_confidence(motif));
             existing.last_reinforced_generation = dream_generation;
             existing.last_reinforced_at = current_timestamp();
             existing.persistence_score += 0.1; // DKS: being reinforced = persisting
-            // Update valence as running average
+                                               // Update valence as running average
             let total_obs = existing.observation_count as f64;
             existing.valence = existing.valence * ((total_obs - 1.0) / total_obs)
                 + motif.avg_outcome * (1.0 / total_obs);
@@ -318,8 +317,8 @@ mod tests {
                     transition_weights: vec![],
                     min_match_length: 2,
                 },
-                valence: 0.5,       // positive
-                confidence: 0.8,    // above threshold
+                valence: 0.5,          // positive
+                confidence: 0.8,       // above threshold
                 observation_count: 10, // above threshold
                 role_affinity: HashMap::new(),
                 origin_generation: 1,
@@ -401,28 +400,13 @@ mod tests {
 
     #[test]
     fn test_narrative_valence_words() {
-        let positive = generate_narrative(&make_motif(
-            vec![TraceKind::PromiseMade],
-            5,
-            0.5,
-            0.1,
-        ));
+        let positive = generate_narrative(&make_motif(vec![TraceKind::PromiseMade], 5, 0.5, 0.1));
         assert!(positive.contains("beneficial"));
 
-        let negative = generate_narrative(&make_motif(
-            vec![TraceKind::PromiseMade],
-            5,
-            -0.5,
-            0.1,
-        ));
+        let negative = generate_narrative(&make_motif(vec![TraceKind::PromiseMade], 5, -0.5, 0.1));
         assert!(negative.contains("harmful"));
 
-        let neutral = generate_narrative(&make_motif(
-            vec![TraceKind::PromiseMade],
-            5,
-            0.0,
-            0.1,
-        ));
+        let neutral = generate_narrative(&make_motif(vec![TraceKind::PromiseMade], 5, 0.0, 0.1));
         assert!(neutral.contains("neutral"));
     }
 }

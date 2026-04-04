@@ -85,7 +85,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<()> {
                 }
                 CodexEvent::ChangeModel => {
                     // Cycle models (start from OLLAMA_MODEL if set)
-                    let env_model = hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2");
+                    let env_model =
+                        hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2");
                     state.model = match state.model.as_str() {
                         m if m == env_model => "claude-3.5-sonnet".to_string(),
                         "claude-3.5-sonnet" => "gpt-4".to_string(),

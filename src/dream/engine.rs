@@ -21,9 +21,7 @@ use super::deposit::{deposit, DepositionResult};
 use super::motif::detect_motifs;
 use super::survival::{apply_survival_pressure, SurvivalResult};
 use super::trajectory::assemble_trajectory;
-use super::{
-    CrystallizedPattern, DreamConfig, DreamCycleResult, ProtoSkill,
-};
+use super::{CrystallizedPattern, DreamConfig, DreamCycleResult, ProtoSkill};
 
 /// The Stigmergic Dream Consolidation Engine.
 ///
@@ -124,9 +122,7 @@ impl StigmergicDreamEngine {
 
         debug!(
             "Dream cycle {}: detected {} motifs (min_obs={})",
-            gen,
-            motifs_detected,
-            self.config.min_observations
+            gen, motifs_detected, self.config.min_observations
         );
 
         // ── Phase 3: Pattern Crystallization ───────────────────────────
@@ -153,15 +149,14 @@ impl StigmergicDreamEngine {
             )
             .collect();
 
-        let dep_result: DepositionResult = deposit(
-            &self.config,
-            &patterns_to_deposit,
-            world,
-        );
+        let dep_result: DepositionResult = deposit(&self.config, &patterns_to_deposit, world);
 
         debug!(
             "Dream cycle {}: deposited {} trails, boosted {} traces, weakened {}",
-            gen, dep_result.dream_trails_deposited, dep_result.traces_boosted, dep_result.traces_weakened
+            gen,
+            dep_result.dream_trails_deposited,
+            dep_result.traces_boosted,
+            dep_result.traces_weakened
         );
 
         // ── Phase 5: DKS Survival Pressure ─────────────────────────────
@@ -170,7 +165,10 @@ impl StigmergicDreamEngine {
 
         debug!(
             "Dream cycle {}: survival — {} decayed, {} pruned, {} alive",
-            gen, surv_result.patterns_decayed, surv_result.patterns_pruned, surv_result.patterns_after
+            gen,
+            surv_result.patterns_decayed,
+            surv_result.patterns_pruned,
+            surv_result.patterns_after
         );
 
         // ── Phase 6: Proto-Skill Generation ────────────────────────────
@@ -302,10 +300,7 @@ fn inject_dream_insights(
 }
 
 /// Inject wisdom from the most confident positive patterns into avoid/insight patterns.
-fn inject_pattern_wisdom(
-    living_prompt: &mut LivingPrompt,
-    patterns: &[CrystallizedPattern],
-) {
+fn inject_pattern_wisdom(living_prompt: &mut LivingPrompt, patterns: &[CrystallizedPattern]) {
     // Find the single best positive pattern and inject as insight
     if let Some(best_positive) = patterns
         .iter()
@@ -344,9 +339,9 @@ fn inject_pattern_wisdom(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::dream::TemporalMotif;
     use crate::stigmergic_policy::TraceKind;
+    use std::collections::HashMap;
 
     fn make_test_pattern(
         id: &str,
@@ -480,7 +475,9 @@ mod tests {
             ..DreamConfig::default()
         });
         engine.dream_generation = 5;
-        engine.patterns.push(make_test_pattern("test", 0.5, 0.8, 1.0, vec!["task_a"]));
+        engine
+            .patterns
+            .push(make_test_pattern("test", 0.5, 0.8, 1.0, vec!["task_a"]));
 
         let json = serde_json::to_string(&engine).unwrap();
         let restored: StigmergicDreamEngine = serde_json::from_str(&json).unwrap();

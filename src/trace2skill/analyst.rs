@@ -105,7 +105,12 @@ pub fn lesson_for_record(r: &TrajectoryRecord) -> String {
     if matches_llm_env() {
         match llm_lesson_sync(r) {
             Ok(s) if !s.trim().is_empty() => {
-                format!("[{} route={}] {}", format!("{:?}", r.outcome).to_lowercase(), r.turn_route, s)
+                format!(
+                    "[{} route={}] {}",
+                    format!("{:?}", r.outcome).to_lowercase(),
+                    r.turn_route,
+                    s
+                )
             }
             Ok(_) => heuristic_lesson(r),
             Err(_) => heuristic_lesson(r),
@@ -149,7 +154,11 @@ pub fn parallel_lessons(records: &[TrajectoryRecord]) -> Vec<String> {
     })
 }
 
-fn section_lines(outcome: TrajectoryOutcome, records: &[TrajectoryRecord], lessons: &[String]) -> Vec<String> {
+fn section_lines(
+    outcome: TrajectoryOutcome,
+    records: &[TrajectoryRecord],
+    lessons: &[String],
+) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for (r, lesson) in records.iter().zip(lessons.iter()) {

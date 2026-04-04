@@ -80,7 +80,7 @@ impl Context {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| RlmError::StorageError(format!("Failed to read file: {}", e)))?;
-        
+
         let metadata = ContextMetadata {
             source: path.to_string_lossy().to_string(),
             content_type: ContentType::File,
@@ -89,18 +89,18 @@ impl Context {
             line_count: content.lines().count(),
             preview_lines: content.lines().take(20).count(),
         };
-        
+
         let mut context = Self {
             content,
             metadata,
             chunks: Vec::new(),
             extracted_meta: HashMap::new(),
         };
-        
+
         context.compute_chunks(1000); // Default 1000 lines per chunk
         Ok(context)
     }
-    
+
     /// Load context from raw text
     pub fn from_text(text: impl Into<String>, source: impl Into<String>) -> Self {
         let content = text.into();
@@ -112,26 +112,26 @@ impl Context {
             line_count: content.lines().count(),
             preview_lines: content.lines().take(20).count(),
         };
-        
+
         let mut context = Self {
             content,
             metadata,
             chunks: Vec::new(),
             extracted_meta: HashMap::new(),
         };
-        
+
         context.compute_chunks(1000);
         context
     }
-    
+
     /// Load context from multiple files matching a glob pattern
     pub async fn from_glob(pattern: &str) -> Result<Self, RlmError> {
         use glob::glob;
-        
+
         let mut combined = String::new();
         let mut file_count = 0;
         let mut total_bytes = 0;
-        
+
         for entry in glob(pattern).map_err(|e| RlmError::StorageError(e.to_string()))? {
             if let Ok(path) = entry {
                 if path.is_file() {
@@ -147,7 +147,7 @@ impl Context {
                 }
             }
         }
-        
+
         let metadata = ContextMetadata {
             source: format!("glob:{}", pattern),
             content_type: ContentType::Multiple,
@@ -156,43 +156,60 @@ impl Context {
             line_count: combined.lines().count(),
             preview_lines: combined.lines().take(20).count(),
         };
-        
+
         let mut extracted_meta = HashMap::new();
         extracted_meta.insert("file_count".to_string(), file_count.to_string());
-        
+
         let mut context = Self {
             content: combined,
             metadata,
             chunks: Vec::new(),
             extracted_meta,
         };
-        
+
         context.compute_chunks(1000);
         Ok(context)
     }
-    
+
     /// Load context from a directory (recursive)
     pub async fn from_directory(dir: impl AsRef<Path>) -> Result<Self, RlmError> {
         let dir = dir.as_ref();
         let mut combined = String::new();
         let mut file_count = 0;
         let mut total_bytes = 0;
-        
+
         let mut entries = tokio::fs::read_dir(dir)
             .await
             .map_err(|e| RlmError::StorageError(format!("Failed to read directory: {}", e)))?;
-        
+
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.is_file() {
                 // Skip common non-text files
                 if let Some(ext) = path.extension() {
                     let ext = ext.to_string_lossy().to_lowercase();
-                    if matches!(ext.as_str(), "exe" | "dll" | "so" | "dylib" | "bin" | "o" | "a" | "png" | "jpg" | "jpeg" | "gif" | "pdf" | "zip" | "tar" | "gz") {
+                    if matches!(
+                        ext.as_str(),
+                        "exe"
+                            | "dll"
+                            | "so"
+                            | "dylib"
+                            | "bin"
+                            | "o"
+                            | "a"
+                            | "png"
+                            | "jpg"
+                            | "jpeg"
+                            | "gif"
+                            | "pdf"
+                            | "zip"
+                            | "tar"
+                            | "gz"
+                    ) {
                         continue;
                     }
                 }
-                
+
                 match tokio::fs::read_to_string(&path).await {
                     Ok(content) => {
                         combined.push_str(&format!("\n\n=== {} ===\n\n", path.display()));
@@ -204,7 +221,7 @@ impl Context {
                 }
             }
         }
-        
+
         let metadata = ContextMetadata {
             source: dir.to_string_lossy().to_string(),
             content_type: ContentType::Directory,
@@ -213,39 +230,39 @@ impl Context {
             line_count: combined.lines().count(),
             preview_lines: combined.lines().take(20).count(),
         };
-        
+
         let mut extracted_meta = HashMap::new();
         extracted_meta.insert("file_count".to_string(), file_count.to_string());
-        
+
         let mut context = Self {
             content: combined,
             metadata,
             chunks: Vec::new(),
             extracted_meta,
         };
-        
+
         context.compute_chunks(1000);
         Ok(context)
     }
-    
+
     /// Fetch context from URL
     pub async fn from_url(url: &str) -> Result<Self, RlmError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| RlmError::StorageError(e.to_string()))?;
-        
+
         let response = client
             .get(url)
             .send()
             .await
             .map_err(|e| RlmError::StorageError(format!("HTTP error: {}", e)))?;
-        
+
         let content = response
             .text()
             .await
             .map_err(|e| RlmError::StorageError(format!("Failed to read response: {}", e)))?;
-        
+
         let metadata = ContextMetadata {
             source: url.to_string(),
             content_type: ContentType::Url,
@@ -254,29 +271,29 @@ impl Context {
             line_count: content.lines().count(),
             preview_lines: content.lines().take(20).count(),
         };
-        
+
         let mut context = Self {
             content,
             metadata,
             chunks: Vec::new(),
             extracted_meta: HashMap::new(),
         };
-        
+
         context.compute_chunks(1000);
         Ok(context)
     }
-    
+
     /// Compute chunks based on line count
     fn compute_chunks(&mut self, lines_per_chunk: usize) {
         let lines: Vec<&str> = self.content.lines().collect();
         let mut chunks = Vec::new();
         let mut byte_offset = 0;
-        
+
         for (chunk_idx, chunk_lines) in lines.chunks(lines_per_chunk).enumerate() {
             let chunk_content = chunk_lines.join("\n");
             let start_line = chunk_idx * lines_per_chunk;
             let end_line = (start_line + chunk_lines.len()).saturating_sub(1);
-            
+
             let chunk = ContextChunk {
                 index: chunk_idx,
                 content: chunk_content.clone(),
@@ -285,19 +302,19 @@ impl Context {
                 byte_range: (byte_offset, byte_offset + chunk_content.len()),
                 metadata: ChunkMetadata::default(),
             };
-            
+
             byte_offset += chunk_content.len() + 1; // +1 for newline
             chunks.push(chunk);
         }
-        
+
         self.chunks = chunks;
     }
-    
+
     /// Get a specific chunk by index
     pub fn get_chunk(&self, index: usize) -> Option<&ContextChunk> {
         self.chunks.get(index)
     }
-    
+
     /// Get metadata for LLM consumption
     pub fn to_llm_metadata(&self) -> String {
         let mut meta = format!(
@@ -309,14 +326,19 @@ impl Context {
             self.chunks.len(),
             self.metadata.preview_lines
         );
-        
-        let preview: String = self.content.lines().take(self.metadata.preview_lines).collect::<Vec<_>>().join("\n");
+
+        let preview: String = self
+            .content
+            .lines()
+            .take(self.metadata.preview_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
         meta.push_str(&preview);
-        
+
         if self.content.lines().count() > self.metadata.preview_lines {
             meta.push_str("\n\n[... content continues ...]");
         }
-        
+
         // Add extracted metadata
         if !self.extracted_meta.is_empty() {
             meta.push_str("\n\n### Extracted Metadata\n");
@@ -324,15 +346,15 @@ impl Context {
                 meta.push_str(&format!("{}: {}\n", key, value));
             }
         }
-        
+
         meta
     }
-    
+
     /// Truncate content for LLM consumption
     pub fn truncate_for_llm(&self, max_len: usize) -> String {
         super::truncate_for_llm(&self.content, max_len)
     }
-    
+
     /// Get chunk summary for sub-query dispatch
     pub fn get_chunk_summary(&self) -> Vec<(usize, String, usize)> {
         self.chunks
@@ -348,16 +370,16 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_context_from_text() {
         let text = "Line 1\nLine 2\nLine 3\n...\nLine 100";
         let context = Context::from_text(text, "test");
-        
+
         assert_eq!(context.metadata.total_lines, 5);
         assert!(!context.chunks.is_empty());
     }
-    
+
     #[test]
     fn test_chunking() {
         let mut lines = Vec::new();
@@ -366,7 +388,7 @@ mod tests {
         }
         let text = lines.join("\n");
         let context = Context::from_text(text, "test");
-        
+
         // Should have roughly 3 chunks for 2500 lines at 1000 lines per chunk
         assert!(context.chunks.len() >= 2);
     }

@@ -175,8 +175,10 @@ impl DreamAdvisor {
                 }
 
                 // Weighted: affinity × valence × confidence × persistence
-                let adjustment =
-                    affinity * pattern.valence * pattern.confidence * pattern.persistence_score.min(1.0);
+                let adjustment = affinity
+                    * pattern.valence
+                    * pattern.confidence
+                    * pattern.persistence_score.min(1.0);
 
                 for key in task_keys {
                     let entry = self

@@ -59,11 +59,9 @@ async fn main() -> anyhow::Result<()> {
     let app = hyper_stigmergy::api::api_router(state);
 
     // Add CORS and tracing middleware
-    let app = app.layer(
-        tower_http::cors::CorsLayer::permissive()
-    ).layer(
-        tower_http::trace::TraceLayer::new_for_http()
-    );
+    let app = app
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     tracing::info!("HSM-II API server listening on {}", addr);

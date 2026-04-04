@@ -104,7 +104,11 @@ pub async fn run_onboard_interactive(
 
         if *category == "avoid" {
             // Parse comma-separated avoid patterns
-            let patterns: Vec<&str> = answer.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let patterns: Vec<&str> = answer
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             for pattern in &patterns {
                 living_prompt.add_avoid_pattern(pattern.to_string());
                 avoid_patterns_added += 1;
@@ -120,7 +124,11 @@ pub async fn run_onboard_interactive(
             if !categories.contains(&category.to_string()) {
                 categories.push(category.to_string());
             }
-            println!("  ✓ Created {} belief(s) [{}]\n", new_beliefs.len(), category);
+            println!(
+                "  ✓ Created {} belief(s) [{}]\n",
+                new_beliefs.len(),
+                category
+            );
         }
     }
 
@@ -532,9 +540,7 @@ pub async fn ingest_file(
         print!("  Processing chunk {}/{}... ", i + 1, chunks.len());
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
-        let llm_result = llm
-            .chat(INGEST_SYSTEM_PROMPT, chunk, &[])
-            .await;
+        let llm_result = llm.chat(INGEST_SYSTEM_PROMPT, chunk, &[]).await;
 
         if llm_result.timed_out || llm_result.text.is_empty() {
             result.errors.push(format!("Chunk {} timed out", i + 1));
@@ -553,7 +559,10 @@ pub async fn ingest_file(
 
         for belief in &filtered {
             // Track categories
-            *result.categories.entry(belief.category.clone()).or_insert(0) += 1;
+            *result
+                .categories
+                .entry(belief.category.clone())
+                .or_insert(0) += 1;
 
             // Check for avoid patterns in strategic/preference
             if belief.category == "preference"
@@ -611,7 +620,9 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
         if end < total {
             // Look back from end for a good break point
             for i in (start + chunk_size / 2..end).rev() {
-                if i < chars.len() && (chars[i] == '.' || chars[i] == '\n' || chars[i] == '!' || chars[i] == '?') {
+                if i < chars.len()
+                    && (chars[i] == '.' || chars[i] == '\n' || chars[i] == '!' || chars[i] == '?')
+                {
                     break_at = i + 1;
                     break;
                 }
@@ -677,7 +688,9 @@ fn strip_html_tags(html: &str) -> String {
                 in_tag = true;
                 // Check for script/style start
                 let rest = &html[html.find('<').unwrap_or(0)..];
-                if rest.to_lowercase().starts_with("<script") || rest.to_lowercase().starts_with("<style") {
+                if rest.to_lowercase().starts_with("<script")
+                    || rest.to_lowercase().starts_with("<style")
+                {
                     in_script = true;
                 }
             }
@@ -685,7 +698,9 @@ fn strip_html_tags(html: &str) -> String {
                 in_tag = false;
                 if in_script {
                     let rest = &html[html.find('>').unwrap_or(0)..];
-                    if rest.to_lowercase().starts_with("</script") || rest.to_lowercase().starts_with("</style") {
+                    if rest.to_lowercase().starts_with("</script")
+                        || rest.to_lowercase().starts_with("</style")
+                    {
                         in_script = false;
                     }
                 }
@@ -717,7 +732,11 @@ mod tests {
 
     #[test]
     fn test_answer_to_beliefs_single() {
-        let beliefs = answer_to_beliefs("We build AI code review tools for dev teams", "product", 0.95);
+        let beliefs = answer_to_beliefs(
+            "We build AI code review tools for dev teams",
+            "product",
+            0.95,
+        );
         assert_eq!(beliefs.len(), 1);
         assert_eq!(beliefs[0].0, "We build AI code review tools for dev teams");
         assert!((beliefs[0].1 - 0.95).abs() < f64::EPSILON);
@@ -725,7 +744,8 @@ mod tests {
 
     #[test]
     fn test_answer_to_beliefs_multi() {
-        let beliefs = answer_to_beliefs("CodeRabbit, Sourcery, GitHub Copilot", "competitive", 0.85);
+        let beliefs =
+            answer_to_beliefs("CodeRabbit, Sourcery, GitHub Copilot", "competitive", 0.85);
         assert_eq!(beliefs.len(), 3);
         assert!(beliefs[0].0.contains("CodeRabbit"));
         assert!(beliefs[1].0.contains("Sourcery"));
@@ -742,7 +762,10 @@ mod tests {
     #[test]
     fn test_format_belief_categories() {
         assert_eq!(format_belief("SaaS", "product"), "Our product: SaaS");
-        assert_eq!(format_belief("dev teams", "market"), "Target market: dev teams");
+        assert_eq!(
+            format_belief("dev teams", "market"),
+            "Target market: dev teams"
+        );
         assert_eq!(format_belief("$50K", "financial"), "Financial status: $50K");
     }
 
@@ -830,27 +853,55 @@ mod tests {
         let mut living_prompt = LivingPrompt::new("test");
 
         let mut answers = HashMap::new();
-        answers.insert("product".to_string(), "AI code review tool for dev teams".to_string());
-        answers.insert("market".to_string(), "20-200 person engineering teams".to_string());
-        answers.insert("financial".to_string(), "$12K MRR, 15 customers".to_string());
-        answers.insert("competitors".to_string(), "CodeRabbit, Sourcery".to_string());
-        answers.insert("advantage".to_string(), "3x faster with higher accuracy".to_string());
-        answers.insert("avoid".to_string(), "enterprise tools we can't afford, hiring suggestions".to_string());
+        answers.insert(
+            "product".to_string(),
+            "AI code review tool for dev teams".to_string(),
+        );
+        answers.insert(
+            "market".to_string(),
+            "20-200 person engineering teams".to_string(),
+        );
+        answers.insert(
+            "financial".to_string(),
+            "$12K MRR, 15 customers".to_string(),
+        );
+        answers.insert(
+            "competitors".to_string(),
+            "CodeRabbit, Sourcery".to_string(),
+        );
+        answers.insert(
+            "advantage".to_string(),
+            "3x faster with higher accuracy".to_string(),
+        );
+        answers.insert(
+            "avoid".to_string(),
+            "enterprise tools we can't afford, hiring suggestions".to_string(),
+        );
 
         let result = run_onboard_batch(&mut world, &mut living_prompt, &answers);
 
-        assert!(result.beliefs_created >= 5, "Expected at least 5 beliefs, got {}", result.beliefs_created);
+        assert!(
+            result.beliefs_created >= 5,
+            "Expected at least 5 beliefs, got {}",
+            result.beliefs_created
+        );
         assert_eq!(result.avoid_patterns_added, 2);
         assert!(result.categories.contains(&"product".to_string()));
         assert!(result.categories.contains(&"financial".to_string()));
 
         // Verify beliefs are actually in the world
-        let has_product = world.beliefs.iter().any(|b| b.content.contains("code review"));
+        let has_product = world
+            .beliefs
+            .iter()
+            .any(|b| b.content.contains("code review"));
         assert!(has_product, "Should have a product belief");
 
         // Verify avoid patterns are in living prompt
         let rendered = living_prompt.render();
-        assert!(rendered.contains("enterprise tools"), "Living prompt should contain avoid pattern");
+        assert!(
+            rendered.contains("enterprise tools"),
+            "Living prompt should contain avoid pattern"
+        );
     }
 
     #[test]
@@ -880,12 +931,18 @@ mod tests {
         let new_count = store_extracted_beliefs(&mut world, &mut living_prompt, &extracted);
 
         // Should add 2 beliefs (the preference one becomes an avoid pattern)
-        assert_eq!(new_count, 2, "Expected 2 new beliefs (1 became avoid pattern)");
+        assert_eq!(
+            new_count, 2,
+            "Expected 2 new beliefs (1 became avoid pattern)"
+        );
         assert_eq!(world.beliefs.len(), initial_beliefs + 2);
 
         // Verify the avoid pattern was added
         let rendered = living_prompt.render();
-        assert!(rendered.contains("enterprise solutions"), "Avoid pattern should be in living prompt");
+        assert!(
+            rendered.contains("enterprise solutions"),
+            "Avoid pattern should be in living prompt"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::gateways::{RealDiscordBot, RealTelegramBot, DiscordConfig, TelegramConfig};
+use crate::gateways::{DiscordConfig, RealDiscordBot, RealTelegramBot, TelegramConfig};
 
 /// Unified gateway for all platforms
 pub struct Gateway {
@@ -42,13 +42,17 @@ impl Gateway {
         if let Some(token) = &self.config.discord_token {
             let discord_config = DiscordConfig {
                 token: token.clone(),
-                command_prefix: self.config.discord_prefix.clone().unwrap_or_else(|| "!hsm ".to_string()),
+                command_prefix: self
+                    .config
+                    .discord_prefix
+                    .clone()
+                    .unwrap_or_else(|| "!hsm ".to_string()),
                 allowed_channels: vec!["all".to_string()],
                 presence_text: "Hyper-Stigmergic Morphogenesis II".to_string(),
             };
-            
+
             let mut discord = RealDiscordBot::new(discord_config);
-            
+
             if let Some(handler) = &self.handler {
                 discord.start(handler.clone()).await?;
                 self.discord = Some(discord);
@@ -62,13 +66,17 @@ impl Gateway {
         if let Some(token) = &self.config.telegram_token {
             let telegram_config = TelegramConfig {
                 token: token.clone(),
-                allowed_chats: self.config.telegram_allowed_chats.clone().unwrap_or_default(),
+                allowed_chats: self
+                    .config
+                    .telegram_allowed_chats
+                    .clone()
+                    .unwrap_or_default(),
                 parse_mode: teloxide::types::ParseMode::MarkdownV2,
                 max_message_length: 4096,
             };
-            
+
             let mut telegram = RealTelegramBot::new(telegram_config);
-            
+
             if let Some(handler) = &self.handler {
                 telegram.start(handler.clone()).await?;
                 self.telegram = Some(telegram);

@@ -110,7 +110,11 @@ pub struct ProbabilityFlowNetwork {
 
 impl ProbabilityFlowNetwork {
     /// Create a new network from states and transitions
-    pub fn new(states: Vec<FlowState>, transitions: Vec<FlowTransition>, current_state: &str) -> Self {
+    pub fn new(
+        states: Vec<FlowState>,
+        transitions: Vec<FlowTransition>,
+        current_state: &str,
+    ) -> Self {
         Self {
             states,
             transitions,
@@ -194,10 +198,11 @@ impl ProbabilityFlowNetwork {
 
     /// Get the most likely terminal outcome
     pub fn most_likely_outcome(&self) -> Option<&FlowState> {
-        self.states
-            .iter()
-            .filter(|s| s.terminal)
-            .max_by(|a, b| a.probability.partial_cmp(&b.probability).unwrap_or(std::cmp::Ordering::Equal))
+        self.states.iter().filter(|s| s.terminal).max_by(|a, b| {
+            a.probability
+                .partial_cmp(&b.probability)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Get expected impact — weighted average of terminal state impacts
@@ -222,7 +227,12 @@ impl ProbabilityFlowNetwork {
         let initial: HashMap<String, f64> = self
             .states
             .iter()
-            .map(|s| (s.id.clone(), if s.id == self.current_state { 1.0 } else { 0.0 }))
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    if s.id == self.current_state { 1.0 } else { 0.0 },
+                )
+            })
             .collect();
 
         points.push(ProjectionPoint {
@@ -369,37 +379,157 @@ fn pricing_strategy_template() -> ScenarioTemplate {
         id: "pricing_strategy".into(),
         name: "Pricing Strategy Decision".into(),
         domain: ScenarioDomain::PricingStrategy,
-        description: "Evaluate pricing changes: increase, decrease, new tier, or freemium model".into(),
+        description: "Evaluate pricing changes: increase, decrease, new tier, or freemium model"
+            .into(),
         required_variables: vec![
-            VariableSpec { name: "current_price".into(), description: "Current price per unit/seat".into(), example: "$49/seat/month".into(), default: None },
-            VariableSpec { name: "customer_count".into(), description: "Current paying customers".into(), example: "15".into(), default: None },
-            VariableSpec { name: "current_mrr".into(), description: "Current monthly recurring revenue".into(), example: "$12,000".into(), default: None },
+            VariableSpec {
+                name: "current_price".into(),
+                description: "Current price per unit/seat".into(),
+                example: "$49/seat/month".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "customer_count".into(),
+                description: "Current paying customers".into(),
+                example: "15".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "current_mrr".into(),
+                description: "Current monthly recurring revenue".into(),
+                example: "$12,000".into(),
+                default: None,
+            },
         ],
         optional_variables: vec![
-            VariableSpec { name: "competitor_price".into(), description: "Main competitor's price".into(), example: "$39/seat/month".into(), default: Some("unknown".into()) },
-            VariableSpec { name: "churn_rate".into(), description: "Monthly churn rate".into(), example: "5%".into(), default: Some("unknown".into()) },
-            VariableSpec { name: "target_mrr".into(), description: "Target MRR".into(), example: "$50,000".into(), default: Some("2x current".into()) },
+            VariableSpec {
+                name: "competitor_price".into(),
+                description: "Main competitor's price".into(),
+                example: "$39/seat/month".into(),
+                default: Some("unknown".into()),
+            },
+            VariableSpec {
+                name: "churn_rate".into(),
+                description: "Monthly churn rate".into(),
+                example: "5%".into(),
+                default: Some("unknown".into()),
+            },
+            VariableSpec {
+                name: "target_mrr".into(),
+                description: "Target MRR".into(),
+                example: "$50,000".into(),
+                default: Some("2x current".into()),
+            },
         ],
         default_states: vec![
-            FlowState { id: "current".into(), description: "Current pricing maintained".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "price_increase_accepted".into(), description: "Customers accept price increase".into(), probability: 0.0, terminal: false, impact_score: 4.0 },
-            FlowState { id: "price_increase_churn".into(), description: "Price increase triggers churn".into(), probability: 0.0, terminal: true, impact_score: -3.0 },
-            FlowState { id: "new_tier_success".into(), description: "New pricing tier gains traction".into(), probability: 0.0, terminal: true, impact_score: 6.0 },
-            FlowState { id: "new_tier_confusion".into(), description: "New tier confuses buyers".into(), probability: 0.0, terminal: true, impact_score: -2.0 },
-            FlowState { id: "price_decrease_volume".into(), description: "Lower price drives volume".into(), probability: 0.0, terminal: true, impact_score: 3.0 },
-            FlowState { id: "revenue_growth".into(), description: "Revenue grows sustainably".into(), probability: 0.0, terminal: true, impact_score: 8.0 },
+            FlowState {
+                id: "current".into(),
+                description: "Current pricing maintained".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "price_increase_accepted".into(),
+                description: "Customers accept price increase".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 4.0,
+            },
+            FlowState {
+                id: "price_increase_churn".into(),
+                description: "Price increase triggers churn".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -3.0,
+            },
+            FlowState {
+                id: "new_tier_success".into(),
+                description: "New pricing tier gains traction".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 6.0,
+            },
+            FlowState {
+                id: "new_tier_confusion".into(),
+                description: "New tier confuses buyers".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -2.0,
+            },
+            FlowState {
+                id: "price_decrease_volume".into(),
+                description: "Lower price drives volume".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 3.0,
+            },
+            FlowState {
+                id: "revenue_growth".into(),
+                description: "Revenue grows sustainably".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 8.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "current".into(), to: "price_increase_accepted".into(), probability: 0.4, trigger: "20% price increase announced".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "current".into(), to: "price_increase_churn".into(), probability: 0.15, trigger: "Aggressive price increase".into(), time_estimate: "2 months".into() },
-            FlowTransition { from: "current".into(), to: "new_tier_success".into(), probability: 0.25, trigger: "Enterprise tier launched".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "current".into(), to: "new_tier_confusion".into(), probability: 0.1, trigger: "Too many pricing options".into(), time_estimate: "2 months".into() },
-            FlowTransition { from: "current".into(), to: "price_decrease_volume".into(), probability: 0.1, trigger: "Price reduction for growth".into(), time_estimate: "2 months".into() },
-            FlowTransition { from: "price_increase_accepted".into(), to: "revenue_growth".into(), probability: 0.7, trigger: "Customers see value".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "price_increase_accepted".into(), to: "price_increase_churn".into(), probability: 0.3, trigger: "Delayed churn effect".into(), time_estimate: "4 months".into() },
+            FlowTransition {
+                from: "current".into(),
+                to: "price_increase_accepted".into(),
+                probability: 0.4,
+                trigger: "20% price increase announced".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "current".into(),
+                to: "price_increase_churn".into(),
+                probability: 0.15,
+                trigger: "Aggressive price increase".into(),
+                time_estimate: "2 months".into(),
+            },
+            FlowTransition {
+                from: "current".into(),
+                to: "new_tier_success".into(),
+                probability: 0.25,
+                trigger: "Enterprise tier launched".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "current".into(),
+                to: "new_tier_confusion".into(),
+                probability: 0.1,
+                trigger: "Too many pricing options".into(),
+                time_estimate: "2 months".into(),
+            },
+            FlowTransition {
+                from: "current".into(),
+                to: "price_decrease_volume".into(),
+                probability: 0.1,
+                trigger: "Price reduction for growth".into(),
+                time_estimate: "2 months".into(),
+            },
+            FlowTransition {
+                from: "price_increase_accepted".into(),
+                to: "revenue_growth".into(),
+                probability: 0.7,
+                trigger: "Customers see value".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "price_increase_accepted".into(),
+                to: "price_increase_churn".into(),
+                probability: 0.3,
+                trigger: "Delayed churn effect".into(),
+                time_estimate: "4 months".into(),
+            },
         ],
         suggested_time_steps: 6,
-        suggested_variants: vec!["conservative".into(), "aggressive".into(), "value-based".into(), "freemium".into()],
+        suggested_variants: vec![
+            "conservative".into(),
+            "aggressive".into(),
+            "value-based".into(),
+            "freemium".into(),
+        ],
     }
 }
 
@@ -410,33 +540,142 @@ fn market_entry_template() -> ScenarioTemplate {
         domain: ScenarioDomain::MarketEntry,
         description: "Evaluate entering a new geographic or segment market".into(),
         required_variables: vec![
-            VariableSpec { name: "target_market".into(), description: "Market to enter".into(), example: "European B2B SaaS".into(), default: None },
-            VariableSpec { name: "budget".into(), description: "Budget for entry".into(), example: "$50,000".into(), default: None },
+            VariableSpec {
+                name: "target_market".into(),
+                description: "Market to enter".into(),
+                example: "European B2B SaaS".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "budget".into(),
+                description: "Budget for entry".into(),
+                example: "$50,000".into(),
+                default: None,
+            },
         ],
         optional_variables: vec![
-            VariableSpec { name: "timeline".into(), description: "Target timeline".into(), example: "6 months".into(), default: Some("12 months".into()) },
-            VariableSpec { name: "existing_presence".into(), description: "Any existing presence".into(), example: "3 customers via inbound".into(), default: Some("none".into()) },
+            VariableSpec {
+                name: "timeline".into(),
+                description: "Target timeline".into(),
+                example: "6 months".into(),
+                default: Some("12 months".into()),
+            },
+            VariableSpec {
+                name: "existing_presence".into(),
+                description: "Any existing presence".into(),
+                example: "3 customers via inbound".into(),
+                default: Some("none".into()),
+            },
         ],
         default_states: vec![
-            FlowState { id: "pre_entry".into(), description: "Evaluating market".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "early_traction".into(), description: "First customers acquired".into(), probability: 0.0, terminal: false, impact_score: 3.0 },
-            FlowState { id: "product_market_fit".into(), description: "Achieved PMF in new market".into(), probability: 0.0, terminal: true, impact_score: 9.0 },
-            FlowState { id: "slow_growth".into(), description: "Growth below expectations".into(), probability: 0.0, terminal: false, impact_score: 1.0 },
-            FlowState { id: "exit_market".into(), description: "Decided to exit market".into(), probability: 0.0, terminal: true, impact_score: -4.0 },
-            FlowState { id: "pivot_segment".into(), description: "Pivoted to different segment".into(), probability: 0.0, terminal: true, impact_score: 2.0 },
+            FlowState {
+                id: "pre_entry".into(),
+                description: "Evaluating market".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "early_traction".into(),
+                description: "First customers acquired".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 3.0,
+            },
+            FlowState {
+                id: "product_market_fit".into(),
+                description: "Achieved PMF in new market".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 9.0,
+            },
+            FlowState {
+                id: "slow_growth".into(),
+                description: "Growth below expectations".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 1.0,
+            },
+            FlowState {
+                id: "exit_market".into(),
+                description: "Decided to exit market".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -4.0,
+            },
+            FlowState {
+                id: "pivot_segment".into(),
+                description: "Pivoted to different segment".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 2.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "pre_entry".into(), to: "early_traction".into(), probability: 0.5, trigger: "Launch marketing + sales".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "pre_entry".into(), to: "slow_growth".into(), probability: 0.3, trigger: "Market resistance".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "pre_entry".into(), to: "exit_market".into(), probability: 0.2, trigger: "Due diligence reveals blockers".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "early_traction".into(), to: "product_market_fit".into(), probability: 0.6, trigger: "Strong retention signal".into(), time_estimate: "6 months".into() },
-            FlowTransition { from: "early_traction".into(), to: "slow_growth".into(), probability: 0.4, trigger: "Churn or weak expansion".into(), time_estimate: "4 months".into() },
-            FlowTransition { from: "slow_growth".into(), to: "pivot_segment".into(), probability: 0.4, trigger: "Identify better segment".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "slow_growth".into(), to: "exit_market".into(), probability: 0.3, trigger: "Budget exhausted".into(), time_estimate: "6 months".into() },
-            FlowTransition { from: "slow_growth".into(), to: "early_traction".into(), probability: 0.3, trigger: "Strategy adjustment works".into(), time_estimate: "3 months".into() },
+            FlowTransition {
+                from: "pre_entry".into(),
+                to: "early_traction".into(),
+                probability: 0.5,
+                trigger: "Launch marketing + sales".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "pre_entry".into(),
+                to: "slow_growth".into(),
+                probability: 0.3,
+                trigger: "Market resistance".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "pre_entry".into(),
+                to: "exit_market".into(),
+                probability: 0.2,
+                trigger: "Due diligence reveals blockers".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "early_traction".into(),
+                to: "product_market_fit".into(),
+                probability: 0.6,
+                trigger: "Strong retention signal".into(),
+                time_estimate: "6 months".into(),
+            },
+            FlowTransition {
+                from: "early_traction".into(),
+                to: "slow_growth".into(),
+                probability: 0.4,
+                trigger: "Churn or weak expansion".into(),
+                time_estimate: "4 months".into(),
+            },
+            FlowTransition {
+                from: "slow_growth".into(),
+                to: "pivot_segment".into(),
+                probability: 0.4,
+                trigger: "Identify better segment".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "slow_growth".into(),
+                to: "exit_market".into(),
+                probability: 0.3,
+                trigger: "Budget exhausted".into(),
+                time_estimate: "6 months".into(),
+            },
+            FlowTransition {
+                from: "slow_growth".into(),
+                to: "early_traction".into(),
+                probability: 0.3,
+                trigger: "Strategy adjustment works".into(),
+                time_estimate: "3 months".into(),
+            },
         ],
         suggested_time_steps: 8,
-        suggested_variants: vec!["direct-sales".into(), "partner-led".into(), "product-led".into(), "acquisition".into()],
+        suggested_variants: vec![
+            "direct-sales".into(),
+            "partner-led".into(),
+            "product-led".into(),
+            "acquisition".into(),
+        ],
     }
 }
 
@@ -447,34 +686,148 @@ fn growth_planning_template() -> ScenarioTemplate {
         domain: ScenarioDomain::GrowthPlanning,
         description: "Project revenue growth scenarios with different strategies".into(),
         required_variables: vec![
-            VariableSpec { name: "current_mrr".into(), description: "Current MRR".into(), example: "$12,000".into(), default: None },
-            VariableSpec { name: "target_mrr".into(), description: "Target MRR".into(), example: "$50,000".into(), default: None },
-            VariableSpec { name: "timeline".into(), description: "Target timeline".into(), example: "12 months".into(), default: None },
+            VariableSpec {
+                name: "current_mrr".into(),
+                description: "Current MRR".into(),
+                example: "$12,000".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "target_mrr".into(),
+                description: "Target MRR".into(),
+                example: "$50,000".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "timeline".into(),
+                description: "Target timeline".into(),
+                example: "12 months".into(),
+                default: None,
+            },
         ],
         optional_variables: vec![
-            VariableSpec { name: "growth_rate".into(), description: "Current monthly growth rate".into(), example: "8%".into(), default: Some("unknown".into()) },
-            VariableSpec { name: "team_size".into(), description: "Team size".into(), example: "4".into(), default: Some("unknown".into()) },
+            VariableSpec {
+                name: "growth_rate".into(),
+                description: "Current monthly growth rate".into(),
+                example: "8%".into(),
+                default: Some("unknown".into()),
+            },
+            VariableSpec {
+                name: "team_size".into(),
+                description: "Team size".into(),
+                example: "4".into(),
+                default: Some("unknown".into()),
+            },
         ],
         default_states: vec![
-            FlowState { id: "current_growth".into(), description: "Maintaining current growth rate".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "accelerated".into(), description: "Growth accelerating above plan".into(), probability: 0.0, terminal: false, impact_score: 5.0 },
-            FlowState { id: "plateau".into(), description: "Growth plateaued".into(), probability: 0.0, terminal: false, impact_score: -2.0 },
-            FlowState { id: "target_hit".into(), description: "Revenue target achieved".into(), probability: 0.0, terminal: true, impact_score: 10.0 },
-            FlowState { id: "target_missed".into(), description: "Target missed, need to reassess".into(), probability: 0.0, terminal: true, impact_score: -3.0 },
-            FlowState { id: "exceeded".into(), description: "Exceeded target significantly".into(), probability: 0.0, terminal: true, impact_score: 10.0 },
+            FlowState {
+                id: "current_growth".into(),
+                description: "Maintaining current growth rate".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "accelerated".into(),
+                description: "Growth accelerating above plan".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 5.0,
+            },
+            FlowState {
+                id: "plateau".into(),
+                description: "Growth plateaued".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: -2.0,
+            },
+            FlowState {
+                id: "target_hit".into(),
+                description: "Revenue target achieved".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 10.0,
+            },
+            FlowState {
+                id: "target_missed".into(),
+                description: "Target missed, need to reassess".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -3.0,
+            },
+            FlowState {
+                id: "exceeded".into(),
+                description: "Exceeded target significantly".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 10.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "current_growth".into(), to: "accelerated".into(), probability: 0.3, trigger: "New channel or product works".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "current_growth".into(), to: "plateau".into(), probability: 0.3, trigger: "Market saturation or churn".into(), time_estimate: "4 months".into() },
-            FlowTransition { from: "current_growth".into(), to: "target_hit".into(), probability: 0.2, trigger: "Steady execution".into(), time_estimate: "12 months".into() },
-            FlowTransition { from: "current_growth".into(), to: "target_missed".into(), probability: 0.2, trigger: "External shock".into(), time_estimate: "12 months".into() },
-            FlowTransition { from: "accelerated".into(), to: "exceeded".into(), probability: 0.5, trigger: "Viral growth or large deal".into(), time_estimate: "6 months".into() },
-            FlowTransition { from: "accelerated".into(), to: "target_hit".into(), probability: 0.4, trigger: "Sustainable acceleration".into(), time_estimate: "8 months".into() },
-            FlowTransition { from: "plateau".into(), to: "current_growth".into(), probability: 0.3, trigger: "New initiative".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "plateau".into(), to: "target_missed".into(), probability: 0.4, trigger: "Can't break through".into(), time_estimate: "9 months".into() },
+            FlowTransition {
+                from: "current_growth".into(),
+                to: "accelerated".into(),
+                probability: 0.3,
+                trigger: "New channel or product works".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "current_growth".into(),
+                to: "plateau".into(),
+                probability: 0.3,
+                trigger: "Market saturation or churn".into(),
+                time_estimate: "4 months".into(),
+            },
+            FlowTransition {
+                from: "current_growth".into(),
+                to: "target_hit".into(),
+                probability: 0.2,
+                trigger: "Steady execution".into(),
+                time_estimate: "12 months".into(),
+            },
+            FlowTransition {
+                from: "current_growth".into(),
+                to: "target_missed".into(),
+                probability: 0.2,
+                trigger: "External shock".into(),
+                time_estimate: "12 months".into(),
+            },
+            FlowTransition {
+                from: "accelerated".into(),
+                to: "exceeded".into(),
+                probability: 0.5,
+                trigger: "Viral growth or large deal".into(),
+                time_estimate: "6 months".into(),
+            },
+            FlowTransition {
+                from: "accelerated".into(),
+                to: "target_hit".into(),
+                probability: 0.4,
+                trigger: "Sustainable acceleration".into(),
+                time_estimate: "8 months".into(),
+            },
+            FlowTransition {
+                from: "plateau".into(),
+                to: "current_growth".into(),
+                probability: 0.3,
+                trigger: "New initiative".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "plateau".into(),
+                to: "target_missed".into(),
+                probability: 0.4,
+                trigger: "Can't break through".into(),
+                time_estimate: "9 months".into(),
+            },
         ],
         suggested_time_steps: 12,
-        suggested_variants: vec!["organic".into(), "paid-acquisition".into(), "product-led".into(), "enterprise-sales".into()],
+        suggested_variants: vec![
+            "organic".into(),
+            "paid-acquisition".into(),
+            "product-led".into(),
+            "enterprise-sales".into(),
+        ],
     }
 }
 
@@ -485,31 +838,127 @@ fn marketing_campaign_template() -> ScenarioTemplate {
         domain: ScenarioDomain::MarketingCampaign,
         description: "Project outcomes of a marketing campaign or product launch".into(),
         required_variables: vec![
-            VariableSpec { name: "campaign_type".into(), description: "Type of campaign".into(), example: "Product Hunt launch".into(), default: None },
-            VariableSpec { name: "budget".into(), description: "Campaign budget".into(), example: "$5,000".into(), default: None },
-            VariableSpec { name: "target_metric".into(), description: "Primary success metric".into(), example: "500 signups".into(), default: None },
+            VariableSpec {
+                name: "campaign_type".into(),
+                description: "Type of campaign".into(),
+                example: "Product Hunt launch".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "budget".into(),
+                description: "Campaign budget".into(),
+                example: "$5,000".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "target_metric".into(),
+                description: "Primary success metric".into(),
+                example: "500 signups".into(),
+                default: None,
+            },
         ],
         optional_variables: vec![
-            VariableSpec { name: "audience_size".into(), description: "Estimated reach".into(), example: "50,000 developers".into(), default: Some("unknown".into()) },
-            VariableSpec { name: "past_performance".into(), description: "Previous campaign results".into(), example: "2% conversion rate".into(), default: Some("no data".into()) },
+            VariableSpec {
+                name: "audience_size".into(),
+                description: "Estimated reach".into(),
+                example: "50,000 developers".into(),
+                default: Some("unknown".into()),
+            },
+            VariableSpec {
+                name: "past_performance".into(),
+                description: "Previous campaign results".into(),
+                example: "2% conversion rate".into(),
+                default: Some("no data".into()),
+            },
         ],
         default_states: vec![
-            FlowState { id: "pre_launch".into(), description: "Campaign prepared".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "viral".into(), description: "Campaign goes viral".into(), probability: 0.0, terminal: true, impact_score: 9.0 },
-            FlowState { id: "strong_performance".into(), description: "Exceeds targets".into(), probability: 0.0, terminal: true, impact_score: 6.0 },
-            FlowState { id: "meets_target".into(), description: "Hits expected targets".into(), probability: 0.0, terminal: true, impact_score: 3.0 },
-            FlowState { id: "underperforms".into(), description: "Below expectations".into(), probability: 0.0, terminal: true, impact_score: -2.0 },
-            FlowState { id: "flop".into(), description: "Campaign fails".into(), probability: 0.0, terminal: true, impact_score: -5.0 },
+            FlowState {
+                id: "pre_launch".into(),
+                description: "Campaign prepared".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "viral".into(),
+                description: "Campaign goes viral".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 9.0,
+            },
+            FlowState {
+                id: "strong_performance".into(),
+                description: "Exceeds targets".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 6.0,
+            },
+            FlowState {
+                id: "meets_target".into(),
+                description: "Hits expected targets".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 3.0,
+            },
+            FlowState {
+                id: "underperforms".into(),
+                description: "Below expectations".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -2.0,
+            },
+            FlowState {
+                id: "flop".into(),
+                description: "Campaign fails".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -5.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "pre_launch".into(), to: "viral".into(), probability: 0.05, trigger: "Organic sharing takes off".into(), time_estimate: "1 week".into() },
-            FlowTransition { from: "pre_launch".into(), to: "strong_performance".into(), probability: 0.2, trigger: "Good targeting + messaging".into(), time_estimate: "2 weeks".into() },
-            FlowTransition { from: "pre_launch".into(), to: "meets_target".into(), probability: 0.35, trigger: "Solid execution".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "pre_launch".into(), to: "underperforms".into(), probability: 0.3, trigger: "Audience fatigue or poor timing".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "pre_launch".into(), to: "flop".into(), probability: 0.1, trigger: "Wrong channel or message".into(), time_estimate: "2 weeks".into() },
+            FlowTransition {
+                from: "pre_launch".into(),
+                to: "viral".into(),
+                probability: 0.05,
+                trigger: "Organic sharing takes off".into(),
+                time_estimate: "1 week".into(),
+            },
+            FlowTransition {
+                from: "pre_launch".into(),
+                to: "strong_performance".into(),
+                probability: 0.2,
+                trigger: "Good targeting + messaging".into(),
+                time_estimate: "2 weeks".into(),
+            },
+            FlowTransition {
+                from: "pre_launch".into(),
+                to: "meets_target".into(),
+                probability: 0.35,
+                trigger: "Solid execution".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "pre_launch".into(),
+                to: "underperforms".into(),
+                probability: 0.3,
+                trigger: "Audience fatigue or poor timing".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "pre_launch".into(),
+                to: "flop".into(),
+                probability: 0.1,
+                trigger: "Wrong channel or message".into(),
+                time_estimate: "2 weeks".into(),
+            },
         ],
         suggested_time_steps: 4,
-        suggested_variants: vec!["content-led".into(), "paid-ads".into(), "influencer".into(), "community-driven".into()],
+        suggested_variants: vec![
+            "content-led".into(),
+            "paid-ads".into(),
+            "influencer".into(),
+            "community-driven".into(),
+        ],
     }
 }
 
@@ -518,30 +967,110 @@ fn competitive_response_template() -> ScenarioTemplate {
         id: "competitive_response".into(),
         name: "Competitive Response Planning".into(),
         domain: ScenarioDomain::CompetitiveResponse,
-        description: "Plan response to competitor moves: price cuts, feature launches, acquisitions".into(),
+        description:
+            "Plan response to competitor moves: price cuts, feature launches, acquisitions".into(),
         required_variables: vec![
-            VariableSpec { name: "competitor_action".into(), description: "What the competitor did".into(), example: "Launched free tier".into(), default: None },
-            VariableSpec { name: "our_position".into(), description: "Our current market position".into(), example: "Premium, 15 customers, $49/seat".into(), default: None },
+            VariableSpec {
+                name: "competitor_action".into(),
+                description: "What the competitor did".into(),
+                example: "Launched free tier".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "our_position".into(),
+                description: "Our current market position".into(),
+                example: "Premium, 15 customers, $49/seat".into(),
+                default: None,
+            },
         ],
         optional_variables: vec![
-            VariableSpec { name: "our_advantage".into(), description: "Our key differentiator".into(), example: "3x faster, better accuracy".into(), default: Some("unknown".into()) },
-            VariableSpec { name: "urgency".into(), description: "How urgent is response".into(), example: "losing deals to them".into(), default: Some("moderate".into()) },
+            VariableSpec {
+                name: "our_advantage".into(),
+                description: "Our key differentiator".into(),
+                example: "3x faster, better accuracy".into(),
+                default: Some("unknown".into()),
+            },
+            VariableSpec {
+                name: "urgency".into(),
+                description: "How urgent is response".into(),
+                example: "losing deals to them".into(),
+                default: Some("moderate".into()),
+            },
         ],
         default_states: vec![
-            FlowState { id: "status_quo".into(), description: "No response yet".into(), probability: 1.0, terminal: false, impact_score: -1.0 },
-            FlowState { id: "match_price".into(), description: "Match competitor pricing".into(), probability: 0.0, terminal: true, impact_score: 1.0 },
-            FlowState { id: "differentiate".into(), description: "Double down on differentiation".into(), probability: 0.0, terminal: true, impact_score: 5.0 },
-            FlowState { id: "new_category".into(), description: "Create new category".into(), probability: 0.0, terminal: true, impact_score: 8.0 },
-            FlowState { id: "lose_share".into(), description: "Lose market share".into(), probability: 0.0, terminal: true, impact_score: -6.0 },
+            FlowState {
+                id: "status_quo".into(),
+                description: "No response yet".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: -1.0,
+            },
+            FlowState {
+                id: "match_price".into(),
+                description: "Match competitor pricing".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 1.0,
+            },
+            FlowState {
+                id: "differentiate".into(),
+                description: "Double down on differentiation".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 5.0,
+            },
+            FlowState {
+                id: "new_category".into(),
+                description: "Create new category".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 8.0,
+            },
+            FlowState {
+                id: "lose_share".into(),
+                description: "Lose market share".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -6.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "status_quo".into(), to: "match_price".into(), probability: 0.2, trigger: "Price war decision".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "status_quo".into(), to: "differentiate".into(), probability: 0.35, trigger: "Feature investment".into(), time_estimate: "3 months".into() },
-            FlowTransition { from: "status_quo".into(), to: "new_category".into(), probability: 0.15, trigger: "Bold positioning shift".into(), time_estimate: "6 months".into() },
-            FlowTransition { from: "status_quo".into(), to: "lose_share".into(), probability: 0.3, trigger: "No action taken".into(), time_estimate: "3 months".into() },
+            FlowTransition {
+                from: "status_quo".into(),
+                to: "match_price".into(),
+                probability: 0.2,
+                trigger: "Price war decision".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "status_quo".into(),
+                to: "differentiate".into(),
+                probability: 0.35,
+                trigger: "Feature investment".into(),
+                time_estimate: "3 months".into(),
+            },
+            FlowTransition {
+                from: "status_quo".into(),
+                to: "new_category".into(),
+                probability: 0.15,
+                trigger: "Bold positioning shift".into(),
+                time_estimate: "6 months".into(),
+            },
+            FlowTransition {
+                from: "status_quo".into(),
+                to: "lose_share".into(),
+                probability: 0.3,
+                trigger: "No action taken".into(),
+                time_estimate: "3 months".into(),
+            },
         ],
         suggested_time_steps: 6,
-        suggested_variants: vec!["aggressive".into(), "defensive".into(), "flanking".into(), "ignore".into()],
+        suggested_variants: vec![
+            "aggressive".into(),
+            "defensive".into(),
+            "flanking".into(),
+            "ignore".into(),
+        ],
     }
 }
 
@@ -550,30 +1079,108 @@ fn cost_optimization_template() -> ScenarioTemplate {
         id: "cost_optimization".into(),
         name: "Cost Optimization Decision".into(),
         domain: ScenarioDomain::CostOptimization,
-        description: "Evaluate cost reduction strategies: infra, team, tooling, vendor changes".into(),
+        description: "Evaluate cost reduction strategies: infra, team, tooling, vendor changes"
+            .into(),
         required_variables: vec![
-            VariableSpec { name: "current_monthly_cost".into(), description: "Current monthly burn".into(), example: "$15,000".into(), default: None },
-            VariableSpec { name: "cost_breakdown".into(), description: "Major cost categories".into(), example: "60% LLM APIs, 20% infra, 20% tools".into(), default: None },
-            VariableSpec { name: "target_reduction".into(), description: "Target cost reduction".into(), example: "30%".into(), default: None },
+            VariableSpec {
+                name: "current_monthly_cost".into(),
+                description: "Current monthly burn".into(),
+                example: "$15,000".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "cost_breakdown".into(),
+                description: "Major cost categories".into(),
+                example: "60% LLM APIs, 20% infra, 20% tools".into(),
+                default: None,
+            },
+            VariableSpec {
+                name: "target_reduction".into(),
+                description: "Target cost reduction".into(),
+                example: "30%".into(),
+                default: None,
+            },
         ],
-        optional_variables: vec![
-            VariableSpec { name: "constraints".into(), description: "Non-negotiable constraints".into(), example: "Cannot reduce quality".into(), default: Some("none".into()) },
-        ],
+        optional_variables: vec![VariableSpec {
+            name: "constraints".into(),
+            description: "Non-negotiable constraints".into(),
+            example: "Cannot reduce quality".into(),
+            default: Some("none".into()),
+        }],
         default_states: vec![
-            FlowState { id: "current_costs".into(), description: "Current cost structure".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "optimized".into(), description: "Costs reduced, quality maintained".into(), probability: 0.0, terminal: true, impact_score: 7.0 },
-            FlowState { id: "reduced_quality".into(), description: "Costs reduced but quality dropped".into(), probability: 0.0, terminal: true, impact_score: -3.0 },
-            FlowState { id: "no_savings".into(), description: "Attempted but minimal savings".into(), probability: 0.0, terminal: true, impact_score: -1.0 },
-            FlowState { id: "innovation_savings".into(), description: "Found innovative approach with major savings".into(), probability: 0.0, terminal: true, impact_score: 9.0 },
+            FlowState {
+                id: "current_costs".into(),
+                description: "Current cost structure".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "optimized".into(),
+                description: "Costs reduced, quality maintained".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 7.0,
+            },
+            FlowState {
+                id: "reduced_quality".into(),
+                description: "Costs reduced but quality dropped".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -3.0,
+            },
+            FlowState {
+                id: "no_savings".into(),
+                description: "Attempted but minimal savings".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -1.0,
+            },
+            FlowState {
+                id: "innovation_savings".into(),
+                description: "Found innovative approach with major savings".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 9.0,
+            },
         ],
         default_transitions: vec![
-            FlowTransition { from: "current_costs".into(), to: "optimized".into(), probability: 0.35, trigger: "Systematic optimization".into(), time_estimate: "2 months".into() },
-            FlowTransition { from: "current_costs".into(), to: "reduced_quality".into(), probability: 0.2, trigger: "Aggressive cuts".into(), time_estimate: "1 month".into() },
-            FlowTransition { from: "current_costs".into(), to: "no_savings".into(), probability: 0.3, trigger: "Already lean".into(), time_estimate: "2 months".into() },
-            FlowTransition { from: "current_costs".into(), to: "innovation_savings".into(), probability: 0.15, trigger: "Architecture rethink".into(), time_estimate: "3 months".into() },
+            FlowTransition {
+                from: "current_costs".into(),
+                to: "optimized".into(),
+                probability: 0.35,
+                trigger: "Systematic optimization".into(),
+                time_estimate: "2 months".into(),
+            },
+            FlowTransition {
+                from: "current_costs".into(),
+                to: "reduced_quality".into(),
+                probability: 0.2,
+                trigger: "Aggressive cuts".into(),
+                time_estimate: "1 month".into(),
+            },
+            FlowTransition {
+                from: "current_costs".into(),
+                to: "no_savings".into(),
+                probability: 0.3,
+                trigger: "Already lean".into(),
+                time_estimate: "2 months".into(),
+            },
+            FlowTransition {
+                from: "current_costs".into(),
+                to: "innovation_savings".into(),
+                probability: 0.15,
+                trigger: "Architecture rethink".into(),
+                time_estimate: "3 months".into(),
+            },
         ],
         suggested_time_steps: 4,
-        suggested_variants: vec!["incremental".into(), "aggressive".into(), "strategic".into(), "innovation-driven".into()],
+        suggested_variants: vec![
+            "incremental".into(),
+            "aggressive".into(),
+            "strategic".into(),
+            "innovation-driven".into(),
+        ],
     }
 }
 
@@ -623,10 +1230,8 @@ pub struct CalibrationStats {
 
 /// Compute calibration stats from prediction records
 pub fn compute_calibration(records: &[PredictionRecord]) -> CalibrationStats {
-    let evaluated: Vec<&PredictionRecord> = records
-        .iter()
-        .filter(|r| r.was_correct.is_some())
-        .collect();
+    let evaluated: Vec<&PredictionRecord> =
+        records.iter().filter(|r| r.was_correct.is_some()).collect();
 
     if evaluated.is_empty() {
         return CalibrationStats {
@@ -640,10 +1245,17 @@ pub fn compute_calibration(records: &[PredictionRecord]) -> CalibrationStats {
         };
     }
 
-    let correct = evaluated.iter().filter(|r| r.was_correct == Some(true)).count();
+    let correct = evaluated
+        .iter()
+        .filter(|r| r.was_correct == Some(true))
+        .count();
     let total = evaluated.len();
     let actual_accuracy = correct as f64 / total as f64;
-    let avg_confidence: f64 = evaluated.iter().map(|r| r.predicted_confidence).sum::<f64>() / total as f64;
+    let avg_confidence: f64 = evaluated
+        .iter()
+        .map(|r| r.predicted_confidence)
+        .sum::<f64>()
+        / total as f64;
     let calibration_error = (avg_confidence - actual_accuracy).abs();
 
     let direction = if avg_confidence > actual_accuracy + 0.05 {
@@ -839,7 +1451,10 @@ pub fn validate_variables(
         .collect();
     for key in variables.keys() {
         if !known.contains(&key.as_str()) {
-            warnings.push(format!("'{}' is not a recognized variable for this template", key));
+            warnings.push(format!(
+                "'{}' is not a recognized variable for this template",
+                key
+            ));
         }
     }
 
@@ -901,7 +1516,10 @@ impl PredictionStore {
 
     /// Save to disk
     pub fn save(&self) -> Result<()> {
-        let path = self.path.as_ref().ok_or_else(|| anyhow::anyhow!("No path set"))?;
+        let path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No path set"))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -939,9 +1557,8 @@ impl PredictionStore {
         if let Some(record) = self.records.iter_mut().find(|r| r.id == prediction_id) {
             record.actual_outcome = Some(actual_outcome.to_string());
             record.was_correct = Some(was_correct);
-            record.calibration_error = Some(
-                (record.predicted_confidence - if was_correct { 1.0 } else { 0.0 }).abs(),
-            );
+            record.calibration_error =
+                Some((record.predicted_confidence - if was_correct { 1.0 } else { 0.0 }).abs());
             let _ = self.save();
         }
     }
@@ -953,7 +1570,10 @@ impl PredictionStore {
 
     /// List predictions awaiting outcomes (unresolved)
     pub fn pending_outcomes(&self) -> Vec<&PredictionRecord> {
-        self.records.iter().filter(|r| r.was_correct.is_none()).collect()
+        self.records
+            .iter()
+            .filter(|r| r.was_correct.is_none())
+            .collect()
     }
 
     /// Compare two analyses side by side
@@ -985,7 +1605,13 @@ impl PredictionStore {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let domains = ["pricing", "growth", "marketing", "market_entry", "competitive"];
+        let domains = [
+            "pricing",
+            "growth",
+            "marketing",
+            "market_entry",
+            "competitive",
+        ];
         let base_accuracy = 0.62; // Realistic LLM prediction accuracy
 
         for i in 0..count {
@@ -1032,7 +1658,12 @@ impl PredictionStore {
     pub fn analyses_by_domain(&self, domain: &str) -> Vec<&StoredAnalysis> {
         self.analyses
             .iter()
-            .filter(|a| a.analysis.domain.to_lowercase().contains(&domain.to_lowercase()))
+            .filter(|a| {
+                a.analysis
+                    .domain
+                    .to_lowercase()
+                    .contains(&domain.to_lowercase())
+            })
             .collect()
     }
 }
@@ -1162,9 +1793,7 @@ impl MiroFishEngine {
         let projection = network.projection_curve();
 
         // 3. Generate action trajectory via LLM
-        let trajectory = self
-            .generate_trajectory(template, vars, beliefs)
-            .await?;
+        let trajectory = self.generate_trajectory(template, vars, beliefs).await?;
 
         // 4. Run LLM scenario branches
         let scenario_report = self
@@ -1240,11 +1869,8 @@ impl MiroFishEngine {
         };
 
         // 8. Persist analysis
-        self.store.store_analysis(
-            analysis.clone(),
-            "",
-            &[template.domain.to_string()],
-        );
+        self.store
+            .store_analysis(analysis.clone(), "", &[template.domain.to_string()]);
 
         Ok(analysis)
     }
@@ -1305,7 +1931,11 @@ impl MiroFishEngine {
             round_num,
             current_confidence * 100.0,
             current_synthesis,
-            if history_context.is_empty() { "None" } else { &history_context },
+            if history_context.is_empty() {
+                "None"
+            } else {
+                &history_context
+            },
             feedback,
             belief_text,
         );
@@ -1326,11 +1956,28 @@ impl MiroFishEngine {
             let trimmed = line.trim();
             let upper = trimmed.to_uppercase();
             if upper.starts_with("ADJUSTMENT:") {
-                adjustments.push(trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+                adjustments.push(
+                    trimmed
+                        .splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                );
             } else if upper.starts_with("SELF_CHECK:") || upper.starts_with("SELF CHECK:") {
-                self_check = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                self_check = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             } else if upper.starts_with("SYNTHESIS:") {
-                new_synthesis = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                new_synthesis = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             } else if upper.starts_with("CONFIDENCE:") {
                 new_confidence = trimmed
                     .splitn(2, ':')
@@ -1489,9 +2136,19 @@ impl MiroFishEngine {
                 });
             } else if let Some(ref mut step) = current_step {
                 if upper.starts_with("OUTCOME:") {
-                    step.expected_outcome = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                    step.expected_outcome = trimmed
+                        .splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                 } else if upper.starts_with("TIME:") {
-                    step.time_horizon = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                    step.time_horizon = trimmed
+                        .splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                 } else if upper.starts_with("PROBABILITY:") {
                     let val_str = trimmed.splitn(2, ':').nth(1).unwrap_or("0.6").trim();
                     step.success_probability = val_str
@@ -1503,7 +2160,11 @@ impl MiroFishEngine {
                         .clamp(0.0, 1.0);
                 } else if upper.starts_with("RESOURCES:") {
                     let res = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
-                    step.resources = res.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    step.resources = res
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 } else if upper.starts_with("DEPENDS_ON:") || upper.starts_with("DEPENDS ON:") {
                     let deps = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
                     if deps.to_lowercase() != "none" {
@@ -1521,7 +2182,11 @@ impl MiroFishEngine {
                     }
                 } else if upper.starts_with("RISKS:") || upper.starts_with("RISK:") {
                     let risk = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
-                    step.risks = risk.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    step.risks = risk
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             }
         }
@@ -1547,11 +2212,7 @@ impl MiroFishEngine {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let seeds: Vec<String> = beliefs
-            .iter()
-            .take(5)
-            .map(|b| b.content.clone())
-            .collect();
+        let seeds: Vec<String> = beliefs.iter().take(5).map(|b| b.content.clone()).collect();
 
         // Use the base scenario simulator for LLM-based branches
         let config = ScenarioSimulatorConfig {
@@ -1594,13 +2255,43 @@ mod tests {
     #[test]
     fn test_probability_flow_basic() {
         let states = vec![
-            FlowState { id: "A".into(), description: "Start".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "B".into(), description: "Success".into(), probability: 0.0, terminal: true, impact_score: 10.0 },
-            FlowState { id: "C".into(), description: "Failure".into(), probability: 0.0, terminal: true, impact_score: -5.0 },
+            FlowState {
+                id: "A".into(),
+                description: "Start".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "B".into(),
+                description: "Success".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 10.0,
+            },
+            FlowState {
+                id: "C".into(),
+                description: "Failure".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -5.0,
+            },
         ];
         let transitions = vec![
-            FlowTransition { from: "A".into(), to: "B".into(), probability: 0.7, trigger: "good".into(), time_estimate: "1m".into() },
-            FlowTransition { from: "A".into(), to: "C".into(), probability: 0.3, trigger: "bad".into(), time_estimate: "1m".into() },
+            FlowTransition {
+                from: "A".into(),
+                to: "B".into(),
+                probability: 0.7,
+                trigger: "good".into(),
+                time_estimate: "1m".into(),
+            },
+            FlowTransition {
+                from: "A".into(),
+                to: "C".into(),
+                probability: 0.3,
+                trigger: "bad".into(),
+                time_estimate: "1m".into(),
+            },
         ];
 
         let mut network = ProbabilityFlowNetwork::new(states, transitions, "A");
@@ -1611,57 +2302,147 @@ mod tests {
 
         // After one step: probability flows to B and C
         network.step();
-        assert!((network.states[1].probability - 0.7).abs() < 0.01, "B should have ~0.7, got {}", network.states[1].probability);
-        assert!((network.states[2].probability - 0.3).abs() < 0.01, "C should have ~0.3, got {}", network.states[2].probability);
+        assert!(
+            (network.states[1].probability - 0.7).abs() < 0.01,
+            "B should have ~0.7, got {}",
+            network.states[1].probability
+        );
+        assert!(
+            (network.states[2].probability - 0.3).abs() < 0.01,
+            "C should have ~0.3, got {}",
+            network.states[2].probability
+        );
     }
 
     #[test]
     fn test_probability_flow_multi_step() {
         let states = vec![
-            FlowState { id: "start".into(), description: "Start".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "mid".into(), description: "Middle".into(), probability: 0.0, terminal: false, impact_score: 2.0 },
-            FlowState { id: "end".into(), description: "End".into(), probability: 0.0, terminal: true, impact_score: 10.0 },
+            FlowState {
+                id: "start".into(),
+                description: "Start".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "mid".into(),
+                description: "Middle".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 2.0,
+            },
+            FlowState {
+                id: "end".into(),
+                description: "End".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 10.0,
+            },
         ];
         let transitions = vec![
-            FlowTransition { from: "start".into(), to: "mid".into(), probability: 0.6, trigger: "advance".into(), time_estimate: "1m".into() },
-            FlowTransition { from: "mid".into(), to: "end".into(), probability: 0.8, trigger: "complete".into(), time_estimate: "1m".into() },
+            FlowTransition {
+                from: "start".into(),
+                to: "mid".into(),
+                probability: 0.6,
+                trigger: "advance".into(),
+                time_estimate: "1m".into(),
+            },
+            FlowTransition {
+                from: "mid".into(),
+                to: "end".into(),
+                probability: 0.8,
+                trigger: "complete".into(),
+                time_estimate: "1m".into(),
+            },
         ];
 
         let mut network = ProbabilityFlowNetwork::new(states, transitions, "start");
         network.simulate(5);
 
         // After enough steps, most probability should be in terminal "end"
-        let end_prob = network.states.iter().find(|s| s.id == "end").unwrap().probability;
-        assert!(end_prob > 0.3, "End state should accumulate probability, got {}", end_prob);
+        let end_prob = network
+            .states
+            .iter()
+            .find(|s| s.id == "end")
+            .unwrap()
+            .probability;
+        assert!(
+            end_prob > 0.3,
+            "End state should accumulate probability, got {}",
+            end_prob
+        );
 
         // Verify probability conservation (total should be ~1.0)
         let total: f64 = network.states.iter().map(|s| s.probability).sum();
-        assert!((total - 1.0).abs() < 0.01, "Total probability should be ~1.0, got {}", total);
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Total probability should be ~1.0, got {}",
+            total
+        );
     }
 
     #[test]
     fn test_expected_impact() {
         let states = vec![
-            FlowState { id: "A".into(), description: "Start".into(), probability: 0.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "good".into(), description: "Good".into(), probability: 0.7, terminal: true, impact_score: 10.0 },
-            FlowState { id: "bad".into(), description: "Bad".into(), probability: 0.3, terminal: true, impact_score: -5.0 },
+            FlowState {
+                id: "A".into(),
+                description: "Start".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "good".into(),
+                description: "Good".into(),
+                probability: 0.7,
+                terminal: true,
+                impact_score: 10.0,
+            },
+            FlowState {
+                id: "bad".into(),
+                description: "Bad".into(),
+                probability: 0.3,
+                terminal: true,
+                impact_score: -5.0,
+            },
         ];
 
         let network = ProbabilityFlowNetwork::new(states, vec![], "A");
         let impact = network.expected_impact();
         let expected = (0.7 * 10.0 + 0.3 * -5.0) / (0.7 + 0.3);
-        assert!((impact - expected).abs() < 0.01, "Expected impact {}, got {}", expected, impact);
+        assert!(
+            (impact - expected).abs() < 0.01,
+            "Expected impact {}, got {}",
+            expected,
+            impact
+        );
     }
 
     #[test]
     fn test_projection_curve() {
         let states = vec![
-            FlowState { id: "A".into(), description: "Start".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "B".into(), description: "End".into(), probability: 0.0, terminal: true, impact_score: 5.0 },
+            FlowState {
+                id: "A".into(),
+                description: "Start".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "B".into(),
+                description: "End".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 5.0,
+            },
         ];
-        let transitions = vec![
-            FlowTransition { from: "A".into(), to: "B".into(), probability: 0.5, trigger: "go".into(), time_estimate: "1m".into() },
-        ];
+        let transitions = vec![FlowTransition {
+            from: "A".into(),
+            to: "B".into(),
+            probability: 0.5,
+            trigger: "go".into(),
+            time_estimate: "1m".into(),
+        }];
 
         let mut network = ProbabilityFlowNetwork::new(states, transitions, "A");
         network.simulate(3);
@@ -1673,7 +2454,18 @@ mod tests {
         assert!((curve[0].state_probabilities["A"] - 1.0).abs() < 1e-10);
 
         // B's probability should increase over time
-        assert!(curve[3].state_probabilities.get("B").copied().unwrap_or(0.0) > curve[1].state_probabilities.get("B").copied().unwrap_or(0.0));
+        assert!(
+            curve[3]
+                .state_probabilities
+                .get("B")
+                .copied()
+                .unwrap_or(0.0)
+                > curve[1]
+                    .state_probabilities
+                    .get("B")
+                    .copied()
+                    .unwrap_or(0.0)
+        );
     }
 
     #[test]
@@ -1682,7 +2474,10 @@ mod tests {
         assert_eq!(templates.len(), 6);
 
         // Verify pricing template
-        let pricing = templates.iter().find(|t| t.id == "pricing_strategy").unwrap();
+        let pricing = templates
+            .iter()
+            .find(|t| t.id == "pricing_strategy")
+            .unwrap();
         assert_eq!(pricing.domain, ScenarioDomain::PricingStrategy);
         assert!(!pricing.required_variables.is_empty());
         assert!(!pricing.default_states.is_empty());
@@ -1690,16 +2485,46 @@ mod tests {
 
         // Verify all templates have required components
         for template in &templates {
-            assert!(!template.name.is_empty(), "Template {} has no name", template.id);
-            assert!(!template.default_states.is_empty(), "Template {} has no states", template.id);
-            assert!(!template.default_transitions.is_empty(), "Template {} has no transitions", template.id);
-            assert!(template.suggested_time_steps > 0, "Template {} has 0 time steps", template.id);
+            assert!(
+                !template.name.is_empty(),
+                "Template {} has no name",
+                template.id
+            );
+            assert!(
+                !template.default_states.is_empty(),
+                "Template {} has no states",
+                template.id
+            );
+            assert!(
+                !template.default_transitions.is_empty(),
+                "Template {} has no transitions",
+                template.id
+            );
+            assert!(
+                template.suggested_time_steps > 0,
+                "Template {} has 0 time steps",
+                template.id
+            );
 
             // Verify transitions reference valid states
-            let state_ids: Vec<&str> = template.default_states.iter().map(|s| s.id.as_str()).collect();
+            let state_ids: Vec<&str> = template
+                .default_states
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect();
             for transition in &template.default_transitions {
-                assert!(state_ids.contains(&transition.from.as_str()), "Template {} has transition from unknown state '{}'", template.id, transition.from);
-                assert!(state_ids.contains(&transition.to.as_str()), "Template {} has transition to unknown state '{}'", template.id, transition.to);
+                assert!(
+                    state_ids.contains(&transition.from.as_str()),
+                    "Template {} has transition from unknown state '{}'",
+                    template.id,
+                    transition.from
+                );
+                assert!(
+                    state_ids.contains(&transition.to.as_str()),
+                    "Template {} has transition to unknown state '{}'",
+                    template.id,
+                    transition.to
+                );
             }
         }
     }
@@ -1707,11 +2532,56 @@ mod tests {
     #[test]
     fn test_calibration_computation() {
         let records = vec![
-            PredictionRecord { id: "1".into(), predicted_at: 0, topic: "test".into(), predicted_outcome: "A".into(), predicted_confidence: 0.8, actual_outcome: Some("A".into()), was_correct: Some(true), calibration_error: Some(0.2) },
-            PredictionRecord { id: "2".into(), predicted_at: 0, topic: "test".into(), predicted_outcome: "B".into(), predicted_confidence: 0.9, actual_outcome: Some("C".into()), was_correct: Some(false), calibration_error: Some(0.9) },
-            PredictionRecord { id: "3".into(), predicted_at: 0, topic: "test".into(), predicted_outcome: "D".into(), predicted_confidence: 0.7, actual_outcome: Some("D".into()), was_correct: Some(true), calibration_error: Some(0.3) },
-            PredictionRecord { id: "4".into(), predicted_at: 0, topic: "test".into(), predicted_outcome: "E".into(), predicted_confidence: 0.6, actual_outcome: Some("F".into()), was_correct: Some(false), calibration_error: Some(0.6) },
-            PredictionRecord { id: "5".into(), predicted_at: 0, topic: "test".into(), predicted_outcome: "G".into(), predicted_confidence: 0.8, actual_outcome: Some("G".into()), was_correct: Some(true), calibration_error: Some(0.2) },
+            PredictionRecord {
+                id: "1".into(),
+                predicted_at: 0,
+                topic: "test".into(),
+                predicted_outcome: "A".into(),
+                predicted_confidence: 0.8,
+                actual_outcome: Some("A".into()),
+                was_correct: Some(true),
+                calibration_error: Some(0.2),
+            },
+            PredictionRecord {
+                id: "2".into(),
+                predicted_at: 0,
+                topic: "test".into(),
+                predicted_outcome: "B".into(),
+                predicted_confidence: 0.9,
+                actual_outcome: Some("C".into()),
+                was_correct: Some(false),
+                calibration_error: Some(0.9),
+            },
+            PredictionRecord {
+                id: "3".into(),
+                predicted_at: 0,
+                topic: "test".into(),
+                predicted_outcome: "D".into(),
+                predicted_confidence: 0.7,
+                actual_outcome: Some("D".into()),
+                was_correct: Some(true),
+                calibration_error: Some(0.3),
+            },
+            PredictionRecord {
+                id: "4".into(),
+                predicted_at: 0,
+                topic: "test".into(),
+                predicted_outcome: "E".into(),
+                predicted_confidence: 0.6,
+                actual_outcome: Some("F".into()),
+                was_correct: Some(false),
+                calibration_error: Some(0.6),
+            },
+            PredictionRecord {
+                id: "5".into(),
+                predicted_at: 0,
+                topic: "test".into(),
+                predicted_outcome: "G".into(),
+                predicted_confidence: 0.8,
+                actual_outcome: Some("G".into()),
+                was_correct: Some(true),
+                calibration_error: Some(0.2),
+            },
         ];
 
         let stats = compute_calibration(&records);
@@ -1803,40 +2673,116 @@ RISKS: Low response rate";
 
     #[test]
     fn test_scenario_domain_display() {
-        assert_eq!(ScenarioDomain::PricingStrategy.to_string(), "Pricing Strategy");
+        assert_eq!(
+            ScenarioDomain::PricingStrategy.to_string(),
+            "Pricing Strategy"
+        );
         assert_eq!(ScenarioDomain::MarketEntry.to_string(), "Market Entry");
-        assert_eq!(ScenarioDomain::Custom("My Domain".into()).to_string(), "My Domain");
+        assert_eq!(
+            ScenarioDomain::Custom("My Domain".into()).to_string(),
+            "My Domain"
+        );
     }
 
     #[test]
     fn test_probability_conservation() {
         // Test that probability is conserved across many steps
         let states = vec![
-            FlowState { id: "s1".into(), description: "".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "s2".into(), description: "".into(), probability: 0.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "s3".into(), description: "".into(), probability: 0.0, terminal: true, impact_score: 5.0 },
-            FlowState { id: "s4".into(), description: "".into(), probability: 0.0, terminal: true, impact_score: -3.0 },
+            FlowState {
+                id: "s1".into(),
+                description: "".into(),
+                probability: 1.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "s2".into(),
+                description: "".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "s3".into(),
+                description: "".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: 5.0,
+            },
+            FlowState {
+                id: "s4".into(),
+                description: "".into(),
+                probability: 0.0,
+                terminal: true,
+                impact_score: -3.0,
+            },
         ];
         let transitions = vec![
-            FlowTransition { from: "s1".into(), to: "s2".into(), probability: 0.5, trigger: "".into(), time_estimate: "".into() },
-            FlowTransition { from: "s1".into(), to: "s3".into(), probability: 0.2, trigger: "".into(), time_estimate: "".into() },
-            FlowTransition { from: "s2".into(), to: "s3".into(), probability: 0.4, trigger: "".into(), time_estimate: "".into() },
-            FlowTransition { from: "s2".into(), to: "s4".into(), probability: 0.3, trigger: "".into(), time_estimate: "".into() },
+            FlowTransition {
+                from: "s1".into(),
+                to: "s2".into(),
+                probability: 0.5,
+                trigger: "".into(),
+                time_estimate: "".into(),
+            },
+            FlowTransition {
+                from: "s1".into(),
+                to: "s3".into(),
+                probability: 0.2,
+                trigger: "".into(),
+                time_estimate: "".into(),
+            },
+            FlowTransition {
+                from: "s2".into(),
+                to: "s3".into(),
+                probability: 0.4,
+                trigger: "".into(),
+                time_estimate: "".into(),
+            },
+            FlowTransition {
+                from: "s2".into(),
+                to: "s4".into(),
+                probability: 0.3,
+                trigger: "".into(),
+                time_estimate: "".into(),
+            },
         ];
 
         let mut network = ProbabilityFlowNetwork::new(states, transitions, "s1");
         network.simulate(20);
 
         let total: f64 = network.states.iter().map(|s| s.probability).sum();
-        assert!((total - 1.0).abs() < 0.01, "Total probability should be ~1.0 after 20 steps, got {}", total);
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Total probability should be ~1.0 after 20 steps, got {}",
+            total
+        );
     }
 
     #[test]
     fn test_most_likely_outcome() {
         let states = vec![
-            FlowState { id: "start".into(), description: "".into(), probability: 0.0, terminal: false, impact_score: 0.0 },
-            FlowState { id: "win".into(), description: "Win".into(), probability: 0.6, terminal: true, impact_score: 10.0 },
-            FlowState { id: "lose".into(), description: "Lose".into(), probability: 0.4, terminal: true, impact_score: -5.0 },
+            FlowState {
+                id: "start".into(),
+                description: "".into(),
+                probability: 0.0,
+                terminal: false,
+                impact_score: 0.0,
+            },
+            FlowState {
+                id: "win".into(),
+                description: "Win".into(),
+                probability: 0.6,
+                terminal: true,
+                impact_score: 10.0,
+            },
+            FlowState {
+                id: "lose".into(),
+                description: "Lose".into(),
+                probability: 0.4,
+                terminal: true,
+                impact_score: -5.0,
+            },
         ];
 
         let network = ProbabilityFlowNetwork::new(states, vec![], "start");
@@ -1846,9 +2792,13 @@ RISKS: Low response rate";
 
     #[test]
     fn test_flow_network_serde() {
-        let states = vec![
-            FlowState { id: "A".into(), description: "Start".into(), probability: 1.0, terminal: false, impact_score: 0.0 },
-        ];
+        let states = vec![FlowState {
+            id: "A".into(),
+            description: "Start".into(),
+            probability: 1.0,
+            terminal: false,
+            impact_score: 0.0,
+        }];
         let network = ProbabilityFlowNetwork::new(states, vec![], "A");
 
         let json = serde_json::to_string(&network).unwrap();
@@ -1949,7 +2899,10 @@ RISKS: Low response rate";
 
         let result = validate_variables(&template, &vars);
         assert!(result.valid);
-        assert!(result.warnings.iter().any(|w| w.contains("totally_unknown_var")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("totally_unknown_var")));
     }
 
     // ── New tests for prediction store ───────────────────────────────────
@@ -2021,14 +2974,22 @@ RISKS: Low response rate";
                 flow_network: ProbabilityFlowNetwork::new(vec![], vec![], "s"),
                 projection: vec![],
                 trajectory: Trajectory {
-                    name: "t".into(), initial_state: "s".into(), target_outcome: "g".into(),
-                    steps: vec![], cumulative_probability: 0.5,
-                    estimated_duration: "1m".into(), critical_path: vec![],
+                    name: "t".into(),
+                    initial_state: "s".into(),
+                    target_outcome: "g".into(),
+                    steps: vec![],
+                    cumulative_probability: 0.5,
+                    estimated_duration: "1m".into(),
+                    critical_path: vec![],
                 },
                 scenario_report: PredictionReport {
-                    topic: "t".into(), seeds: vec![], variables: vec![],
-                    branches: vec![], synthesis: "s".into(),
-                    overall_confidence: confidence, generated_at: 0,
+                    topic: "t".into(),
+                    seeds: vec![],
+                    variables: vec![],
+                    branches: vec![],
+                    synthesis: "s".into(),
+                    overall_confidence: confidence,
+                    generated_at: 0,
                 },
                 expected_impact: impact,
                 most_likely_outcome: "outcome".into(),
@@ -2107,9 +3068,21 @@ CONFIDENCE: 0.55";
             let trimmed = line.trim();
             let upper = trimmed.to_uppercase();
             if upper.starts_with("ADJUSTMENT:") {
-                adjustments.push(trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+                adjustments.push(
+                    trimmed
+                        .splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                );
             } else if upper.starts_with("SELF_CHECK:") {
-                self_check = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                self_check = trimmed
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             } else if upper.starts_with("CONFIDENCE:") {
                 new_confidence = trimmed
                     .splitn(2, ':')
@@ -2161,14 +3134,22 @@ CONFIDENCE: 0.55";
                     flow_network: ProbabilityFlowNetwork::new(vec![], vec![], "s"),
                     projection: vec![],
                     trajectory: Trajectory {
-                        name: "t".into(), initial_state: "s".into(), target_outcome: "g".into(),
-                        steps: vec![], cumulative_probability: 0.5,
-                        estimated_duration: "1m".into(), critical_path: vec![],
+                        name: "t".into(),
+                        initial_state: "s".into(),
+                        target_outcome: "g".into(),
+                        steps: vec![],
+                        cumulative_probability: 0.5,
+                        estimated_duration: "1m".into(),
+                        critical_path: vec![],
                     },
                     scenario_report: PredictionReport {
-                        topic: "t".into(), seeds: vec![], variables: vec![],
-                        branches: vec![], synthesis: "s".into(),
-                        overall_confidence: 0.5, generated_at: 0,
+                        topic: "t".into(),
+                        seeds: vec![],
+                        variables: vec![],
+                        branches: vec![],
+                        synthesis: "s".into(),
+                        overall_confidence: 0.5,
+                        generated_at: 0,
                     },
                     expected_impact: 5.0,
                     most_likely_outcome: "o".into(),

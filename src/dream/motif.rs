@@ -12,7 +12,7 @@ use crate::agent::AgentId;
 use crate::stigmergic_policy::TraceKind;
 
 use super::{
-    trace_kind_index, DreamConfig, DetectedMotif, MotifCluster, TraceWindow, TrajectoryElement,
+    trace_kind_index, DetectedMotif, DreamConfig, MotifCluster, TraceWindow, TrajectoryElement,
     TRACE_KIND_COUNT,
 };
 
@@ -155,10 +155,7 @@ fn encode_window(config: &DreamConfig, window: &[TrajectoryElement]) -> Vec<f64>
     features.push(span / config.replay_horizon.max(1) as f64);
 
     // Feature 4: Outcome trajectory slope (linear regression)
-    let outcomes: Vec<f64> = window
-        .iter()
-        .filter_map(|e| e.outcome_score)
-        .collect();
+    let outcomes: Vec<f64> = window.iter().filter_map(|e| e.outcome_score).collect();
     let slope = if outcomes.len() > 1 {
         linear_regression_slope(&outcomes)
     } else {

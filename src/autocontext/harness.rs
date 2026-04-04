@@ -69,7 +69,12 @@ impl PlaybookHarness {
 
             for attempt in 0..=max_retries {
                 if attempt > 0 {
-                    debug!("Retrying step {} (attempt {}/{})", step.index, attempt + 1, max_retries + 1);
+                    debug!(
+                        "Retrying step {} (attempt {}/{})",
+                        step.index,
+                        attempt + 1,
+                        max_retries + 1
+                    );
                 }
 
                 match self.execute_step(step, tool_registry, llm, context).await {
@@ -80,10 +85,8 @@ impl PlaybookHarness {
                             succeeded = true;
                             break;
                         } else {
-                            last_error = Some(format!(
-                                "Step {} success criteria not met",
-                                step.index
-                            ));
+                            last_error =
+                                Some(format!("Step {} success criteria not met", step.index));
                             artifacts.push(artifact);
                         }
                     }

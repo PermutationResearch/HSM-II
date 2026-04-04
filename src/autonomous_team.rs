@@ -184,19 +184,83 @@ impl BusinessRole {
     /// Task keywords that trigger high bid scores for this role.
     pub fn activation_keywords(&self) -> &[&'static str] {
         match self {
-            Self::Ceo => &["strategy", "vision", "roadmap", "direction", "priorities", "okr"],
-            Self::Cto => &["architecture", "tech", "infrastructure", "deploy", "scale", "api"],
-            Self::Cfo => &["budget", "revenue", "forecast", "cost", "margin", "roi", "pricing"],
-            Self::Cmo => &["brand", "campaign", "acquisition", "funnel", "awareness", "launch"],
-            Self::Coo => &["workflow", "process", "kpi", "operations", "efficiency", "logistics"],
-            Self::Developer => &["code", "build", "ship", "feature", "bug", "refactor", "test"],
-            Self::Designer => &["design", "ui", "ux", "wireframe", "figma", "layout", "prototype"],
+            Self::Ceo => &[
+                "strategy",
+                "vision",
+                "roadmap",
+                "direction",
+                "priorities",
+                "okr",
+            ],
+            Self::Cto => &[
+                "architecture",
+                "tech",
+                "infrastructure",
+                "deploy",
+                "scale",
+                "api",
+            ],
+            Self::Cfo => &[
+                "budget", "revenue", "forecast", "cost", "margin", "roi", "pricing",
+            ],
+            Self::Cmo => &[
+                "brand",
+                "campaign",
+                "acquisition",
+                "funnel",
+                "awareness",
+                "launch",
+            ],
+            Self::Coo => &[
+                "workflow",
+                "process",
+                "kpi",
+                "operations",
+                "efficiency",
+                "logistics",
+            ],
+            Self::Developer => &[
+                "code", "build", "ship", "feature", "bug", "refactor", "test",
+            ],
+            Self::Designer => &[
+                "design",
+                "ui",
+                "ux",
+                "wireframe",
+                "figma",
+                "layout",
+                "prototype",
+            ],
             Self::Marketer => &["seo", "social", "content", "ads", "growth", "geo", "reddit"],
-            Self::Analyst => &["data", "metrics", "report", "analysis", "insight", "dashboard"],
+            Self::Analyst => &[
+                "data",
+                "metrics",
+                "report",
+                "analysis",
+                "insight",
+                "dashboard",
+            ],
             Self::Writer => &["blog", "copy", "docs", "article", "newsletter", "press"],
-            Self::Support => &["ticket", "customer", "faq", "issue", "onboarding", "feedback"],
-            Self::Hr => &["hiring", "culture", "onboarding", "team", "retention", "review", "survey"],
-            Self::Sales => &["lead", "pipeline", "outreach", "crm", "deal", "demo", "close"],
+            Self::Support => &[
+                "ticket",
+                "customer",
+                "faq",
+                "issue",
+                "onboarding",
+                "feedback",
+            ],
+            Self::Hr => &[
+                "hiring",
+                "culture",
+                "onboarding",
+                "team",
+                "retention",
+                "review",
+                "survey",
+            ],
+            Self::Sales => &[
+                "lead", "pipeline", "outreach", "crm", "deal", "demo", "close",
+            ],
             Self::Legal => &["contract", "compliance", "terms", "ip", "privacy", "gdpr"],
         }
     }
@@ -211,25 +275,57 @@ impl BusinessRole {
     /// any `anti_context` word is present, the keyword hit is cancelled.
     pub fn disambiguation_exclusions(&self) -> &[(&'static str, &[&'static str])] {
         match self {
-            Self::Designer => &[
-                ("design", &["survey", "hiring", "interview", "salary", "review",
-                             "process", "workflow", "policy", "compliance", "contract",
-                             "retention", "onboarding", "training", "evaluation",
-                             "experiment", "study", "research", "test plan"]),
-            ],
+            Self::Designer => &[(
+                "design",
+                &[
+                    "survey",
+                    "hiring",
+                    "interview",
+                    "salary",
+                    "review",
+                    "process",
+                    "workflow",
+                    "policy",
+                    "compliance",
+                    "contract",
+                    "retention",
+                    "onboarding",
+                    "training",
+                    "evaluation",
+                    "experiment",
+                    "study",
+                    "research",
+                    "test plan",
+                ],
+            )],
             Self::Hr => &[
-                ("review", &["code", "pull request", "pr", "merge", "commit",
-                             "architecture", "design system", "ui review"]),
+                (
+                    "review",
+                    &[
+                        "code",
+                        "pull request",
+                        "pr",
+                        "merge",
+                        "commit",
+                        "architecture",
+                        "design system",
+                        "ui review",
+                    ],
+                ),
                 ("onboarding", &["sdk", "api", "integration", "developer"]),
                 ("team", &["code", "repository", "branch", "deploy"]),
             ],
             Self::Support => &[
-                ("issue", &["code", "bug", "github", "merge", "branch", "repo"]),
+                (
+                    "issue",
+                    &["code", "bug", "github", "merge", "branch", "repo"],
+                ),
                 ("feedback", &["code review", "pull request", "pr"]),
             ],
-            Self::Cmo => &[
-                ("brand", &["wireframe", "figma", "layout", "mockup", "prototype"]),
-            ],
+            Self::Cmo => &[(
+                "brand",
+                &["wireframe", "figma", "layout", "mockup", "prototype"],
+            )],
             _ => &[],
         }
     }
@@ -242,8 +338,12 @@ impl BusinessRole {
     pub fn intent(&self) -> RoleIntent {
         match self {
             Self::Ceo | Self::Cmo | Self::Cfo | Self::Coo | Self::Cto => RoleIntent::Strategy,
-            Self::Developer | Self::Designer | Self::Writer | Self::Marketer => RoleIntent::Execution,
-            Self::Analyst | Self::Support | Self::Hr | Self::Sales | Self::Legal => RoleIntent::Support,
+            Self::Developer | Self::Designer | Self::Writer | Self::Marketer => {
+                RoleIntent::Execution
+            }
+            Self::Analyst | Self::Support | Self::Hr | Self::Sales | Self::Legal => {
+                RoleIntent::Support
+            }
         }
     }
 
@@ -274,7 +374,11 @@ impl BusinessRole {
 
     /// Only available (active) roles.
     pub fn available() -> Vec<BusinessRole> {
-        Self::all().iter().copied().filter(|r| r.is_available()).collect()
+        Self::all()
+            .iter()
+            .copied()
+            .filter(|r| r.is_available())
+            .collect()
     }
 }
 
@@ -445,7 +549,9 @@ impl TeamMember {
         let intent_score = if advisor.is_some() {
             let task_is_execution = Self::is_execution_task(&lower);
             let task_is_strategy = Self::is_strategy_task(&lower);
-            self.role.intent().task_fit(task_is_execution, task_is_strategy)
+            self.role
+                .intent()
+                .task_fit(task_is_execution, task_is_strategy)
         } else {
             0.0
         };
@@ -464,10 +570,7 @@ impl TeamMember {
                 .clamp(0.0, 1.0)
         } else {
             // Cold-start weights — keyword-heavy, low noise
-            (keyword_score * 0.55
-                + proactivity * 0.20
-                + domain_bonus * 0.20
-                + noise * 0.05)
+            (keyword_score * 0.55 + proactivity * 0.20 + domain_bonus * 0.20 + noise * 0.05)
                 .clamp(0.0, 1.0)
         }
     }
@@ -476,9 +579,23 @@ impl TeamMember {
     /// (writing, building, creating, implementing).
     fn is_execution_task(lower: &str) -> bool {
         const EXEC_KEYWORDS: &[&str] = &[
-            "write", "build", "create", "implement", "code", "design",
-            "draft", "publish", "ship", "fix", "deploy", "develop",
-            "produce", "make", "configure", "test", "debug",
+            "write",
+            "build",
+            "create",
+            "implement",
+            "code",
+            "design",
+            "draft",
+            "publish",
+            "ship",
+            "fix",
+            "deploy",
+            "develop",
+            "produce",
+            "make",
+            "configure",
+            "test",
+            "debug",
         ];
         EXEC_KEYWORDS.iter().any(|kw| lower.contains(kw))
     }
@@ -487,9 +604,19 @@ impl TeamMember {
     /// (planning, deciding, evaluating, directing).
     fn is_strategy_task(lower: &str) -> bool {
         const STRAT_KEYWORDS: &[&str] = &[
-            "strategy", "plan", "decide", "evaluate", "assess",
-            "review", "prioritize", "vision", "roadmap", "direction",
-            "allocate", "approve", "budget",
+            "strategy",
+            "plan",
+            "decide",
+            "evaluate",
+            "assess",
+            "review",
+            "prioritize",
+            "vision",
+            "roadmap",
+            "direction",
+            "allocate",
+            "approve",
+            "budget",
         ];
         STRAT_KEYWORDS.iter().any(|kw| lower.contains(kw))
     }
@@ -501,10 +628,7 @@ impl TeamMember {
         } else {
             self.tasks_failed += 1;
         }
-        let perf = self
-            .domain_history
-            .entry(domain.to_string())
-            .or_default();
+        let perf = self.domain_history.entry(domain.to_string()).or_default();
         perf.attempts += 1;
         if success {
             perf.successes += 1;
@@ -908,7 +1032,11 @@ impl Default for BrandContext {
                     "Limited marketing budget".to_string(),
                     "No time for content creation".to_string(),
                 ],
-                channels: vec!["Hacker News".to_string(), "Twitter/X".to_string(), "Reddit".to_string()],
+                channels: vec![
+                    "Hacker News".to_string(),
+                    "Twitter/X".to_string(),
+                    "Reddit".to_string(),
+                ],
             }],
             voice: BrandVoice {
                 tone: "Direct, technical, no-BS".to_string(),
@@ -986,7 +1114,10 @@ impl BrandContext {
         }
 
         for audience in &self.audiences {
-            s.push_str(&format!("Target: {} — {}\n", audience.name, audience.description));
+            s.push_str(&format!(
+                "Target: {} — {}\n",
+                audience.name, audience.description
+            ));
         }
         s
     }
@@ -1335,8 +1466,8 @@ impl CampaignStore {
         let total_clicks: u64 = metrics.iter().map(|m| m.clicks).sum();
         let total_engagements: u64 = metrics.iter().map(|m| m.engagements).sum();
         let total_conversions: u64 = metrics.iter().map(|m| m.conversions).sum();
-        let avg_sentiment = metrics.iter().map(|m| m.sentiment_score).sum::<f64>()
-            / metrics.len() as f64;
+        let avg_sentiment =
+            metrics.iter().map(|m| m.sentiment_score).sum::<f64>() / metrics.len() as f64;
 
         Some(CampaignSnapshot {
             timestamp: now_ts(),
@@ -1390,8 +1521,11 @@ impl CampaignStore {
         }
 
         // Top-performing content by engagement rate
-        let mut by_engagement: Vec<&ContentMetric> =
-            self.content_metrics.iter().filter(|m| m.views > 10).collect();
+        let mut by_engagement: Vec<&ContentMetric> = self
+            .content_metrics
+            .iter()
+            .filter(|m| m.views > 10)
+            .collect();
         by_engagement.sort_by(|a, b| {
             b.engagement_rate()
                 .partial_cmp(&a.engagement_rate())
@@ -1646,11 +1780,7 @@ impl TeamOrchestrator {
                 let valence = (success_rate * 2.0) - 1.0;
                 let narrative = format!(
                     "{} in domain '{}': {}/{} tasks succeeded (quality {:.2})",
-                    member.role,
-                    domain,
-                    perf.successes,
-                    perf.attempts,
-                    perf.avg_quality,
+                    member.role, domain, perf.successes, perf.attempts, perf.avg_quality,
                 );
                 patterns.push((
                     format!("outcome:{}:{}", member.role.tag(), domain),
@@ -1914,12 +2044,8 @@ mod tests {
         let campaign_id = campaign.id.clone();
 
         // Add content to campaign
-        store.campaigns[0]
-            .content_ids
-            .push("post1".to_string());
-        store.campaigns[0]
-            .content_ids
-            .push("post2".to_string());
+        store.campaigns[0].content_ids.push("post1".to_string());
+        store.campaigns[0].content_ids.push("post2".to_string());
 
         store.record_metric(ContentMetric {
             content_id: "post1".to_string(),
@@ -2077,7 +2203,9 @@ mod tests {
         let team = TeamOrchestrator::new(&dir);
 
         // Technical task should route to CTO or Developer
-        let tech_member = team.route_task("We need to deploy the new API and fix the build pipeline").unwrap();
+        let tech_member = team
+            .route_task("We need to deploy the new API and fix the build pipeline")
+            .unwrap();
         assert!(
             tech_member.role == BusinessRole::Cto || tech_member.role == BusinessRole::Developer,
             "Tech task routed to: {}",
@@ -2085,7 +2213,9 @@ mod tests {
         );
 
         // Marketing task should route to CMO or Marketer
-        let market_member = team.route_task("Create a social media campaign for SEO growth on Reddit").unwrap();
+        let market_member = team
+            .route_task("Create a social media campaign for SEO growth on Reddit")
+            .unwrap();
         assert!(
             market_member.role == BusinessRole::Cmo || market_member.role == BusinessRole::Marketer,
             "Marketing task routed to: {}",
@@ -2171,7 +2301,9 @@ mod tests {
 
         // "design a survey" — the word "design" is present but "survey"
         // is HR context, so Designer's keyword hit should be suppressed.
-        let member = team.route_task("design a survey for employee satisfaction").unwrap();
+        let member = team
+            .route_task("design a survey for employee satisfaction")
+            .unwrap();
         assert!(
             member.role == BusinessRole::Hr,
             "Expected HR for 'design a survey', got: {}",
@@ -2189,7 +2321,9 @@ mod tests {
         let team = TeamOrchestrator::new(&dir);
 
         // Genuine design tasks should still route to Designer
-        let member = team.route_task("design a new landing page layout with wireframes").unwrap();
+        let member = team
+            .route_task("design a new landing page layout with wireframes")
+            .unwrap();
         assert!(
             member.role == BusinessRole::Designer,
             "Expected Designer for UI task, got: {}",
@@ -2210,7 +2344,8 @@ mod tests {
         assert!(
             bid_ui > bid_survey,
             "UI design bid ({:.3}) should be higher than survey bid ({:.3})",
-            bid_ui, bid_survey,
+            bid_ui,
+            bid_survey,
         );
     }
 
@@ -2242,7 +2377,11 @@ mod tests {
         assert!(
             spread > 0.10,
             "Cold-start spread too narrow: {:.3} (max={:.3} {}, min={:.3} {})",
-            spread, max_bid, bids[0].0, min_bid, bids.last().unwrap().0,
+            spread,
+            max_bid,
+            bids[0].0,
+            min_bid,
+            bids.last().unwrap().0,
         );
 
         // The top bidder should be Developer or CTO (has "build"/"api" keywords)

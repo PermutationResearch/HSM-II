@@ -18,7 +18,7 @@ use crate::eval::{
 };
 
 use super::redact_params;
-use super::{truncate, TrajectoryOutcome, TrajectoryRecord, ToolStepRecord};
+use super::{truncate, ToolStepRecord, TrajectoryOutcome, TrajectoryRecord};
 
 pub fn read_run_manifest(artifacts_dir: &Path) -> anyhow::Result<Option<RunManifest>> {
     let p = artifacts_dir.join("manifest.json");
@@ -26,7 +26,9 @@ pub fn read_run_manifest(artifacts_dir: &Path) -> anyhow::Result<Option<RunManif
         return Ok(None);
     }
     let text = std::fs::read_to_string(&p).with_context(|| p.display().to_string())?;
-    Ok(Some(serde_json::from_str(&text).with_context(|| "parse manifest.json")?))
+    Ok(Some(
+        serde_json::from_str(&text).with_context(|| "parse manifest.json")?,
+    ))
 }
 
 pub fn default_eval_task_union() -> HashMap<String, EvalTask> {
@@ -185,7 +187,10 @@ pub fn trajectory_from_eval_turn(
     }
 }
 
-fn turns_hsm_jobs(artifacts: &Path, manifest: Option<&RunManifest>) -> Vec<(std::path::PathBuf, String)> {
+fn turns_hsm_jobs(
+    artifacts: &Path,
+    manifest: Option<&RunManifest>,
+) -> Vec<(std::path::PathBuf, String)> {
     let mut out = Vec::new();
     let root = artifacts.join("turns_hsm.jsonl");
     if root.is_file() {
@@ -208,7 +213,10 @@ fn turns_hsm_jobs(artifacts: &Path, manifest: Option<&RunManifest>) -> Vec<(std:
                 }
                 let t = p.join("turns_hsm.jsonl");
                 if t.is_file() {
-                    let label = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "unknown".into());
+                    let label = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "unknown".into());
                     out.push((t, label));
                 }
             }

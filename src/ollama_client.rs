@@ -6,8 +6,8 @@
 //! - Request batching for efficiency
 //! - Latency budget enforcement with fallback
 
-use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::chat::request::ChatMessageRequest;
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::completion::request::GenerationRequest;
 use ollama_rs::Ollama;
 use serde_json::json;
@@ -43,7 +43,8 @@ impl Default for OllamaConfig {
         // `OLLAMA_HOST` is frequently set as `http://127.0.0.1:11434` (includes port),
         // and sometimes as `.../v1` (OpenAI-compat base). Normalize it so the rest of the
         // code can rely on `host` sans port/path + explicit `port`.
-        let raw_host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());
+        let raw_host =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());
         let raw_port = std::env::var("OLLAMA_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -53,9 +54,8 @@ impl Default for OllamaConfig {
         Self {
             host,
             port,
-            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| {
-                "qwen3-coder:480b-cloud".to_string()
-            }),
+            model: std::env::var("OLLAMA_MODEL")
+                .unwrap_or_else(|_| "qwen3-coder:480b-cloud".to_string()),
             latency_budget_ms: 60000,
             enable_batching: false,
             batch_size: 4,
@@ -304,12 +304,17 @@ impl OllamaConfig {
                         }
                     }
                 }
-                eprintln!("[HSM-II] No suitable chat models found in Ollama. Run: ollama pull qwen3.5:9b");
+                eprintln!(
+                    "[HSM-II] No suitable chat models found in Ollama. Run: ollama pull qwen3.5:9b"
+                );
                 eprintln!("[HSM-II] Or import: ./scripts/import_qwen9b.sh");
                 "qwen3.5:9b".to_string()
             }
             Err(_) => {
-                eprintln!("[HSM-II] Cannot reach Ollama at {}:{}. Is it running?", host, port);
+                eprintln!(
+                    "[HSM-II] Cannot reach Ollama at {}:{}. Is it running?",
+                    host, port
+                );
                 "qwen3.5:9b".to_string()
             }
         }
@@ -325,7 +330,10 @@ struct CloudConfig {
 
 fn is_cloud_model(model: &str) -> bool {
     let m = model.to_lowercase();
-    m.contains(":cloud") || m.contains("-cloud") || m == "qwencoder:480b-cloud" || m == "qwen3-coder:480b-cloud"
+    m.contains(":cloud")
+        || m.contains("-cloud")
+        || m == "qwencoder:480b-cloud"
+        || m == "qwen3-coder:480b-cloud"
 }
 
 fn get_cloud_config(model: &str) -> Option<CloudConfig> {
@@ -402,9 +410,7 @@ async fn call_cloud_chat(
         .as_str()
         .unwrap_or("")
         .to_string();
-    let eval_count = json["usage"]["completion_tokens"]
-        .as_u64()
-        .unwrap_or(0) as usize;
+    let eval_count = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize;
     let latency = start.elapsed().as_millis() as u64;
 
     Ok(LlmResult {
@@ -513,7 +519,14 @@ impl OllamaClient {
                 // Fall back to cloud API if model is cloud-named and configured
                 if let Some(cloud) = get_cloud_config(&self.config.model) {
                     let messages = vec![json!({"role": "user", "content": prompt})];
-                    if let Ok(r) = call_cloud_chat(&cloud, messages, self.config.temperature, self.config.max_tokens).await {
+                    if let Ok(r) = call_cloud_chat(
+                        &cloud,
+                        messages,
+                        self.config.temperature,
+                        self.config.max_tokens,
+                    )
+                    .await
+                    {
                         self.record_latency(r.latency_ms).await;
                         crate::company_os::spawn_record_llm_spend(
                             &self.config.model,
@@ -533,20 +546,32 @@ impl OllamaClient {
 
     /// Chat with proper system/user message roles (uses /api/chat endpoint)
     /// Tries local Ollama first (model may be installed). Falls back to cloud API only if Ollama fails.
-    pub async fn chat(&self, system_prompt: &str, user_message: &str, history: &[(String, String)]) -> LlmResult {
+    pub async fn chat(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+        history: &[(String, String)],
+    ) -> LlmResult {
         let start = Instant::now();
 
         // Local Ollama first (model may be installed, e.g. qwen3-coder:480b-cloud)
-        let mut messages = vec![
-            ChatMessage::new(MessageRole::System, system_prompt.to_string()),
-        ];
+        let mut messages = vec![ChatMessage::new(
+            MessageRole::System,
+            system_prompt.to_string(),
+        )];
 
         for (user_msg, assistant_msg) in history {
             messages.push(ChatMessage::new(MessageRole::User, user_msg.clone()));
-            messages.push(ChatMessage::new(MessageRole::Assistant, assistant_msg.clone()));
+            messages.push(ChatMessage::new(
+                MessageRole::Assistant,
+                assistant_msg.clone(),
+            ));
         }
 
-        messages.push(ChatMessage::new(MessageRole::User, user_message.to_string()));
+        messages.push(ChatMessage::new(
+            MessageRole::User,
+            user_message.to_string(),
+        ));
 
         let request = ChatMessageRequest::new(self.config.model.clone(), messages);
 
@@ -565,7 +590,11 @@ impl OllamaClient {
                 let result = LlmResult {
                     text: response.message.content,
                     latency_ms: latency,
-                    tokens_generated: response.final_data.as_ref().map(|d| d.eval_count as usize).unwrap_or(0),
+                    tokens_generated: response
+                        .final_data
+                        .as_ref()
+                        .map(|d| d.eval_count as usize)
+                        .unwrap_or(0),
                     cached: false,
                     timed_out: false,
                 };

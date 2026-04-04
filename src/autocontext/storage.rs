@@ -75,7 +75,10 @@ impl AutoContextStore {
             tokio::fs::create_dir_all(dir).await?;
         }
 
-        debug!("AutoContext storage dirs ensured at {:?}", self.config.base_path);
+        debug!(
+            "AutoContext storage dirs ensured at {:?}",
+            self.config.base_path
+        );
         Ok(())
     }
 
@@ -202,18 +205,18 @@ impl AutoContextStore {
         }
         tokio::fs::write(&path, content).await?;
 
-        info!("Exported {} training examples to {:?}", examples.len(), path);
+        info!(
+            "Exported {} training examples to {:?}",
+            examples.len(),
+            path
+        );
         Ok(path)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────
 
     /// Atomic write: serialize to temp file, then rename.
-    async fn atomic_write<T: serde::Serialize>(
-        &self,
-        path: &Path,
-        data: &T,
-    ) -> anyhow::Result<()> {
+    async fn atomic_write<T: serde::Serialize>(&self, path: &Path, data: &T) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(data)?;
         let tmp_path = path.with_extension("json.tmp");
         tokio::fs::write(&tmp_path, &json).await?;

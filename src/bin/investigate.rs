@@ -7,8 +7,8 @@
 //!   investigate --repl
 
 use clap::{Parser, Subcommand};
-use hyper_stigmergy::investigation_engine::{InvestigationEngine, InvestigationSession, SessionId};
 use hyper_stigmergy::harness::{ResumeSessionMap, RuntimeConfig};
+use hyper_stigmergy::investigation_engine::{InvestigationEngine, InvestigationSession, SessionId};
 // use hyper_stigmergy::investigation_tools::InvestigationToolRegistry;
 use std::path::PathBuf;
 use tokio::io::{self, AsyncBufReadExt, BufReader};

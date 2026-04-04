@@ -12,7 +12,9 @@ pub mod model;
 pub mod tokenizer;
 
 pub use cache::{CacheManager, KvCache};
-pub use client::{LlmClient, LlmRequest, LlmResponse, Message, Usage, RetryConfig, MetricsSnapshot, LlmProvider};
+pub use client::{
+    LlmClient, LlmProvider, LlmRequest, LlmResponse, Message, MetricsSnapshot, RetryConfig, Usage,
+};
 pub use engine::{GenerationParams, InferenceConfig, LlmEngine};
 pub use model::{ModelLoader, ModelType, Quantization};
 pub use tokenizer::{EncodingOptions, TokenEncoder};

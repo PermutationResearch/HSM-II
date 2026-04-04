@@ -1,0 +1,153 @@
+(
+    schema_version: 1,
+    title: "HSM-II Unified Architecture Blueprint",
+    summary: "One organism. One world model (HyperStigmergicMorphogenesis). Every subsystem — Council, RLM, Paperclip, PersonalAgent, Federation, Tools, CompanyOS — is now a layer or method inside the same living hypergraph.",
+    layers: [
+        (
+            id: "world-model",
+            name: "World Model",
+            responsibility: "Beliefs, experiences, hypergraph, ontology, social memory, curated skills",
+            key_abstraction: "HyperStigmergicMorphogenesis",
+            lives_inside: "Core",
+            code_modules: ["hyper_stigmergy.rs", "hypergraph.rs", "database.rs", "embedded_graph_store.rs", "property_graph.rs"],
+        ),
+        (
+            id: "reasoning",
+            name: "Reasoning Layer",
+            responsibility: "Council decisions, neural-symbolic braid, Prolog, DSPy, outcome inference",
+            key_abstraction: "BraidOrchestrator + Council",
+            lives_inside: "World Model",
+            code_modules: ["consensus.rs", "council/", "reasoning_braid.rs", "prolog_engine.rs", "dspy.rs", "outcome_inference.rs"],
+        ),
+        (
+            id: "execution",
+            name: "Execution Layer",
+            responsibility: "Skills, tools, RLM executor, personal agents, skill distillation, dream consolidation",
+            key_abstraction: "ToolRegistry + IntegratedExecutor + PersonalAgent",
+            lives_inside: "World Model",
+            code_modules: ["skill.rs", "tools/", "rlm.rs", "rlm_v2.rs", "personal/", "trace2skill.rs", "dream/"],
+        ),
+        (
+            id: "intelligence",
+            name: "Intelligence Layer (Paperclip)",
+            responsibility: "Company OS orchestration, goals, DRIs, signals, capabilities, living organization runtime. This is the IN-MEMORY runtime brain (not the durable Postgres store). Can be used standalone or bridged to Company OS.",
+            key_abstraction: "IntelligenceLayer",
+            lives_inside: "World Model",
+            code_modules: ["paperclip/", "company_os/"],
+        ),
+        (
+            id: "federation",
+            name: "Federation & Interfaces",
+            responsibility: "Cross-system sync, REST API, web console, gateways, observability",
+            key_abstraction: "PropagationEngine + ApiState",
+            lives_inside: "World Model",
+            code_modules: ["federation/", "api/mod.rs", "console/", "gateways/", "observability.rs"],
+        ),
+    ],
+    entry_points: [
+        "agentd.rs",
+        "conductord.rs",
+        "hsm_api.rs",
+        "personal_agent.rs",
+        "teamd.rs",
+        "integrated_agent.rs",
+        "hsm_outer_loop.rs",
+        "hsm_console.rs",
+        "hsm_cc_orchestrate.rs",
+        "hypergraphd.rs",
+        "hsm_business_pack.rs",
+        "hsm_gepa.rs",
+    ],
+    data_flows: [
+        (
+            id: "belief-creation",
+            name: "Belief → World",
+            description: "User input / API → guardrails → world model update → propagation",
+            steps: [
+                "POST /api/beliefs",
+                "RateLimiter + WorldGuardrails",
+                "HyperStigmergicMorphogenesis.add_belief_with_extras()",
+                "Hypergraph update + provenance",
+                "PropagationEngine (if federated)",
+            ],
+        ),
+        (
+            id: "signal-to-decision",
+            name: "Signal → Decision → Action",
+            description: "External signal → IntelligenceLayer → Council → RLM/Tool execution → Experience",
+            steps: [
+                "IntelligenceLayer.process_signal()",
+                "Council (Simple / Debate / Ralph / Orchestrator)",
+                "RLM.bid_and_execute() or ToolRegistry",
+                "Store Experience + Dream consolidation",
+            ],
+        ),
+        (
+            id: "trajectory-to-skill",
+            name: "Trajectory → Skill → Dream",
+            description: "Operator actions → trace2skill → DSPy → SkillBank → StigmergicDreamEngine",
+            steps: [
+                "ToolStepRecord[] from interaction",
+                "trace2skill.trajectory_from_eval_turn()",
+                "DspyOptimize + Skill creation",
+                "SkillBank.push()",
+                "Offline Dream → CrystallizedPattern",
+            ],
+        ),
+        (
+            id: "federation-sync",
+            name: "Federation Sync",
+            description: "Local belief → provenance → propagation → remote merge",
+            steps: [
+                "Local Belief Created",
+                "Provenance + EdgeScope",
+                "PropagationEngine + StateSyncEngine",
+                "VectorClock + ConflictMediator",
+                "Remote merge + trust update",
+            ],
+        ),
+        (
+            id: "personal-company-loop",
+            name: "Personal / Company Loop",
+            description: "PersonalAgent or CompanyOS directly reads/writes the shared world model",
+            steps: [
+                "PersonalAgent.heartbeat() or CompanyOS task",
+                "Direct access to HyperStigmergicMorphogenesis",
+                "Memory / Goal / DRI updates",
+                "Tool execution + feedback to Dream",
+            ],
+        ),
+    ],
+    shared_abstractions: [
+        "HyperStigmergicMorphogenesis",
+        "Hypergraph",
+        "SkillBank",
+        "IntelligenceLayer",
+        "ToolRegistry",
+        "Council",
+        "RLM",
+        "PropagationEngine",
+        "PersonalAgent",
+        "BraidOrchestrator",
+    ],
+    dual_company_layers: r#"**Two distinct company layers (deliberately separate):**
+
+1. **Company OS (PostgreSQL)** — multi-tenant workspace
+   This is the Paperclip-class control plane: companies, goals, tasks, workforce agents, skills, spend, onboarding, etc. It lives in src/company_os/ and is optional.
+   Turned on with HSM_COMPANY_OS_DATABASE_URL pointing at Postgres; migrations run on startup.
+   HTTP surface (via the console server): routes like /api/company/companies, /api/company/companies/:id/tasks, etc.
+   If Postgres isn't configured → clear "not configured" error.
+
+2. **Paperclip IntelligenceLayer (in-process)** — runtime intelligence
+   Lives inside HyperStigmergicMorphogenesis as in-memory state (goals, DRIs, capabilities, signals).
+   Exposed as /api/paperclip/*.
+   Can be seeded from a template but is not automatically one row per Postgres company unless you wire it.
+
+**How they relate to the world model**
+Beliefs / hypergraph = shared stigmergic memory.
+Company OS = orthogonal relational model for ops.
+They can be bridged (e.g. task context pulls from Postgres) but are not merged unless you explicitly connect them.
+
+**Company selection in the console**
+Users select a Postgres company ID → all scoped APIs and UI panels are filtered to that workspace. The raw world model remains separate unless bridged."#,
+)

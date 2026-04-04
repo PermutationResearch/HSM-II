@@ -12,12 +12,14 @@ use clap::Parser;
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
-use hyper_stigmergy::eval::autoreason::{AutoreasonConfig, run_autoreason};
+use hyper_stigmergy::eval::autoreason::{run_autoreason, AutoreasonConfig};
 use hyper_stigmergy::llm::client::LlmClient;
 
 #[derive(Parser, Debug)]
 #[command(name = "hsm-autoreason")]
-#[command(about = "Autoreason: adversarial loop + blind Borda judges (several LLM calls per round)")]
+#[command(
+    about = "Autoreason: adversarial loop + blind Borda judges (several LLM calls per round)"
+)]
 struct Cli {
     /// Task / user message (if not using --prompt-file / --jsonl)
     #[arg(long)]
@@ -97,7 +99,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if LlmClient::new().is_err() {
-        eprintln!("Configure one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OLLAMA_URL");
+        eprintln!(
+            "Configure one of: OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OLLAMA_URL"
+        );
         std::process::exit(1);
     }
     let client = LlmClient::new()?;
@@ -140,11 +144,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     for (i, task) in jobs.iter().enumerate() {
-        eprintln!(
-            "━━━ Autoreason job {} / {} ━━━",
-            i + 1,
-            jobs.len()
-        );
+        eprintln!("━━━ Autoreason job {} / {} ━━━", i + 1, jobs.len());
         let out = run_autoreason(&client, &model, task, &cfg).await?;
         if !cli.quiet {
             println!("--- final ({}) ---", out.stop_reason);
@@ -161,7 +161,9 @@ async fn main() -> anyhow::Result<()> {
             let p = if jobs.len() > 1 {
                 path.with_file_name(format!(
                     "{}_{}",
-                    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                    path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default(),
                     i
                 ))
                 .with_extension(path.extension().unwrap_or_default())

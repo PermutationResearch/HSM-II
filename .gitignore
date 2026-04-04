@@ -1,9 +1,9 @@
 # =============================================================================
-# Agent console (Next.js)
+# Company console (Next.js)
 # =============================================================================
-web/agent-console/node_modules/
-web/agent-console/.next/
-web/agent-console/tsconfig.tsbuildinfo
+web/company-console/node_modules/
+web/company-console/.next/
+web/company-console/tsconfig.tsbuildinfo
 
 # =============================================================================
 # Rust
@@ -151,3 +151,16 @@ agent_tools/visual-explainer/output/
 
 # Npm-extracted @anthropic-ai/claude-code sources (reference only; check vendor license)
 /external/claude-code-from-npm/
+
+# Local eval / benchmark outputs (regenerate locally)
+/runs/
+/meta_harness_runs/
+eval_results*.json
+
+# Next.js build output (any app under web/)
+web/.next/
+web/**/.next/
+
+# IDE / local tooling
+.cursor/
+.claude/worktrees/

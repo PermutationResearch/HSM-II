@@ -4,8 +4,8 @@
 
 mod agents;
 mod bundle;
-mod paperclip_import;
 pub mod onboarding_contracts;
+mod paperclip_import;
 mod spend;
 
 use axum::{
@@ -15,19 +15,19 @@ use axum::{
     Json, Router,
 };
 pub use bundle::{export_bundle, import_bundle as run_import_bundle, CompanyBundle, ImportRequest};
-pub use spend::spawn_record_llm_spend;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+pub use spend::spawn_record_llm_spend;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json as SqlxJson;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::console::ConsoleState;
 use self::onboarding_contracts::{
     evaluate_gate_results, find_contract, load_contracts_hot, OnboardingGateResult,
 };
+use crate::console::ConsoleState;
 
 /// Max size for `companies.context_markdown` (POST/PATCH body).
 const MAX_COMPANY_CONTEXT_MARKDOWN_BYTES: usize = 512 * 1024;
@@ -41,10 +41,7 @@ pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
     if url.is_empty() {
         return Ok(None);
     }
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(url)
-        .await?;
+    let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(Some(pool))
 }
@@ -54,27 +51,45 @@ pub fn router() -> Router<ConsoleState> {
         .merge(agents::router())
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
-        .route("/api/company/onboarding/contracts", get(list_onboarding_pack_contracts))
+        .route(
+            "/api/company/onboarding/contracts",
+            get(list_onboarding_pack_contracts),
+        )
         .route(
             "/api/company/onboarding/contracts/validate",
             post(validate_onboarding_pack_contract),
         )
-        .route("/api/company/onboarding/draft", post(generate_onboarding_draft))
-        .route("/api/company/onboarding/apply", post(apply_onboarding_draft))
-        .route("/api/company/companies", get(list_companies).post(create_company))
+        .route(
+            "/api/company/onboarding/draft",
+            post(generate_onboarding_draft),
+        )
+        .route(
+            "/api/company/onboarding/apply",
+            post(apply_onboarding_draft),
+        )
+        .route(
+            "/api/company/companies",
+            get(list_companies).post(create_company),
+        )
         .route(
             "/api/company/companies/:company_id/api-catalog",
             get(company_api_catalog),
         )
         .route(
             "/api/company/companies/:company_id",
-            get(get_company)
-                .patch(patch_company)
-                .delete(delete_company),
+            get(get_company).patch(patch_company).delete(delete_company),
         )
         .route(
             "/api/company/companies/:company_id/import-paperclip-home",
             post(import_paperclip_home),
+        )
+        .route(
+            "/api/company/companies/:company_id/skills",
+            get(list_company_skills),
+        )
+        .route(
+            "/api/company/companies/:company_id/yc-bench-profile",
+            get(get_company_yc_bench_profile),
         )
         .route(
             "/api/company/companies/:company_id/export",
@@ -161,7 +176,10 @@ pub fn router() -> Router<ConsoleState> {
             get(list_task_queue),
         )
         .route("/api/company/tasks/:task_id/sla", patch(patch_task_sla))
-        .route("/api/company/tasks/:task_id/decision", post(post_task_decision))
+        .route(
+            "/api/company/tasks/:task_id/decision",
+            post(post_task_decision),
+        )
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
         .route(
@@ -326,7 +344,11 @@ async fn process_due_automation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn run_sla_escalation_job(pool: &PgPool, company_id: Uuid, payload: &Value) -> Result<(), String> {
+async fn run_sla_escalation_job(
+    pool: &PgPool,
+    company_id: Uuid,
+    payload: &Value,
+) -> Result<(), String> {
     let Some(task_id) = payload
         .get("task_id")
         .and_then(|v| v.as_str())
@@ -375,7 +397,10 @@ async fn run_auto_revert_checks(pool: &PgPool) -> Result<(), sqlx::Error> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         if current > threshold {
-            let reason = format!("auto-revert: regression {:.2}% > {:.2}%", current, threshold);
+            let reason = format!(
+                "auto-revert: regression {:.2}% > {:.2}%",
+                current, threshold
+            );
             let _ = sqlx::query(
                 r#"UPDATE improvement_runs
                    SET status = 'reverted', decision_reason = $2, decided_by = 'automation_worker', decided_at = NOW(), updated_at = NOW()
@@ -413,13 +438,12 @@ pub(super) async fn compute_goal_ancestry_tx(
         if guard > 32 {
             break;
         }
-        let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-            "SELECT parent_goal_id FROM goals WHERE id = $1 AND company_id = $2",
-        )
-        .bind(gid)
-        .bind(company_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let row: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT parent_goal_id FROM goals WHERE id = $1 AND company_id = $2")
+                .bind(gid)
+                .bind(company_id)
+                .fetch_optional(&mut **tx)
+                .await?;
         let Some((parent,)) = row else {
             break;
         };
@@ -503,7 +527,10 @@ async fn get_company(
         )
     })?;
     let Some(c) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
     };
     Ok(Json(json!({ "company": c })))
 }
@@ -542,7 +569,10 @@ async fn patch_company(
         )
     })?;
     let Some(mut c) = current else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
     };
 
     if let Some(d) = &body.display_name {
@@ -635,7 +665,10 @@ async fn delete_company(
             )
         })?;
     let Some((slug,)) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
     };
     if slug != confirm {
         return Err((
@@ -657,7 +690,10 @@ async fn delete_company(
             )
         })?;
     if res.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
     }
     Ok((
         StatusCode::OK,
@@ -687,12 +723,655 @@ async fn import_paperclip_home(
         })
 }
 
+#[derive(sqlx::FromRow, Serialize)]
+struct CompanySkillRow {
+    id: Uuid,
+    company_id: Uuid,
+    slug: String,
+    name: String,
+    description: String,
+    body: String,
+    skill_path: String,
+    source: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct YcBenchDomainScore {
+    domain: String,
+    score: f64,
+    matched_terms: Vec<String>,
+    evidence: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct YcBenchAgentHint {
+    id: String,
+    display_name: String,
+    role: String,
+    matched_domains: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct YcBenchProfileSource {
+    agent_count: usize,
+    skill_count: usize,
+    has_context_markdown: bool,
+}
+
+#[derive(Serialize)]
+struct YcBenchBenchmarkSpecTemplate {
+    labels: Value,
+    setup_commands: Vec<Vec<String>>,
+    command: Vec<String>,
+    cwd_hint: String,
+    notes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CompanyYcBenchProfile {
+    company_id: Uuid,
+    slug: String,
+    display_name: String,
+    issue_key_prefix: String,
+    generated_at: String,
+    source: YcBenchProfileSource,
+    top_domains: Vec<String>,
+    domain_scores: Vec<YcBenchDomainScore>,
+    agent_hints: Vec<YcBenchAgentHint>,
+    imported_skills: Vec<String>,
+    strategy_summary: String,
+    controller_prompt: String,
+    benchmark_spec: YcBenchBenchmarkSpecTemplate,
+}
+
+const YC_BENCH_DOMAINS: &[(&str, &[&str])] = &[
+    (
+        "research",
+        &[
+            "research",
+            "r&d",
+            "discovery",
+            "prototype",
+            "experimentation",
+            "roadmap",
+            "strategy",
+        ],
+    ),
+    (
+        "inference",
+        &[
+            "inference",
+            "serving",
+            "customer",
+            "ops",
+            "latency",
+            "deployment",
+            "support",
+            "reliability",
+            "operations",
+        ],
+    ),
+    (
+        "data_environment",
+        &[
+            "data",
+            "dataset",
+            "pipeline",
+            "etl",
+            "environment",
+            "annotation",
+            "intake",
+            "integration",
+            "analytics",
+        ],
+    ),
+    (
+        "training",
+        &[
+            "training",
+            "fine-tune",
+            "finetune",
+            "model",
+            "evaluation",
+            "benchmark",
+            "optimizer",
+            "tuning",
+            "weights",
+        ],
+    ),
+];
+
+async fn list_company_skills(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let company_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM companies WHERE id = $1)")
+            .bind(company_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+    if !company_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
+    }
+
+    let rows = sqlx::query_as::<_, CompanySkillRow>(
+        r#"SELECT id, company_id, slug, name, description, body, skill_path, source, updated_at::text
+           FROM company_skills
+           WHERE company_id = $1
+           ORDER BY lower(name), lower(slug)"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({ "skills": rows })))
+}
+
+fn score_domain_text(
+    domain: &str,
+    terms: &[&str],
+    raw_text: &str,
+    weight: f64,
+    matched_terms: &mut std::collections::BTreeSet<String>,
+    evidence: &mut Vec<String>,
+) -> f64 {
+    let text = raw_text.trim();
+    if text.is_empty() {
+        return 0.0;
+    }
+    let lower = text.to_lowercase();
+    let mut score = 0.0;
+    for term in terms {
+        if lower.contains(term) {
+            matched_terms.insert((*term).to_string());
+            score += weight;
+            if evidence.len() < 5 {
+                evidence.push(format!("{domain}: {}", text.chars().take(160).collect::<String>()));
+            }
+        }
+    }
+    score
+}
+
+fn compute_domain_scores(
+    company: &CompanyRow,
+    agents: &[agents::CompanyAgentRow],
+    skills: &[CompanySkillRow],
+) -> Vec<YcBenchDomainScore> {
+    let mut scores = Vec::new();
+    for (domain, terms) in YC_BENCH_DOMAINS {
+        let mut score = 0.0;
+        let mut matched_terms = std::collections::BTreeSet::new();
+        let mut evidence = Vec::new();
+
+        score += score_domain_text(
+            domain,
+            terms,
+            &format!("{} {}", company.display_name, company.slug),
+            0.6,
+            &mut matched_terms,
+            &mut evidence,
+        );
+        if let Some(context) = company.context_markdown.as_deref() {
+            for line in context.lines().take(36) {
+                score +=
+                    score_domain_text(domain, terms, line, 0.9, &mut matched_terms, &mut evidence);
+            }
+        }
+        for agent in agents {
+            score += score_domain_text(
+                domain,
+                terms,
+                &agent.name,
+                0.6,
+                &mut matched_terms,
+                &mut evidence,
+            );
+            if let Some(title) = agent.title.as_deref() {
+                score += score_domain_text(
+                    domain,
+                    terms,
+                    title,
+                    1.2,
+                    &mut matched_terms,
+                    &mut evidence,
+                );
+            }
+            if let Some(capabilities) = agent.capabilities.as_deref() {
+                score += score_domain_text(
+                    domain,
+                    terms,
+                    capabilities,
+                    1.4,
+                    &mut matched_terms,
+                    &mut evidence,
+                );
+            }
+            if let Some(briefing) = agent.briefing.as_deref() {
+                for line in briefing.lines().take(10) {
+                    score += score_domain_text(
+                        domain,
+                        terms,
+                        line,
+                        1.1,
+                        &mut matched_terms,
+                        &mut evidence,
+                    );
+                }
+            }
+        }
+        for skill in skills {
+            score += score_domain_text(
+                domain,
+                terms,
+                &skill.slug,
+                0.9,
+                &mut matched_terms,
+                &mut evidence,
+            );
+            score += score_domain_text(
+                domain,
+                terms,
+                &skill.name,
+                1.1,
+                &mut matched_terms,
+                &mut evidence,
+            );
+            score += score_domain_text(
+                domain,
+                terms,
+                &skill.description,
+                1.2,
+                &mut matched_terms,
+                &mut evidence,
+            );
+            for line in skill.body.lines().take(12) {
+                score += score_domain_text(
+                    domain,
+                    terms,
+                    line,
+                    0.8,
+                    &mut matched_terms,
+                    &mut evidence,
+                );
+            }
+        }
+
+        scores.push(YcBenchDomainScore {
+            domain: (*domain).to_string(),
+            score: (score * 10.0).round() / 10.0,
+            matched_terms: matched_terms.into_iter().collect(),
+            evidence,
+        });
+    }
+
+    scores.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+    scores
+}
+
+fn collect_agent_hints(
+    agents: &[agents::CompanyAgentRow],
+    domain_scores: &[YcBenchDomainScore],
+) -> Vec<YcBenchAgentHint> {
+    let top_domains: Vec<String> = domain_scores.iter().take(3).map(|d| d.domain.clone()).collect();
+    let top_terms: std::collections::BTreeMap<String, Vec<String>> = domain_scores
+        .iter()
+        .take(3)
+        .map(|d| (d.domain.clone(), d.matched_terms.clone()))
+        .collect();
+
+    let mut hints = Vec::new();
+    for agent in agents.iter().take(8) {
+        let text = format!(
+            "{} {} {} {}",
+            agent.name,
+            agent.role,
+            agent.title.as_deref().unwrap_or(""),
+            agent.capabilities.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        let mut matched_domains = Vec::new();
+        for domain in &top_domains {
+            if let Some(terms) = top_terms.get(domain) {
+                if terms.iter().any(|term| text.contains(term)) {
+                    matched_domains.push(domain.clone());
+                }
+            }
+        }
+        hints.push(YcBenchAgentHint {
+            id: agent.name.clone(),
+            display_name: agent.title.clone().unwrap_or_else(|| agent.name.clone()),
+            role: agent.role.clone(),
+            matched_domains,
+        });
+    }
+    hints
+}
+
+fn build_yc_bench_strategy_summary(
+    company: &CompanyRow,
+    domain_scores: &[YcBenchDomainScore],
+    skills: &[CompanySkillRow],
+) -> String {
+    let top_domains = domain_scores
+        .iter()
+        .take(2)
+        .map(|d| format!("{} ({:.1})", d.domain, d.score))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let top_skills = skills
+        .iter()
+        .take(4)
+        .map(|skill| {
+            if skill.name.trim().is_empty() {
+                skill.slug.clone()
+            } else {
+                skill.name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let context_hint = company
+        .context_markdown
+        .as_deref()
+        .and_then(|ctx| ctx.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or("Operate with disciplined capital allocation and explicit role ownership.");
+    format!(
+        "{} appears strongest in {}. Imported operating skills: {}. Context anchor: {}",
+        company.display_name,
+        top_domains,
+        if top_skills.is_empty() {
+            "none yet".to_string()
+        } else {
+            top_skills
+        },
+        context_hint.chars().take(220).collect::<String>()
+    )
+}
+
+fn build_yc_bench_controller_prompt(
+    company: &CompanyRow,
+    domain_scores: &[YcBenchDomainScore],
+    agents: &[agents::CompanyAgentRow],
+    skills: &[CompanySkillRow],
+) -> String {
+    let top_domains = domain_scores
+        .iter()
+        .take(3)
+        .map(|d| format!("- {}: score {:.1}, matched {}", d.domain, d.score, d.matched_terms.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let top_agents = agents
+        .iter()
+        .take(6)
+        .map(|agent| {
+            format!(
+                "- {} ({}){}{}",
+                agent.title.clone().unwrap_or_else(|| agent.name.clone()),
+                agent.role,
+                agent
+                    .capabilities
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!(" | capabilities: {}", s.trim()))
+                    .unwrap_or_default(),
+                agent
+                    .briefing
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!(" | briefing: {}", s.lines().next().unwrap_or("").trim()))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let top_skills = skills
+        .iter()
+        .take(8)
+        .map(|skill| {
+            format!(
+                "- {} [{}]{}",
+                if skill.name.trim().is_empty() {
+                    &skill.slug
+                } else {
+                    &skill.name
+                },
+                skill.slug,
+                if skill.description.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {}", skill.description.trim())
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context_excerpt = company
+        .context_markdown
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(1200).collect::<String>())
+        .unwrap_or_else(|| "No company-wide context markdown imported yet.".to_string());
+
+    format!(
+        "You are the CEO/controller for {} in YC-Bench.\n\
+Operate like this company would operate, not like a generic startup agent.\n\n\
+Top strategic domains:\n{}\n\n\
+Workforce hints:\n{}\n\n\
+Imported operating skills:\n{}\n\n\
+Company context excerpt:\n{}\n\n\
+Execution rules:\n\
+- Prefer decisions aligned with the strongest domains above.\n\
+- Assign work according to the imported workforce roles instead of spreading tasks blindly.\n\
+- Use the skill templates as the operating playbook when deciding what to accept, dispatch, or cancel.\n\
+- Protect runway and prestige together; do not chase short-term revenue that violates the company profile.\n\
+- Keep a compact scratchpad of observed employee strengths and task economics.",
+        company.display_name,
+        top_domains,
+        if top_agents.is_empty() {
+            "- No imported agents yet.".to_string()
+        } else {
+            top_agents
+        },
+        if top_skills.is_empty() {
+            "- No imported skills yet.".to_string()
+        } else {
+            top_skills
+        },
+        context_excerpt
+    )
+}
+
+async fn get_company_yc_bench_profile(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let company = sqlx::query_as::<_, CompanyRow>(
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
+           FROM companies
+           WHERE id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        )
+    })?;
+
+    let agents = sqlx::query_as::<_, agents::CompanyAgentRow>(
+        r#"SELECT id, company_id, name, role, title, capabilities, reports_to, adapter_type,
+                  adapter_config, budget_monthly_cents, briefing, status, sort_order,
+                  created_at::text, updated_at::text
+           FROM company_agents
+           WHERE company_id = $1
+           ORDER BY sort_order, lower(name)"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let skills = sqlx::query_as::<_, CompanySkillRow>(
+        r#"SELECT id, company_id, slug, name, description, body, skill_path, source, updated_at::text
+           FROM company_skills
+           WHERE company_id = $1
+           ORDER BY lower(name), lower(slug)"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let domain_scores = compute_domain_scores(&company, &agents, &skills);
+    let top_domains = domain_scores
+        .iter()
+        .take(3)
+        .filter(|d| d.score > 0.0)
+        .map(|d| d.domain.clone())
+        .collect::<Vec<_>>();
+    let agent_hints = collect_agent_hints(&agents, &domain_scores);
+    let strategy_summary = build_yc_bench_strategy_summary(&company, &domain_scores, &skills);
+    let controller_prompt =
+        build_yc_bench_controller_prompt(&company, &domain_scores, &agents, &skills);
+    let imported_skills = skills
+        .iter()
+        .take(12)
+        .map(|skill| {
+            if skill.name.trim().is_empty() {
+                skill.slug.clone()
+            } else {
+                skill.name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let marketplace_slug = company
+        .hsmii_home
+        .as_deref()
+        .and_then(|home| {
+            home.replace('\\', "/")
+                .split('/')
+                .filter(|segment| !segment.trim().is_empty())
+                .next_back()
+                .map(|segment| segment.trim().to_string())
+        })
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| company.slug.clone());
+
+    let profile = CompanyYcBenchProfile {
+        company_id: company.id,
+        slug: company.slug.clone(),
+        display_name: company.display_name.clone(),
+        issue_key_prefix: company.issue_key_prefix.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        source: YcBenchProfileSource {
+            agent_count: agents.len(),
+            skill_count: skills.len(),
+            has_context_markdown: company
+                .context_markdown
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some(),
+        },
+        top_domains: top_domains.clone(),
+        domain_scores,
+        agent_hints,
+        imported_skills,
+        strategy_summary,
+        controller_prompt,
+        benchmark_spec: YcBenchBenchmarkSpecTemplate {
+            labels: json!({
+                "benchmark": "yc_bench",
+                "company_pack": company.slug,
+                "marketplace_slug": marketplace_slug,
+                "workspace_slug": company.slug,
+                "workspace_name": company.display_name,
+                "top_domains": top_domains,
+            }),
+            setup_commands: vec![vec!["uv".into(), "sync".into()]],
+            command: vec![
+                "uv".into(),
+                "run".into(),
+                "yc-bench".into(),
+                "run".into(),
+                "--model".into(),
+                "YOUR_MODEL".into(),
+                "--seed".into(),
+                "1".into(),
+                "--config".into(),
+                "medium".into(),
+            ],
+            cwd_hint: "/ABS/PATH/TO/yc-bench".to_string(),
+            notes: vec![
+                "Inject controller_prompt into your YC-Bench wrapper or model system prompt."
+                    .to_string(),
+                "Run the same seed and config across marketplace companies for head-to-head comparison."
+                    .to_string(),
+                "Persist labels.company_pack so marketplace overlays can attribute scores to the source company."
+                    .to_string(),
+            ],
+        },
+    };
+
+    Ok(Json(json!({ "profile": profile })))
+}
+
 /// Static catalog of Company OS HTTP routes. `{company_id}` / `{task_id}` are placeholders.
 fn company_os_api_catalog_endpoints() -> Value {
     json!([
         { "scope": "company", "methods": ["GET", "PATCH", "DELETE"], "path": "/api/company/companies/{company_id}?confirm_slug=", "summary": "Company record; PATCH updates context_markdown, display_name, hsmii_home; DELETE removes workspace and cascades (confirm_slug must match slug)" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/api-catalog", "summary": "Discovery: this list + company" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/import-paperclip-home", "summary": "Import Paperclip pack agents from hsmii_home/agents and skills index into context" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills", "summary": "Imported skill templates saved from pack skills/<slug>/SKILL.md files" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/yc-bench-profile", "summary": "Deterministic YC-Bench controller profile derived from company context, workforce agents, and imported skills" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/export", "summary": "Export bundle JSON" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/spend/summary", "summary": "Spend rollup" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/governance/events", "summary": "List / append governance events" },
@@ -747,7 +1426,10 @@ async fn company_api_catalog(
         )
     })?;
     let Some(c) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "company not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
     };
     Ok(Json(json!({
         "api_version": "1",
@@ -1050,7 +1732,11 @@ struct TaskRunSnapRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-async fn upsert_run_snapshot_running(pool: &PgPool, company_id: Uuid, task_id: Uuid) -> Result<(), sqlx::Error> {
+async fn upsert_run_snapshot_running(
+    pool: &PgPool,
+    company_id: Uuid,
+    task_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO task_run_snapshots (task_id, company_id, run_status, tool_calls, log_tail, finished_at)
            VALUES ($1, $2, 'running', 0, '', NULL)
@@ -1098,7 +1784,11 @@ fn append_truncated_log_tail(existing: &str, chunk: &str) -> String {
     s.chars().skip(drop).collect()
 }
 
-async fn ensure_task_run_snapshot_row(pool: &PgPool, company_id: Uuid, task_id: Uuid) -> Result<(), sqlx::Error> {
+async fn ensure_task_run_snapshot_row(
+    pool: &PgPool,
+    company_id: Uuid,
+    task_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO task_run_snapshots (task_id, company_id) VALUES ($1, $2)
            ON CONFLICT (task_id) DO NOTHING"#,
@@ -1141,7 +1831,10 @@ async fn post_task_run_telemetry(
             )
         })?;
     let Some(company_id) = cid else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
 
     if let Some(ref st) = body.run_status {
@@ -1273,7 +1966,8 @@ async fn list_tasks(
             Json(json!({ "error": e.to_string() })),
         )
     })?;
-    let smap: std::collections::HashMap<Uuid, TaskRunSnapRow> = snaps.into_iter().map(|s| (s.task_id, s)).collect();
+    let smap: std::collections::HashMap<Uuid, TaskRunSnapRow> =
+        snaps.into_iter().map(|s| (s.task_id, s)).collect();
     let tasks: Vec<Value> = rows
         .into_iter()
         .filter_map(|t| {
@@ -1423,15 +2117,12 @@ async fn create_task(
         ancestry_json = serde_json::to_value(&chain).unwrap_or(json!([]));
     }
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
+    let mut tx = pool.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     let display_n = next_task_display_number_tx(&mut tx, company_id)
         .await
         .map_err(|e| {
@@ -1533,7 +2224,10 @@ async fn patch_task_sla(
     })?;
 
     let Some(task) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
     Ok(Json(json!({ "task": task })))
 }
@@ -1710,7 +2404,10 @@ async fn post_task_decision(
         )
     })?;
     let Some(task) = task else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
     if let Some(k) = headers
         .get("Idempotency-Key")
@@ -1725,9 +2422,17 @@ async fn post_task_decision(
         });
         let ok = register_idempotency(pool, task.company_id, "task_decision", k, &payload)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
         if !ok {
-            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"duplicate idempotency key"})),
+            ));
         }
     }
 
@@ -1744,9 +2449,15 @@ async fn post_task_decision(
     .bind(task.company_id)
     .bind(actor)
     .bind(task_id.to_string())
-    .bind(SqlxJson(json!({ "decision_mode": decision, "reason": reason })))
+    .bind(SqlxJson(
+        json!({ "decision_mode": decision, "reason": reason }),
+    ))
     .bind(decision)
-    .bind(if decision == "blocked" { "warn" } else { "info" })
+    .bind(if decision == "blocked" {
+        "warn"
+    } else {
+        "info"
+    })
     .execute(pool)
     .await;
 
@@ -1902,7 +2613,10 @@ async fn release_task(
         )
     })?;
     let Some(t) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
     let actor = if body.actor.trim().is_empty() {
         "console"
@@ -2065,7 +2779,10 @@ async fn spawn_subagent_tasks(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     let Some(parent) = parent else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
     let mut kbytes = [0u8; 8];
     kbytes.copy_from_slice(&task_id.as_bytes()[..8]);
@@ -2074,9 +2791,17 @@ async fn spawn_subagent_tasks(
         .bind(lock_key)
         .fetch_one(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
     if !got_lock {
-        return Err((StatusCode::CONFLICT, Json(json!({"error":"task spawn already in progress"}))));
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error":"task spawn already in progress"})),
+        ));
     }
     if let Some(k) = headers
         .get("Idempotency-Key")
@@ -2092,9 +2817,17 @@ async fn spawn_subagent_tasks(
             &json!({ "task_id": task_id }),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
         if !ok {
-            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"duplicate idempotency key"})),
+            ));
         }
     }
 
@@ -2114,26 +2847,31 @@ async fn spawn_subagent_tasks(
             continue;
         }
         if let Some(tp) = &r.title_pattern {
-            if !parent.title.to_ascii_lowercase().contains(&tp.to_ascii_lowercase()) {
+            if !parent
+                .title
+                .to_ascii_lowercase()
+                .contains(&tp.to_ascii_lowercase())
+            {
                 continue;
             }
         }
         if let Some(owner) = &r.owner_persona {
-            if parent.owner_persona.as_deref().unwrap_or("").to_ascii_lowercase()
+            if parent
+                .owner_persona
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
                 != owner.to_ascii_lowercase()
             {
                 continue;
             }
         }
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-            })?;
+        let mut tx = pool.begin().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
         for i in 0..r.max_subtasks {
             let display_n = next_task_display_number_tx(&mut tx, company_id)
                 .await
@@ -2251,7 +2989,10 @@ async fn post_task_handoff(
         return Err(no_db());
     };
     if body.from_agent.trim().is_empty() || body.to_agent.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "from_agent and to_agent required"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "from_agent and to_agent required"})),
+        ));
     }
     let row = sqlx::query_as::<_, TaskHandoffRow>(
         r#"INSERT INTO task_handoffs
@@ -2294,7 +3035,10 @@ async fn review_task_handoff(
         "accept" | "accepted" => "accepted",
         "reject" | "rejected" => "rejected",
         _ => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"decision must be accept|reject"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"decision must be accept|reject"})),
+            ));
         }
     };
     let row = sqlx::query_as::<_, TaskHandoffRow>(
@@ -2312,7 +3056,10 @@ async fn review_task_handoff(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     let Some(h) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"handoff not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"handoff not found"})),
+        ));
     };
     Ok(Json(json!({ "handoff": h })))
 }
@@ -2377,7 +3124,10 @@ async fn create_improvement_run(
         return Err(no_db());
     };
     if body.title.trim().is_empty() || body.scope.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"title and scope required"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"title and scope required"})),
+        ));
     }
     let row = sqlx::query_as::<_, ImprovementRunRow>(
         r#"INSERT INTO improvement_runs
@@ -2421,7 +3171,10 @@ async fn decide_improvement_run(
         "promote" | "promoted" => "promoted",
         "revert" | "reverted" => "reverted",
         _ => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"decision must be promote|revert"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"decision must be promote|revert"})),
+            ));
         }
     };
     let existing = sqlx::query_as::<_, ImprovementRunRow>(
@@ -2434,7 +3187,10 @@ async fn decide_improvement_run(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     let Some(current) = existing else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"improvement run not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"improvement run not found"})),
+        ));
     };
     if let Some(k) = headers
         .get("Idempotency-Key")
@@ -2443,11 +3199,25 @@ async fn decide_improvement_run(
         .filter(|s| !s.is_empty())
     {
         let payload = json!({ "run_id": run_id, "decision": next, "actor": body.actor.trim() });
-        let ok = register_idempotency(pool, current.company_id, "improvement_decision", k, &payload)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        let ok = register_idempotency(
+            pool,
+            current.company_id,
+            "improvement_decision",
+            k,
+            &payload,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
         if !ok {
-            return Err((StatusCode::CONFLICT, Json(json!({"error":"duplicate idempotency key"}))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"duplicate idempotency key"})),
+            ));
         }
     }
     if next == "promoted" {
@@ -2462,7 +3232,10 @@ async fn decide_improvement_run(
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         if eval_samples < min_samples {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: min_eval_samples"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"promotion gate failed: min_eval_samples"})),
+            ));
         }
         let max_reg = gate
             .get("max_regression_pct")
@@ -2473,7 +3246,10 @@ async fn decide_improvement_run(
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         if regression > max_reg {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: regression threshold"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"promotion gate failed: regression threshold"})),
+            ));
         }
         let requires_reviewer = gate
             .get("high_risk_requires_reviewer")
@@ -2486,15 +3262,24 @@ async fn decide_improvement_run(
             .and_then(|v| v.as_str())
             .unwrap_or("low")
             .to_ascii_lowercase();
-        if requires_reviewer && (risk == "high" || risk == "critical") && body.actor.trim().is_empty() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"promotion gate failed: reviewer required for high risk"}))));
+        if requires_reviewer
+            && (risk == "high" || risk == "critical")
+            && body.actor.trim().is_empty()
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"promotion gate failed: reviewer required for high risk"})),
+            ));
         }
     }
     let rationale = if body.reason.trim().is_empty() {
         if next == "promoted" {
             format!("Promoted run '{}' after gates passed.", current.title)
         } else {
-            format!("Reverted run '{}' due to risk/performance decision.", current.title)
+            format!(
+                "Reverted run '{}' due to risk/performance decision.",
+                current.title
+            )
         }
     } else {
         body.reason.trim().to_string()
@@ -2514,7 +3299,10 @@ async fn decide_improvement_run(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     let Some(run) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"improvement run not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"improvement run not found"})),
+        ));
     };
     let _ = sqlx::query(
         r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, decision, severity)
@@ -2568,7 +3356,12 @@ async fn list_contract_versions(
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
     Ok(Json(json!({ "versions": rows })))
 }
 
@@ -2582,7 +3375,10 @@ async fn create_contract_version(
     let cid = body.contract_id.trim();
     let ver = body.version.trim();
     if cid.is_empty() || ver.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"contract_id and version required"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"contract_id and version required"})),
+        ));
     }
     let status = body
         .status
@@ -2591,7 +3387,10 @@ async fn create_contract_version(
         .trim()
         .to_ascii_lowercase();
     if !matches!(status.as_str(), "active" | "deprecated" | "sunset") {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"status must be active|deprecated|sunset"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"status must be active|deprecated|sunset"})),
+        ));
     }
     let row = sqlx::query_as::<_, ContractVersionRow>(
         r#"INSERT INTO onboarding_contract_versions (contract_id, version, status, schema)
@@ -2604,7 +3403,12 @@ async fn create_contract_version(
     .bind(SqlxJson(body.schema))
     .fetch_one(pool)
     .await
-    .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
     Ok((StatusCode::CREATED, Json(json!({ "version": row }))))
 }
 
@@ -2618,7 +3422,10 @@ async fn patch_contract_version_status(
     };
     let next = body.status.trim().to_ascii_lowercase();
     if !matches!(next.as_str(), "active" | "deprecated" | "sunset") {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"status must be active|deprecated|sunset"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"status must be active|deprecated|sunset"})),
+        ));
     }
     let row = sqlx::query_as::<_, ContractVersionRow>(
         r#"UPDATE onboarding_contract_versions
@@ -2630,9 +3437,17 @@ async fn patch_contract_version_status(
     .bind(next)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
     let Some(v) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"contract version not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"contract version not found"})),
+        ));
     };
     Ok(Json(json!({ "version": v })))
 }
@@ -2684,7 +3499,10 @@ async fn upsert_connector_preset(
     let vertical = body.vertical.trim().to_ascii_lowercase();
     let provider = body.connector_provider.trim().to_ascii_lowercase();
     if vertical.is_empty() || provider.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"vertical and connector_provider required"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"vertical and connector_provider required"})),
+        ));
     }
     let row = sqlx::query_as::<_, ConnectorPresetRow>(
         r#"INSERT INTO connector_permission_presets (vertical, connector_provider, allowed_actions, blocked_actions)
@@ -2759,7 +3577,10 @@ async fn post_go_live_checklist_item(
         return Err(no_db());
     };
     if body.item_key.trim().is_empty() || body.item_label.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"item_key and item_label required"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"item_key and item_label required"})),
+        ));
     }
     let row = sqlx::query_as::<_, GoLiveChecklistRow>(
         r#"INSERT INTO company_go_live_checklists
@@ -2824,7 +3645,10 @@ async fn complete_go_live_checklist_item(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     let Some(item) = row else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"checklist item not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"checklist item not found"})),
+        ));
     };
     Ok(Json(json!({ "item": item })))
 }
@@ -2832,22 +3656,49 @@ async fn complete_go_live_checklist_item(
 fn go_live_template(vertical: &str) -> Vec<(&'static str, &'static str)> {
     match vertical.trim().to_ascii_lowercase().as_str() {
         "ecommerce" => vec![
-            ("contracts_signed", "Customer terms and refund policy approved"),
-            ("refund_guardrail", "Refund thresholds and approvers configured"),
-            ("channel_integrations", "Shopify/helpdesk/email connectors verified"),
+            (
+                "contracts_signed",
+                "Customer terms and refund policy approved",
+            ),
+            (
+                "refund_guardrail",
+                "Refund thresholds and approvers configured",
+            ),
+            (
+                "channel_integrations",
+                "Shopify/helpdesk/email connectors verified",
+            ),
             ("handoff_queue_ready", "Handoff review queue staffed"),
         ],
         "property_management" => vec![
-            ("legal_escalation", "Legal/fair-housing escalation path approved"),
-            ("maintenance_sla", "Emergency/standard maintenance SLA configured"),
-            ("tenant_comms_policy", "Tenant communication templates approved"),
-            ("incident_runbook", "Incident and escalation runbook reviewed"),
+            (
+                "legal_escalation",
+                "Legal/fair-housing escalation path approved",
+            ),
+            (
+                "maintenance_sla",
+                "Emergency/standard maintenance SLA configured",
+            ),
+            (
+                "tenant_comms_policy",
+                "Tenant communication templates approved",
+            ),
+            (
+                "incident_runbook",
+                "Incident and escalation runbook reviewed",
+            ),
         ],
         _ => vec![
-            ("owner_signoff", "Owner sign-off on policy and risk settings"),
+            (
+                "owner_signoff",
+                "Owner sign-off on policy and risk settings",
+            ),
             ("approval_matrix", "Approval matrix configured and tested"),
             ("connector_smoke_test", "Core connectors smoke-tested"),
-            ("ops_oncall", "Admin on-call and escalation contact assigned"),
+            (
+                "ops_oncall",
+                "Admin on-call and escalation contact assigned",
+            ),
         ],
     }
 }
@@ -2933,21 +3784,23 @@ async fn patch_goal(
     let Some(ref pool) = st.company_db else {
         return Err(no_db());
     };
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM goals WHERE id = $1 AND company_id = $2)",
-    )
-    .bind(goal_id)
-    .bind(company_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM goals WHERE id = $1 AND company_id = $2)")
+            .bind(goal_id)
+            .bind(company_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
     if !exists {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "goal not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "goal not found" })),
+        ));
     }
 
     let parent_patch = parse_parent_goal_patch(&body.parent_goal_id)?;
@@ -2993,7 +3846,11 @@ async fn patch_goal(
         }
     }
 
-    let title_upd = body.title.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let title_upd = body
+        .title
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
     let (parent_mode, parent_bind): (i32, Option<Uuid>) = match parent_patch {
         ParentGoalPatch::Omit => (0, None),
         ParentGoalPatch::Clear => (1, None),
@@ -3359,14 +4216,12 @@ async fn export_company_json(
     let Some(ref pool) = st.company_db else {
         return Err(no_db());
     };
-    let bundle = export_bundle(pool, company_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
+    let bundle = export_bundle(pool, company_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     Ok(Json(serde_json::to_value(&bundle).unwrap_or(json!({}))))
 }
 
@@ -3377,14 +4232,12 @@ async fn import_company_bundle(
     let Some(ref pool) = st.company_db else {
         return Err(no_db());
     };
-    let id = run_import_bundle(pool, req)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
+    let id = run_import_bundle(pool, req).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "company_id": id, "message": "imported" })),
@@ -3486,59 +4339,221 @@ async fn validate_onboarding_pack_contract(
     })))
 }
 
-fn template_defaults(vertical: &str) -> (&'static str, Vec<OnboardWorkflowDraft>, Vec<OnboardPolicyDraft>) {
+fn template_defaults(
+    vertical: &str,
+) -> (
+    &'static str,
+    Vec<OnboardWorkflowDraft>,
+    Vec<OnboardPolicyDraft>,
+) {
     let v = vertical.trim().to_ascii_lowercase();
     match v.as_str() {
         "ecommerce" | "online_commerce" => (
             "ecommerce",
             vec![
-                OnboardWorkflowDraft { title: "Customer inquiry triage".into(), owner_role: "support_admin".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Order issue follow-up".into(), owner_role: "ops_admin".into(), priority: "high".into(), sla_target: "same_day".into(), approval: "admin_required".into() },
-                OnboardWorkflowDraft { title: "Product content refresh".into(), owner_role: "marketing_admin".into(), priority: "medium".into(), sla_target: "24h".into(), approval: "auto".into() },
+                OnboardWorkflowDraft {
+                    title: "Customer inquiry triage".into(),
+                    owner_role: "support_admin".into(),
+                    priority: "high".into(),
+                    sla_target: "1h".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Order issue follow-up".into(),
+                    owner_role: "ops_admin".into(),
+                    priority: "high".into(),
+                    sla_target: "same_day".into(),
+                    approval: "admin_required".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Product content refresh".into(),
+                    owner_role: "marketing_admin".into(),
+                    priority: "medium".into(),
+                    sla_target: "24h".into(),
+                    approval: "auto".into(),
+                },
             ],
             vec![
-                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "medium".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "support_admin".into() },
-                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(100.0), amount_max: None, approver_role: "finance_admin".into() },
-                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+                OnboardPolicyDraft {
+                    action_type: "send_message".into(),
+                    risk_level: "medium".into(),
+                    decision_mode: "auto".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "support_admin".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "refund".into(),
+                    risk_level: "high".into(),
+                    decision_mode: "admin_required".into(),
+                    amount_min: Some(100.0),
+                    amount_max: None,
+                    approver_role: "finance_admin".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "update_budget".into(),
+                    risk_level: "critical".into(),
+                    decision_mode: "blocked".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "owner".into(),
+                },
             ],
         ),
         "marketing" | "marketing_agency" => (
             "marketing",
             vec![
-                OnboardWorkflowDraft { title: "Lead response drafting".into(), owner_role: "account_manager".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Campaign performance summary".into(), owner_role: "ads_manager".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Client update email".into(), owner_role: "account_manager".into(), priority: "medium".into(), sla_target: "24h".into(), approval: "admin_required".into() },
+                OnboardWorkflowDraft {
+                    title: "Lead response drafting".into(),
+                    owner_role: "account_manager".into(),
+                    priority: "high".into(),
+                    sla_target: "1h".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Campaign performance summary".into(),
+                    owner_role: "ads_manager".into(),
+                    priority: "medium".into(),
+                    sla_target: "same_day".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Client update email".into(),
+                    owner_role: "account_manager".into(),
+                    priority: "medium".into(),
+                    sla_target: "24h".into(),
+                    approval: "admin_required".into(),
+                },
             ],
             vec![
-                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "low".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "account_manager".into() },
-                OnboardPolicyDraft { action_type: "publish_campaign".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: None, amount_max: None, approver_role: "ads_manager".into() },
-                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+                OnboardPolicyDraft {
+                    action_type: "send_message".into(),
+                    risk_level: "low".into(),
+                    decision_mode: "auto".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "account_manager".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "publish_campaign".into(),
+                    risk_level: "high".into(),
+                    decision_mode: "admin_required".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "ads_manager".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "update_budget".into(),
+                    risk_level: "critical".into(),
+                    decision_mode: "blocked".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "owner".into(),
+                },
             ],
         ),
         "property_management" | "property" => (
             "property_management",
             vec![
-                OnboardWorkflowDraft { title: "Tenant request triage".into(), owner_role: "property_admin".into(), priority: "high".into(), sla_target: "same_day".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Maintenance dispatch & follow-up".into(), owner_role: "maintenance_coord".into(), priority: "high".into(), sla_target: "24h".into(), approval: "admin_required".into() },
-                OnboardWorkflowDraft { title: "Owner financial packet review".into(), owner_role: "owner".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "admin_required".into() },
+                OnboardWorkflowDraft {
+                    title: "Tenant request triage".into(),
+                    owner_role: "property_admin".into(),
+                    priority: "high".into(),
+                    sla_target: "same_day".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Maintenance dispatch & follow-up".into(),
+                    owner_role: "maintenance_coord".into(),
+                    priority: "high".into(),
+                    sla_target: "24h".into(),
+                    approval: "admin_required".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Owner financial packet review".into(),
+                    owner_role: "owner".into(),
+                    priority: "medium".into(),
+                    sla_target: "same_day".into(),
+                    approval: "admin_required".into(),
+                },
             ],
             vec![
-                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "low".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "property_admin".into() },
-                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(0.0), amount_max: None, approver_role: "owner".into() },
-                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+                OnboardPolicyDraft {
+                    action_type: "send_message".into(),
+                    risk_level: "low".into(),
+                    decision_mode: "auto".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "property_admin".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "refund".into(),
+                    risk_level: "high".into(),
+                    decision_mode: "admin_required".into(),
+                    amount_min: Some(0.0),
+                    amount_max: None,
+                    approver_role: "owner".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "update_budget".into(),
+                    risk_level: "critical".into(),
+                    decision_mode: "blocked".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "owner".into(),
+                },
             ],
         ),
         _ => (
             "generic_smb",
             vec![
-                OnboardWorkflowDraft { title: "Inbound message triage".into(), owner_role: "ops_admin".into(), priority: "high".into(), sla_target: "1h".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Follow-up scheduling".into(), owner_role: "ops_admin".into(), priority: "medium".into(), sla_target: "same_day".into(), approval: "auto".into() },
-                OnboardWorkflowDraft { title: "Exception escalation".into(), owner_role: "manager".into(), priority: "high".into(), sla_target: "1h".into(), approval: "admin_required".into() },
+                OnboardWorkflowDraft {
+                    title: "Inbound message triage".into(),
+                    owner_role: "ops_admin".into(),
+                    priority: "high".into(),
+                    sla_target: "1h".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Follow-up scheduling".into(),
+                    owner_role: "ops_admin".into(),
+                    priority: "medium".into(),
+                    sla_target: "same_day".into(),
+                    approval: "auto".into(),
+                },
+                OnboardWorkflowDraft {
+                    title: "Exception escalation".into(),
+                    owner_role: "manager".into(),
+                    priority: "high".into(),
+                    sla_target: "1h".into(),
+                    approval: "admin_required".into(),
+                },
             ],
             vec![
-                OnboardPolicyDraft { action_type: "send_message".into(), risk_level: "medium".into(), decision_mode: "auto".into(), amount_min: None, amount_max: None, approver_role: "ops_admin".into() },
-                OnboardPolicyDraft { action_type: "refund".into(), risk_level: "high".into(), decision_mode: "admin_required".into(), amount_min: Some(50.0), amount_max: None, approver_role: "manager".into() },
-                OnboardPolicyDraft { action_type: "update_budget".into(), risk_level: "critical".into(), decision_mode: "blocked".into(), amount_min: None, amount_max: None, approver_role: "owner".into() },
+                OnboardPolicyDraft {
+                    action_type: "send_message".into(),
+                    risk_level: "medium".into(),
+                    decision_mode: "auto".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "ops_admin".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "refund".into(),
+                    risk_level: "high".into(),
+                    decision_mode: "admin_required".into(),
+                    amount_min: Some(50.0),
+                    amount_max: None,
+                    approver_role: "manager".into(),
+                },
+                OnboardPolicyDraft {
+                    action_type: "update_budget".into(),
+                    risk_level: "critical".into(),
+                    decision_mode: "blocked".into(),
+                    amount_min: None,
+                    amount_max: None,
+                    approver_role: "owner".into(),
+                },
             ],
         ),
     }
@@ -3614,11 +4629,7 @@ async fn generate_onboarding_draft(
         }
     }
 
-    let company_name = req
-        .company_name
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let company_name = req.company_name.unwrap_or_default().trim().to_string();
 
     let mut missing = Vec::new();
     if company_name.is_empty() {
@@ -3639,11 +4650,28 @@ async fn generate_onboarding_draft(
     }
 
     let mut conf = std::collections::BTreeMap::new();
-    conf.insert("company_name".to_string(), if company_name.is_empty() { 0.2 } else { 0.95 });
-    conf.insert("industry".to_string(), if selected_vertical == "generic_smb" { 0.6 } else { 0.85 });
+    conf.insert(
+        "company_name".to_string(),
+        if company_name.is_empty() { 0.2 } else { 0.95 },
+    );
+    conf.insert(
+        "industry".to_string(),
+        if selected_vertical == "generic_smb" {
+            0.6
+        } else {
+            0.85
+        },
+    );
     conf.insert("workflows".to_string(), 0.82);
     conf.insert("policy_rules".to_string(), 0.79);
-    conf.insert("ownership".to_string(), if missing.iter().any(|x| x == "approver_role") { 0.45 } else { 0.8 });
+    conf.insert(
+        "ownership".to_string(),
+        if missing.iter().any(|x| x == "approver_role") {
+            0.45
+        } else {
+            0.8
+        },
+    );
 
     let draft = OnboardingDraft {
         company_name,
@@ -3676,7 +4704,9 @@ async fn apply_onboarding_draft(
     if unsatisfied_required {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "cannot apply draft: required KPI/risk gates are not satisfied" })),
+            Json(
+                json!({ "error": "cannot apply draft: required KPI/risk gates are not satisfied" }),
+            ),
         ));
     }
     let display_name = req

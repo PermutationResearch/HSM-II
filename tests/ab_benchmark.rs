@@ -19,8 +19,8 @@ use ::hyper_stigmergy::hyper_stigmergy::{Belief, BeliefSource};
 use ::hyper_stigmergy::llm::client::{LlmClient, LlmRequest, Message};
 use ::hyper_stigmergy::rlm::LivingPrompt;
 use ::hyper_stigmergy::skill::{
-    ApplicabilityCondition, Skill, SkillCuration, SkillLevel, SkillScope,
-    SkillSource, TrajectoryType,
+    ApplicabilityCondition, Skill, SkillCuration, SkillLevel, SkillScope, SkillSource,
+    TrajectoryType,
 };
 
 use serde::{Deserialize, Serialize};
@@ -486,19 +486,34 @@ fn seed_living_prompt() -> LivingPrompt {
     );
 
     // Accumulated insights from past reflections
-    lp.add_insight("Users respond better to structured answers with clear headers and bullet points".into());
-    lp.add_insight("Code examples should be complete and runnable, not pseudocode fragments".into());
+    lp.add_insight(
+        "Users respond better to structured answers with clear headers and bullet points".into(),
+    );
+    lp.add_insight(
+        "Code examples should be complete and runnable, not pseudocode fragments".into(),
+    );
     lp.add_insight("Always mention trade-offs when recommending an approach — the user values honest assessment over cheerleading".into());
-    lp.add_insight("When multiple solutions exist, present the recommended one first with brief alternatives".into());
+    lp.add_insight(
+        "When multiple solutions exist, present the recommended one first with brief alternatives"
+            .into(),
+    );
     lp.add_insight("Include error handling in every code example — the user's project treats unwrap() as a code smell".into());
     lp.add_insight("For business advice, ground recommendations in the user's specific constraints: $15K/month cloud budget, 4-person dev team, B2B SaaS product".into());
     lp.add_insight("Marketing content should emphasize technical differentiation — the user's audience is developers and CTOs, not consumers".into());
     lp.add_insight("The user's product is an AI-powered code review platform for enterprise teams — all advice should relate to this context".into());
 
     // Avoid patterns from past failures (GEPA: negative instructions > positive)
-    lp.add_avoid_pattern("Do not give vague answers like 'it depends' without concrete criteria for each case".into());
-    lp.add_avoid_pattern("Do not suggest solutions without explaining the trade-offs and failure modes".into());
-    lp.add_avoid_pattern("Do not ignore error handling in code examples — always use Result<T,E> not unwrap()".into());
+    lp.add_avoid_pattern(
+        "Do not give vague answers like 'it depends' without concrete criteria for each case"
+            .into(),
+    );
+    lp.add_avoid_pattern(
+        "Do not suggest solutions without explaining the trade-offs and failure modes".into(),
+    );
+    lp.add_avoid_pattern(
+        "Do not ignore error handling in code examples — always use Result<T,E> not unwrap()"
+            .into(),
+    );
     lp.add_avoid_pattern("Do not recommend enterprise tools (Salesforce, HubSpot Enterprise) — the user is a startup with limited budget".into());
     lp.add_avoid_pattern("Do not suggest 'hire more people' as a solution — the team is deliberately small and wants to stay that way".into());
 
@@ -773,10 +788,7 @@ IMPORTANT: Respond ONLY with valid JSON, no other text:
 
     let x_scores = parse_scores("x");
     let y_scores = parse_scores("y");
-    let raw_preferred = parsed["preferred"]
-        .as_str()
-        .unwrap_or("tie")
-        .to_lowercase();
+    let raw_preferred = parsed["preferred"].as_str().unwrap_or("tie").to_lowercase();
     let reason = parsed["reason"]
         .as_str()
         .unwrap_or("No reason provided")
@@ -959,12 +971,10 @@ async fn ab_benchmark_plain_vs_enriched() {
         "ollama"
     };
 
-    let model = std::env::var("DEFAULT_LLM_MODEL").unwrap_or_else(|_| {
-        match provider {
-            "anthropic" => "claude-sonnet-4-20250514".to_string(),
-            "openai" => "gpt-4o-mini".to_string(),
-            _ => hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2"),
-        }
+    let model = std::env::var("DEFAULT_LLM_MODEL").unwrap_or_else(|_| match provider {
+        "anthropic" => "claude-sonnet-4-20250514".to_string(),
+        "openai" => "gpt-4o-mini".to_string(),
+        _ => hyper_stigmergy::ollama_client::resolve_model_from_env("llama3.2"),
     });
 
     eprintln!(
@@ -1078,7 +1088,11 @@ async fn ab_benchmark_plain_vs_enriched() {
         );
 
         let preview = if enriched_system.len() > 500 {
-            format!("{}...[{} chars total]", &enriched_system[..500], enriched_system.len())
+            format!(
+                "{}...[{} chars total]",
+                &enriched_system[..500],
+                enriched_system.len()
+            )
         } else {
             enriched_system.clone()
         };

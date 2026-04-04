@@ -5,10 +5,13 @@ edition = "2021"
 default-run = "hyper-stigmergy"
 
 [workspace]
-members = ["."]
+members = [".", "external_integrations/hermes/hermes-bridge"]
 resolver = "2"
 
 [dependencies]
+# Hermes Bridge - real tool execution via Hermes Agent
+hermes-bridge = { path = "external_integrations/hermes/hermes-bridge" }
+
 # Async Runtime
 tokio = { version = "1.36", features = ["full", "rt-multi-thread"] }
 tokio-stream = "0.1"
@@ -30,6 +33,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 serde_yaml = "0.9"
+ron = "0.8"
 bincode = "1.3"
 
 # TUI
@@ -210,3 +214,7 @@ path = "src/bin/hsm_a2a_adapter.rs"
 name = "hsm_golden"
 path = "src/bin/hsm_golden.rs"
 required-features = ["lbug"]
+
+[[bin]]
+name = "hsm_archviz"
+path = "src/bin/hsm_archviz.rs"

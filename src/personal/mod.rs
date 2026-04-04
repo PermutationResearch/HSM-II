@@ -17,24 +17,25 @@ pub mod agent_memory_pipeline;
 pub mod autodream;
 pub mod business_pack;
 pub mod enhanced_agent;
-pub mod integrated_agent;
-pub mod prompt_defaults;
 pub mod gateway;
 pub mod heartbeat;
 pub mod hypergraph_client;
+pub mod integrated_agent;
 pub mod memory;
-pub mod outbound;
 pub mod ops_config;
+pub mod outbound;
 pub mod path_attachments;
 pub mod persona;
+pub mod prompt_defaults;
 pub mod task_trail;
 
 pub use enhanced_agent::{
-    EnhancedPersonalAgent, EnhancedAgentConfig, AgentResponse, WorldStats,
-    JouleWorkRecord, ContributionType, AgentMetrics, MessageContext,
+    AgentMetrics, AgentResponse, ContributionType, EnhancedAgentConfig, EnhancedPersonalAgent,
+    JouleWorkRecord, MessageContext, WorldStats,
 };
 pub use integrated_agent::{
-    integrated_home, AgentComponents, ComponentStatus, IntegratedAgentConfig, IntegratedPersonalAgent,
+    integrated_home, AgentComponents, ComponentStatus, IntegratedAgentConfig,
+    IntegratedPersonalAgent,
 };
 
 /// Full-stack agent: same as [`IntegratedPersonalAgent`] (shared `EnhancedPersonalAgent` core + integration layer).
@@ -47,11 +48,11 @@ pub use business_pack::{
 pub use heartbeat::{CronJob, Heartbeat, Routine, RoutineAction, RoutineTrigger};
 pub use hypergraph_client::HypergraphClient;
 pub use memory::{MemoryFact, MemoryMd, PersonalMemory, Project, UserMd};
-pub use persona::{Capability, Persona, Voice};
-pub use task_trail::TaskTrail;
 pub use ops_config::{
     load_ops_config, resolve_ops_config_path, OperationsConfig, OPS_SCHEMA_VERSION,
 };
+pub use persona::{Capability, Persona, Voice};
+pub use task_trail::TaskTrail;
 
 /// HSM-II Personal Agent - The unified interface
 pub struct PersonalAgent {
@@ -206,18 +207,21 @@ impl PersonalAgent {
 
     /// Start gateway for external communication
     /// Returns a channel receiver for processing messages
-    pub async fn start_gateway(&mut self, config: gateway::Config) -> Result<mpsc::Receiver<(gateway::Message, oneshot::Sender<String>)>> {
+    pub async fn start_gateway(
+        &mut self,
+        config: gateway::Config,
+    ) -> Result<mpsc::Receiver<(gateway::Message, oneshot::Sender<String>)>> {
         let mut gateway = gateway::Gateway::new(config);
-        
+
         // Create channel for message passing (avoids circular reference)
         let (tx, rx) = mpsc::channel::<(gateway::Message, oneshot::Sender<String>)>(100);
-        
+
         // Create handler that uses the channel
         let handler = ChannelMessageHandler { sender: tx };
         gateway.on_message(handler);
         gateway.start().await?;
         self.gateway = Some(gateway);
-        
+
         Ok(rx)
     }
 
@@ -258,8 +262,12 @@ impl PersonalAgent {
         let mut cleaned = text.to_string();
         // Strip Llama 3 chat template tokens
         for token in &[
-            "<|end_header_id|>", "<|start_header_id|>", "<|eot_id|>",
-            "<|begin_of_text|>", "<|end_of_text|>", "<|finetune_right_pad_id|>",
+            "<|end_header_id|>",
+            "<|start_header_id|>",
+            "<|eot_id|>",
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|finetune_right_pad_id|>",
         ] {
             cleaned = cleaned.replace(token, "");
         }
@@ -281,7 +289,10 @@ impl PersonalAgent {
         msg: &gateway::Message,
     ) -> Result<String> {
         // Use chat endpoint with conversation history
-        let result = self.llm.chat(system_prompt, &msg.content, &self.chat_history).await;
+        let result = self
+            .llm
+            .chat(system_prompt, &msg.content, &self.chat_history)
+            .await;
 
         if result.text.is_empty() || result.timed_out {
             // Fallback if LLM fails - provide helpful message
@@ -297,14 +308,16 @@ impl PersonalAgent {
     /// Execute task with tool calling
     async fn execute_with_tools(&mut self, task: &str) -> Result<TaskResult> {
         tracing::info!("Executing task with tools: {}", task);
-        
+
         // Build system prompt with available tools
-        let tools_description = self.tool_registry.list_tools()
+        let tools_description = self
+            .tool_registry
+            .list_tools()
             .iter()
             .map(|(name, desc)| format!("- {}: {}", name, desc))
             .collect::<Vec<_>>()
             .join("\n");
-        
+
         let _system_prompt = format!(
             "You are an AI assistant that can use tools to complete tasks.\n\n\
              Available tools:\n{}\n\n\
@@ -313,13 +326,13 @@ impl PersonalAgent {
              If no tool is needed, respond normally.",
             tools_description
         );
-        
+
         // Generate response from LLM
         let llm_result = self.llm.generate(task).await;
-        
+
         let mut tool_calls = vec![];
         let mut output = String::new();
-        
+
         // Try to parse tool call from response
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&llm_result.text) {
             if let Some(tool_name) = json.get("tool").and_then(|v| v.as_str()) {
@@ -330,23 +343,27 @@ impl PersonalAgent {
                         parameters: params.clone(),
                         call_id: uuid::Uuid::new_v4().to_string(),
                     };
-                    
+
                     tracing::info!("Executing tool: {} with params: {:?}", tool_name, params);
                     let result = self.tool_registry.execute(call).await;
-                    
+
                     let tool_result = if result.output.success {
                         result.output.result.clone()
                     } else {
-                        result.output.error.clone().unwrap_or_else(|| "Unknown error".to_string())
+                        result
+                            .output
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Unknown error".to_string())
                     };
-                    
+
                     tool_calls.push(crate::personal::ToolCall {
                         name: tool_name.to_string(),
                         arguments: params.clone(),
                         result: tool_result.clone(),
                         timestamp: chrono::Utc::now(),
                     });
-                    
+
                     output = tool_result;
                 }
             } else {
@@ -357,12 +374,12 @@ impl PersonalAgent {
             // Not valid JSON, use LLM response
             output = llm_result.text;
         }
-        
+
         // If no output and no tool calls, provide a default message
         if output.is_empty() && tool_calls.is_empty() {
             output = format!("I understand you want to: {}. However, I couldn't determine which tool to use. Please be more specific or check that the required tools are available.", task);
         }
-        
+
         Ok(TaskResult {
             success: !output.starts_with("Tool error:"),
             output,

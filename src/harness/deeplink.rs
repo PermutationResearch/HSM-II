@@ -14,12 +14,17 @@ pub fn parse_hsm_deeplink(uri: &str) -> Result<DeepLinkAction> {
         .strip_prefix(prefix)
         .ok_or_else(|| anyhow!("deep link must start with hsm://"))?;
     let mut parts = raw.splitn(2, '?');
-    let route = parts.next().unwrap_or_default().trim_matches('/').to_string();
+    let route = parts
+        .next()
+        .unwrap_or_default()
+        .trim_matches('/')
+        .to_string();
     if route.is_empty() {
         return Err(anyhow!("deep link route is empty"));
     }
-    let value = parts
-        .next()
-        .and_then(|qs| qs.split('&').find_map(|kv| kv.strip_prefix("value=").map(|v| v.to_string())));
+    let value = parts.next().and_then(|qs| {
+        qs.split('&')
+            .find_map(|kv| kv.strip_prefix("value=").map(|v| v.to_string()))
+    });
     Ok(DeepLinkAction { route, value })
 }

@@ -197,14 +197,10 @@ pub async fn get_token(
     State(state): State<TeamAppState>,
     Json(req): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, StatusCode> {
-    let token = state
-        .auth
-        .validate_key(&req.api_key)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "Token exchange failed");
-            StatusCode::UNAUTHORIZED
-        })?;
+    let token = state.auth.validate_key(&req.api_key).await.map_err(|e| {
+        warn!(error = %e, "Token exchange failed");
+        StatusCode::UNAUTHORIZED
+    })?;
 
     Ok(Json(TokenResponse {
         token,
@@ -311,7 +307,8 @@ pub async fn update_member_status(
     Path(role_name): Path<String>,
     Json(req): Json<UpdateMemberStatusRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !ctx.permissions.contains(&Permission::Admin) && !ctx.permissions.contains(&Permission::Write)
+    if !ctx.permissions.contains(&Permission::Admin)
+        && !ctx.permissions.contains(&Permission::Write)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -384,7 +381,8 @@ pub async fn update_brand(
     Extension(ctx): Extension<TenantContext>,
     Json(req): Json<UpdateBrandRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !ctx.permissions.contains(&Permission::Admin) && !ctx.permissions.contains(&Permission::Write)
+    if !ctx.permissions.contains(&Permission::Admin)
+        && !ctx.permissions.contains(&Permission::Write)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -455,7 +453,8 @@ pub async fn submit_task(
     Extension(ctx): Extension<TenantContext>,
     Json(req): Json<TaskRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !ctx.permissions.contains(&Permission::Write) && !ctx.permissions.contains(&Permission::Admin)
+    if !ctx.permissions.contains(&Permission::Write)
+        && !ctx.permissions.contains(&Permission::Admin)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -506,8 +505,7 @@ pub async fn submit_task(
         let tid2 = task_id.clone();
         let desc2 = req.description.clone();
         tokio::spawn(async move {
-            inf2.record_task_resubmission(&tenant2, &tid2, &desc2)
-                .await;
+            inf2.record_task_resubmission(&tenant2, &tid2, &desc2).await;
         });
     }
 
@@ -530,7 +528,8 @@ pub async fn create_campaign(
     Extension(ctx): Extension<TenantContext>,
     Json(req): Json<CreateCampaignRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !ctx.permissions.contains(&Permission::Write) && !ctx.permissions.contains(&Permission::Admin)
+    if !ctx.permissions.contains(&Permission::Write)
+        && !ctx.permissions.contains(&Permission::Admin)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -551,7 +550,8 @@ pub async fn create_campaign(
 
     let campaign_id = {
         let mut orch = orch.write().await;
-        let campaign = orch.campaign_store
+        let campaign = orch
+            .campaign_store
             .create_campaign(&req.name, &req.goal, channels);
         campaign.id.clone()
     };
@@ -890,7 +890,10 @@ mod tests {
     #[test]
     fn test_parse_member_status() {
         assert_eq!(parse_member_status("active"), Some(MemberStatus::Active));
-        assert_eq!(parse_member_status("DISABLED"), Some(MemberStatus::Disabled));
+        assert_eq!(
+            parse_member_status("DISABLED"),
+            Some(MemberStatus::Disabled)
+        );
         assert_eq!(parse_member_status("invalid"), None);
     }
 

@@ -179,9 +179,7 @@ impl TraceSummarizer {
             .promises
             .values()
             .filter(|p| p.resolved_at.is_some())
-            .filter(|p| {
-                task_key.map(|tk| p.task_key.contains(tk)).unwrap_or(true)
-            })
+            .filter(|p| task_key.map(|tk| p.task_key.contains(tk)).unwrap_or(true))
             .map(|p| PromiseOutcomeSummary {
                 agent_id: p.promiser,
                 task_key: p.task_key.clone(),
@@ -214,7 +212,10 @@ impl TraceSummarizer {
                 owner: policy.owner,
                 target: policy.target,
                 max_sensitivity: policy.max_sensitivity.clone(),
-                reason: policy.notes.clone().unwrap_or_else(|| "Security policy".to_string()),
+                reason: policy
+                    .notes
+                    .clone()
+                    .unwrap_or_else(|| "Security policy".to_string()),
             })
             .collect()
     }
@@ -228,17 +229,12 @@ impl TraceSummarizer {
         let mut directives: Vec<DirectiveSummary> = stigmergic_memory
             .directives
             .values()
-            .filter(|d| {
-                task_key.map(|tk| d.task_key.contains(tk)).unwrap_or(true)
-            })
+            .filter(|d| task_key.map(|tk| d.task_key.contains(tk)).unwrap_or(true))
             .map(|d| DirectiveSummary {
                 directive_id: d.task_key.clone(),
                 routing_hint: format!("{:?}", d.preferred_agent),
                 priority: (d.confidence * 100.0) as i32,
-                condition_summary: format!(
-                    "When {} -> {:?}",
-                    d.task_key, d.preferred_agent
-                ),
+                condition_summary: format!("When {} -> {:?}", d.task_key, d.preferred_agent),
             })
             .collect();
 
@@ -317,7 +313,11 @@ impl TraceSummarizer {
         if !summary.trusted_agents.is_empty() {
             lines.push("## Trusted Agents (High Reliability)".to_string());
             for (agent_id, score) in &summary.trusted_agents {
-                lines.push(format!("- Agent {}: {:.0}% reliability", agent_id, score * 100.0));
+                lines.push(format!(
+                    "- Agent {}: {:.0}% reliability",
+                    agent_id,
+                    score * 100.0
+                ));
             }
             lines.push(String::new());
         }
@@ -361,9 +361,7 @@ impl TraceSummarizer {
             for directive in &summary.active_directives {
                 lines.push(format!(
                     "- [{} priority] {} (ID: {})",
-                    directive.priority,
-                    directive.condition_summary,
-                    directive.directive_id
+                    directive.priority, directive.condition_summary, directive.directive_id
                 ));
             }
             lines.push(String::new());
@@ -391,10 +389,7 @@ impl TraceSummarizer {
                     .unwrap_or_default();
                 lines.push(format!(
                     "- [{:?}] Agent {}: {}{}",
-                    trace.kind,
-                    trace.agent_id,
-                    trace.summary,
-                    conf_str
+                    trace.kind, trace.agent_id, trace.summary, conf_str
                 ));
             }
         }

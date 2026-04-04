@@ -67,9 +67,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let context = match &cli.context_file {
-        Some(p) => Some(
-            std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?,
-        ),
+        Some(p) => {
+            Some(std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?)
+        }
         None => None,
     };
 
@@ -99,17 +99,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("Task ID: {}", run.task.id);
         for d in &run.drafts {
-            println!("\n--- Draft {} ({} ms) ---\n{}", d.agent_id, d.latency_ms, d.text);
+            println!(
+                "\n--- Draft {} ({} ms) ---\n{}",
+                d.agent_id, d.latency_ms, d.text
+            );
         }
         for r in &run.reviews {
             println!(
                 "\n--- Review {}→{} score={:.2} approve={} ({} ms) ---\n{}",
-                r.reviewer_id,
-                r.subject_agent_id,
-                r.score,
-                r.approve,
-                r.latency_ms,
-                r.critique
+                r.reviewer_id, r.subject_agent_id, r.score, r.approve, r.latency_ms, r.critique
             );
         }
         if let Some(ref s) = run.synthesized_answer {

@@ -10,14 +10,14 @@ pub mod database;
 pub mod disk_backed_vector_index;
 pub mod dspy;
 pub mod dspy_session;
-pub mod gepa;
-pub mod trace2skill;
 pub mod embedded_graph_store;
 pub mod embedding_index;
 pub mod experiment;
 pub mod external_connectors;
 pub mod federation;
+pub mod gepa;
 pub mod hyper_stigmergy;
+pub mod architecture_blueprint;
 pub mod hypergraph;
 pub mod kuramoto;
 pub mod loop_main;
@@ -32,6 +32,7 @@ pub mod reasoning_braid;
 pub mod rlm;
 pub mod rlm_v2;
 pub mod skill;
+pub mod trace2skill;
 pub mod transaction_layer;
 pub mod workflow;
 pub mod world_controller;
@@ -98,10 +99,16 @@ pub mod persistence;
 // Benchmark suite for HSM-II subsystems
 pub mod bench;
 
+// Honcho-inspired cross-session user inference and peer memory
+pub mod honcho;
+
+// Paperclip Intelligence Layer — company-as-intelligence runtime
+pub mod paperclip;
+
 // REST API (axum-based)
 pub mod api;
-pub mod console;
 pub mod company_os;
+pub mod console;
 
 // Comparative evaluation harness (HSM-II vs baseline)
 pub mod eval;
@@ -131,19 +138,46 @@ pub use cypher_parser::{
 pub use embedding_index::InMemoryEmbeddingIndex;
 pub use experiment::{ExperimentConfig, ExperimentHarness, ExperimentStats};
 pub use federation::{
-    ConflictMediator, ConflictRecord, ConflictResolution, CrossSystemVote, EdgeScope,
-    FederationClient, FederationConfig, FederationServer, HyperedgeInjectionRequest, ImportResult,
-    InjectedEdge, KnowledgeLayer, MetaHyperedge, PromotedEdge, Provenance, SharedEdge,
-    SharedVertexMeta, Subscription, SubscriptionFilter, SystemId, SystemInfo, TrustEdge,
-    TrustGraph, TrustPolicy,
+    ConflictMediator,
+    ConflictRecord,
+    ConflictResolution,
+    CrossSystemVote,
+    EdgeScope,
+    FederationClient,
+    FederationConfig,
+    FederationServer,
+    HyperedgeInjectionRequest,
+    ImportResult,
+    InjectedEdge,
+    KnowledgeLayer,
+    MergeStrategy,
+    MetaHyperedge,
+    PartitionDetector,
+    PartitionMerger,
+    PartitionState,
+    PeerState,
+    PromotedEdge,
     // Federation distribution (propagation, state sync, partition tolerance)
-    PropagationEngine, PropagationEnvelope, PropagationPayload, PropagationStrategy,
-    StateSyncEngine, StateDigest, SyncMessage, VectorClock,
-    PartitionDetector, PartitionMerger, PartitionState, MergeStrategy, PeerState,
+    PropagationEngine,
+    PropagationEnvelope,
+    PropagationPayload,
+    PropagationStrategy,
+    Provenance,
+    SharedEdge,
+    SharedVertexMeta,
+    StateDigest,
+    StateSyncEngine,
+    Subscription,
+    SubscriptionFilter,
+    SyncMessage,
+    SystemId,
+    SystemInfo,
+    TrustEdge,
+    TrustGraph,
+    TrustPolicy,
+    VectorClock,
 };
-pub use hyper_stigmergy::{
-    AddBeliefExtras, DecisionRecord, HyperStigmergicMorphogenesis,
-};
+pub use hyper_stigmergy::{AddBeliefExtras, DecisionRecord, HyperStigmergicMorphogenesis};
 pub use hypergraph::{Hypergraph, HypergraphConv};
 pub use kuramoto::{
     build_adjacency as kuramoto_build_adjacency, confidence_to_phase, KuramotoConfig,
@@ -180,20 +214,20 @@ pub use rlm::{
 };
 pub use rlm_v2::{
     run_rlm, Context as RlmV2Context, ContextChunk, ContextMetadata, ExecutionResult, FinalAnswer,
-    LlmBridge, LlmBridgeConfig, LlmQuery, RlmConfig, RlmError as RlmV2Error, RlmExecutor,
-    RlmIteration, RlmRuntime, RlmStats, RlmStatus, SandboxConfig, SubQuery, SubQueryResponse,
-    Trajectory, TrajectoryStore, TrajectoryViewer, IterationSnapshot, RlmToolCall,
+    IterationSnapshot, LlmBridge, LlmBridgeConfig, LlmQuery, RlmConfig, RlmError as RlmV2Error,
+    RlmExecutor, RlmIteration, RlmRuntime, RlmStats, RlmStatus, RlmToolCall, SandboxConfig,
+    SubQuery, SubQueryResponse, Trajectory, TrajectoryStore, TrajectoryViewer,
 };
 pub use skill::{ApplicabilityCondition, Skill, SkillBank, SkillLevel, SkillSource};
+pub use social_memory::{
+    AgentReputation, CapabilityEvidence, CollaborationStats, DataSensitivity, DelegationCandidate,
+    DelegationScoreComponents, PromiseRecord, PromiseStatus, SharePolicy, SocialMemory,
+};
 pub use trace2skill::{
     append_jsonl, heuristic_lesson, import_eval_artifacts_to_jsonl, infer_turn_route, load_merged,
     merge_pool, outcome_from_turn, read_jsonl, redact_params, save_merged, summarize_tool_output,
     task_map_for_artifacts, trajectory_from_eval_turn, MergedTraceSkill, ToolStepRecord,
     TrajectoryOutcome, TrajectoryRecord,
-};
-pub use social_memory::{
-    AgentReputation, CapabilityEvidence, CollaborationStats, DataSensitivity, DelegationCandidate,
-    DelegationScoreComponents, PromiseRecord, PromiseStatus, SharePolicy, SocialMemory,
 };
 
 // Feature flags for progressive rollout
@@ -312,15 +346,16 @@ pub use database::{
     VaultEmbeddingRow,
 };
 
-pub use persistence::{CouncilDecisionRow, ContextSnapshotRow, HsmSqliteStore, TrustEdgeRow};
 #[allow(deprecated)]
 pub use persistence::LadybugDb;
+pub use persistence::{ContextSnapshotRow, CouncilDecisionRow, HsmSqliteStore, TrustEdgeRow};
 
 pub use disk_backed_vector_index::DiskBackedVectorIndex;
 pub use dspy::{
     bootstrap_demonstrations, infer_failure_metadata, optimize_all_signatures, optimize_signature,
-    persist_trace, run_signature, run_signature_traced, Demonstration, DspyContext, DspyMutationStyle,
-    DspySignature, OptimizationResult, ResolvedSignature, SignatureStore, TraceResult,
+    persist_trace, run_signature, run_signature_traced, Demonstration, DspyContext,
+    DspyMutationStyle, DspySignature, OptimizationResult, ResolvedSignature, SignatureStore,
+    TraceResult,
 };
 pub use dspy_session::{
     DspySession, DspySessionAdapter, OptimizationExample, SessionConfig, SessionSnapshot,
@@ -441,11 +476,10 @@ pub use investigation_tools::{InvestigationToolRegistry, ToolCallRecord};
 pub mod mirofish;
 pub use mirofish::{
     builtin_templates, compute_calibration, recalibrate_confidence, validate_variables,
-    AnalysisComparison, CalibrationStats, FlowState, FlowTransition, LlmBackend,
-    LlmBackendResult, MiroFishEngine, PredictionRecord, PredictionStore,
-    ProbabilityFlowNetwork, ProjectionCurve, ProjectionPoint, RefinementRound,
-    RefinementSession, ScenarioDomain, ScenarioTemplate, StoredAnalysis,
-    Trajectory as MiroFishTrajectory, TrajectoryAnalysis, TrajectoryStep,
+    AnalysisComparison, CalibrationStats, FlowState, FlowTransition, LlmBackend, LlmBackendResult,
+    MiroFishEngine, PredictionRecord, PredictionStore, ProbabilityFlowNetwork, ProjectionCurve,
+    ProjectionPoint, RefinementRound, RefinementSession, ScenarioDomain, ScenarioTemplate,
+    StoredAnalysis, Trajectory as MiroFishTrajectory, TrajectoryAnalysis, TrajectoryStep,
     ValidationResult as MiroFishValidation, VariableSpec, VariableType,
 };
 
@@ -460,8 +494,8 @@ pub use autonomous_team::{
 };
 
 // Multi-Tenant SaaS Layer — tenant isolation, team API, usage tracking
-pub mod tenant;
 pub mod team_api;
+pub mod tenant;
 pub mod usage_tracker;
 
 // Dream → Routing Feedback Loop — converts dream patterns into task routing adjustments

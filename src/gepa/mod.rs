@@ -127,7 +127,11 @@ pub async fn collect_bundle(
     cfg: &GepaConfig,
 ) -> anyhow::Result<GepaCollectedBundle> {
     let mut rows = db
-        .fetch_dspy_traces_low_scoring(signature_name, cfg.failure_max_score, cfg.max_failure_traces)
+        .fetch_dspy_traces_low_scoring(
+            signature_name,
+            cfg.failure_max_score,
+            cfg.max_failure_traces,
+        )
         .await?;
 
     for r in rows.iter_mut() {
@@ -209,7 +213,10 @@ fn cluster_failures(rows: &[DspyTraceRow], min_size: usize) -> Vec<FailureCluste
                 .take(5)
                 .collect();
             if details.is_empty() {
-                details.push(format!("score={}, semantic_ok={}", traces[0].score, traces[0].semantic_ok));
+                details.push(format!(
+                    "score={}, semantic_ok={}",
+                    traces[0].score, traces[0].semantic_ok
+                ));
             }
             FailureCluster {
                 primary_code: code,

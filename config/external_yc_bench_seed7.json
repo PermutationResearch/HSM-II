@@ -1,0 +1,490 @@
+{
+  "benchmarks": [
+    {
+      "name": "aeon-intelligence_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "aeon-intelligence",
+        "marketplace_slug": "aeon-intelligence"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_aeon-intelligence",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "agency-agents_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "agency-agents",
+        "marketplace_slug": "agency-agents"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_agency-agents",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "agentsys-engineering_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "agentsys-engineering",
+        "marketplace_slug": "agentsys-engineering"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_agentsys-engineering",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "apex-systems_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "apex-systems",
+        "marketplace_slug": "apex-systems"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_apex-systems",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "clawteam-capital_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "clawteam-capital",
+        "marketplace_slug": "clawteam-capital"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_clawteam-capital",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "clawteam-engineering_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "clawteam-engineering",
+        "marketplace_slug": "clawteam-engineering"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_clawteam-engineering",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "clawteam-research-lab_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "clawteam-research-lab",
+        "marketplace_slug": "clawteam-research-lab"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_clawteam-research-lab",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "compound-engineering-co_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "compound-engineering-co",
+        "marketplace_slug": "compound-engineering-co"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_compound-engineering-co",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "donchitos-game-studio_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "donchitos-game-studio",
+        "marketplace_slug": "donchitos-game-studio"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_donchitos-game-studio",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "fullstack-forge_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "fullstack-forge",
+        "marketplace_slug": "fullstack-forge"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_fullstack-forge",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "gstack_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "gstack",
+        "marketplace_slug": "gstack"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_gstack",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "kdense-science-lab_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "kdense-science-lab",
+        "marketplace_slug": "kdense-science-lab"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_kdense-science-lab",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "minimax-studio_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "minimax-studio",
+        "marketplace_slug": "minimax-studio"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_minimax-studio",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "product-compass-consulting_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "product-compass-consulting",
+        "marketplace_slug": "product-compass-consulting"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_product-compass-consulting",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "redoak-review_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "redoak-review",
+        "marketplace_slug": "redoak-review"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_redoak-review",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "superpowers_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "superpowers",
+        "marketplace_slug": "superpowers"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_superpowers",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "taches-creative_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "taches-creative",
+        "marketplace_slug": "taches-creative"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_taches-creative",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    },
+    {
+      "name": "trail-of-bits-security_yc_bench_medium_seed7",
+      "labels": {
+        "benchmark": "yc_bench",
+        "preset": "medium",
+        "seed": "7",
+        "company_pack": "trail-of-bits-security",
+        "marketplace_slug": "trail-of-bits-security"
+      },
+      "setup_commands": [],
+      "command": [
+        "/Users/cno/.local/bin/uv",
+        "run",
+        "yc-bench",
+        "run",
+        "--model",
+        "openrouter/qwen/qwen3.6-plus:free",
+        "--seed",
+        "7",
+        "--config",
+        "hsm_market_trail-of-bits-security",
+        "--no-live"
+      ],
+      "cwd": "/Users/cno/yc-bench",
+      "env": {},
+      "timeout_sec": 7200
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::federation::types::SystemId;
@@ -129,10 +129,7 @@ impl StateSyncEngine {
             belief_hash: Self::hash_pair(belief_count as u64, tick),
             skill_hash: Self::hash_pair(skill_count as u64, tick),
             trust_hash: Self::hash_pair(trust_count as u64, tick),
-            world_hash: Self::hash_pair(
-                (belief_count + skill_count + trust_count) as u64,
-                tick,
-            ),
+            world_hash: Self::hash_pair((belief_count + skill_count + trust_count) as u64, tick),
             clock: self.clock.clone(),
         }
     }

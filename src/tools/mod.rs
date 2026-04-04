@@ -1,7 +1,7 @@
 //! Rust-Native Tool System for HSM-II
 //!
 //! Provides 60+ production-ready tools, competing with Hermes/OpenClaw:
-//! 
+//!
 //! ## Web & Browser (7 tools)
 //! - web_search - Search with multiple backends
 //! - browser_navigate, browser_click, browser_type, browser_screenshot
@@ -46,74 +46,74 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod file_tools;
+pub mod integrated_executor;
 pub mod registry;
 pub mod scored_tool_router;
+pub mod shell_tools;
 pub mod tool_permissions;
 pub mod web_search;
-pub mod file_tools;
-pub mod shell_tools;
-pub mod integrated_executor;
 
 // New comprehensive tool modules
-pub mod browser_tools;
-pub mod git_tools;
 pub mod api_tools;
+pub mod browser_tools;
 pub mod calculation_tools;
+pub mod email_tools;
+pub mod git_tools;
 pub mod system_tools;
 pub mod text_tools;
-pub mod email_tools;
 
+pub use file_tools::{EditTool, ReadTool, WriteTool};
+pub use integrated_executor::IntegratedToolExecutor;
 pub use registry::ToolRegistry;
 pub use scored_tool_router::{
-    pick_tool_for_prompt, rank_tools_for_prompt, route_prompt_execute, ScoredRouteConfig, ScoredRouteError,
-    ScoredRouteFailReason, ScoredTool,
+    pick_tool_for_prompt, rank_tools_for_prompt, route_prompt_execute, ScoredRouteConfig,
+    ScoredRouteError, ScoredRouteFailReason, ScoredTool,
 };
+pub use shell_tools::{BashTool, FindTool, GrepTool};
 pub use tool_permissions::ToolPermissionContext;
 pub use web_search::WebSearchTool;
-pub use file_tools::{ReadTool, WriteTool, EditTool};
-pub use shell_tools::{BashTool, GrepTool, FindTool};
-pub use integrated_executor::IntegratedToolExecutor;
 
 // Browser tools
 pub use browser_tools::{
-    BrowserNavigateTool, BrowserClickTool, BrowserTypeTool,
-    BrowserScreenshotTool, BrowserGetTextTool, BrowserCloseTool,
+    BrowserClickTool, BrowserCloseTool, BrowserGetTextTool, BrowserNavigateTool,
+    BrowserScreenshotTool, BrowserTypeTool,
 };
 
 // Git tools
 pub use git_tools::{
-    GitStatusTool, GitLogTool, GitDiffTool, GitAddTool, GitCommitTool,
-    GitPushTool, GitPullTool, GitBranchTool, GitCheckoutTool, GitCloneTool,
+    GitAddTool, GitBranchTool, GitCheckoutTool, GitCloneTool, GitCommitTool, GitDiffTool,
+    GitLogTool, GitPullTool, GitPushTool, GitStatusTool,
 };
 
 // API tools
 pub use api_tools::{
-    HttpRequestTool, WebhookSendTool, JsonParseTool, JsonValidateTool,
-    Base64Tool, UrlTool, MarkdownTool, CsvParseTool, CsvGenerateTool,
+    Base64Tool, CsvGenerateTool, CsvParseTool, HttpRequestTool, JsonParseTool, JsonValidateTool,
+    MarkdownTool, UrlTool, WebhookSendTool,
 };
 
 // Calculation tools
 pub use calculation_tools::{
-    CalculatorTool, UnitConversionTool, RandomTool, HashTool, UuidTool, DateTimeTool,
+    CalculatorTool, DateTimeTool, HashTool, RandomTool, UnitConversionTool, UuidTool,
 };
 
 // System tools
 pub use system_tools::{
-    SystemInfoTool, EnvironmentTool, ProcessListTool, DiskUsageTool,
-    FileInfoTool, ListDirectoryTool, ReadFileEnhancedTool, SearchFilesTool,
-    ArchiveExtractTool, ArchiveCreateTool,
+    ArchiveCreateTool, ArchiveExtractTool, DiskUsageTool, EnvironmentTool, FileInfoTool,
+    ListDirectoryTool, ProcessListTool, ReadFileEnhancedTool, SearchFilesTool, SystemInfoTool,
 };
 
 // Text tools
 pub use text_tools::{
-    TextReplaceTool, TextSplitTool, TextJoinTool, TextCaseTool,
-    TextTruncateTool, WordCountTool, TextDiffTool, RegexExtractTool, TemplateTool,
+    RegexExtractTool, TemplateTool, TextCaseTool, TextDiffTool, TextJoinTool, TextReplaceTool,
+    TextSplitTool, TextTruncateTool, WordCountTool,
 };
 
 // Feature flag tools
 pub mod flags_tools;
 pub use flags_tools::{
-    CreateFlagTool, CheckFlagTool, UpdateRolloutTool, EmergencyRollbackTool, FlagStatsTool, get_flag_tools,
+    get_flag_tools, CheckFlagTool, CreateFlagTool, EmergencyRollbackTool, FlagStatsTool,
+    UpdateRolloutTool,
 };
 
 // RLM tools
@@ -129,21 +129,21 @@ pub use ops_tools::register_personal_ops_tools;
 
 // MiroFish-inspired prediction tool
 pub mod prediction_tool;
-pub use prediction_tool::PredictionTool;
 pub use email_tools::{MaildirListTool, MaildirReadTool, ReadEmlTool};
+pub use prediction_tool::PredictionTool;
 
 /// Tool trait - all tools implement this
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// Tool name (used by LLM to call it)
     fn name(&self) -> &str;
-    
+
     /// Tool description (shown to LLM)
     fn description(&self) -> &str;
-    
+
     /// JSON schema for tool parameters
     fn parameters_schema(&self) -> Value;
-    
+
     /// Execute the tool with given parameters
     async fn execute(&self, params: Value) -> ToolOutput;
 }
@@ -166,7 +166,7 @@ impl ToolOutput {
             metadata: None,
         }
     }
-    
+
     pub fn error(error: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -175,7 +175,7 @@ impl ToolOutput {
             metadata: None,
         }
     }
-    
+
     pub fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = Some(metadata);
         self
@@ -223,17 +223,20 @@ impl Default for ToolContext {
 pub fn object_schema(properties: Vec<(&str, &str, bool)>) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
-    
+
     for (name, description, is_required) in properties {
-        props.insert(name.to_string(), serde_json::json!({
-            "type": "string",
-            "description": description
-        }));
+        props.insert(
+            name.to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": description
+            }),
+        );
         if is_required {
             required.push(name.to_string());
         }
     }
-    
+
     serde_json::json!({
         "type": "object",
         "properties": props,
@@ -244,7 +247,7 @@ pub fn object_schema(properties: Vec<(&str, &str, bool)>) -> Value {
 /// Register all 60+ tools in a registry
 pub fn register_all_tools(registry: &mut ToolRegistry) {
     use std::sync::Arc;
-    
+
     // Core tools
     registry.register(Arc::new(WebSearchTool::new()));
     registry.register(Arc::new(ReadTool));
@@ -253,7 +256,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(BashTool));
     registry.register(Arc::new(GrepTool));
     registry.register(Arc::new(FindTool));
-    
+
     // Browser tools
     registry.register(Arc::new(BrowserNavigateTool::new()));
     registry.register(Arc::new(BrowserClickTool::new()));
@@ -261,7 +264,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(BrowserScreenshotTool::new()));
     registry.register(Arc::new(BrowserGetTextTool::new()));
     registry.register(Arc::new(BrowserCloseTool::new()));
-    
+
     // Git tools
     registry.register(Arc::new(GitStatusTool::new()));
     registry.register(Arc::new(GitLogTool::new()));
@@ -273,7 +276,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(GitBranchTool::new()));
     registry.register(Arc::new(GitCheckoutTool::new()));
     registry.register(Arc::new(GitCloneTool::new()));
-    
+
     // API tools
     registry.register(Arc::new(HttpRequestTool::new()));
     registry.register(Arc::new(WebhookSendTool::new()));
@@ -284,7 +287,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(MarkdownTool::new()));
     registry.register(Arc::new(CsvParseTool::new()));
     registry.register(Arc::new(CsvGenerateTool::new()));
-    
+
     // Calculation tools
     registry.register(Arc::new(CalculatorTool::new()));
     registry.register(Arc::new(UnitConversionTool::new()));
@@ -292,7 +295,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(HashTool::new()));
     registry.register(Arc::new(UuidTool::new()));
     registry.register(Arc::new(DateTimeTool::new()));
-    
+
     // System tools
     registry.register(Arc::new(SystemInfoTool::new()));
     registry.register(Arc::new(EnvironmentTool::new()));
@@ -304,7 +307,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(SearchFilesTool::new()));
     registry.register(Arc::new(ArchiveExtractTool::new()));
     registry.register(Arc::new(ArchiveCreateTool::new()));
-    
+
     // Text tools
     registry.register(Arc::new(TextReplaceTool::new()));
     registry.register(Arc::new(TextSplitTool::new()));
@@ -315,7 +318,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(TextDiffTool::new()));
     registry.register(Arc::new(RegexExtractTool::new()));
     registry.register(Arc::new(TemplateTool::new()));
-    
+
     // RLM tools
     registry.register(Arc::new(RlmProcessTool::new()));
     registry.register(Arc::new(RlmTrajectoryTool::new()));

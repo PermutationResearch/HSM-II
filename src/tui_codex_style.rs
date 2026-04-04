@@ -209,7 +209,6 @@ fn get_model_tip(model: &str) -> &'static str {
 
 // ── Chat Area ────────────────────────────────────────────────────────────
 
-
 fn draw_chat_area_with_thinking<'a>(
     f: &mut Frame<'a>,
     area: Rect,

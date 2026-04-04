@@ -5,8 +5,7 @@
 
 use super::{
     CouncilDecision, CouncilDecisionMetadata, CouncilEvidence, CouncilEvidenceKind, CouncilId,
-    CouncilMember, CouncilMode, CouncilStatus, Decision, ExecutionPlan, Proposal,
-    TraceSummarizer,
+    CouncilMember, CouncilMode, CouncilStatus, Decision, ExecutionPlan, Proposal, TraceSummarizer,
 };
 use crate::agent::{AgentId, Role};
 use crate::social_memory::SocialMemory;
@@ -206,7 +205,7 @@ impl DebateCouncil {
                 }
             })
             .unwrap_or_default();
-        
+
         // In a real implementation, this would call an LLM
         format!(
             "[Agent {} as {:?}] {} - {}{}{}",
@@ -470,7 +469,7 @@ impl DebateCouncil {
             .as_ref()
             .map(|ctx| ctx.audit_metadata())
             .unwrap_or_default();
-        
+
         // Log all evidence cited in arguments
         for round in &self.rounds {
             for argument in &round.arguments {
@@ -479,7 +478,7 @@ impl DebateCouncil {
                 }
             }
         }
-        
+
         // Add summary bullets from trace context
         if let Some(ref ctx) = proposal.stigmergic_context {
             for bullet in &ctx.graph_snapshot_bullets {
@@ -488,7 +487,7 @@ impl DebateCouncil {
                 }
             }
         }
-        
+
         metadata.dedupe();
         metadata
     }
@@ -508,13 +507,14 @@ impl DebateCouncil {
             current_tick,
             proposal.task_key.as_deref(),
         );
-        
+
         // Create or update proposal context with summarized bullets
-        let bullets = summarizer.to_bullet_points(&summary)
+        let bullets = summarizer
+            .to_bullet_points(&summary)
             .lines()
             .map(|s| s.to_string())
             .collect();
-        
+
         if let Some(ref mut context) = proposal.stigmergic_context {
             context.graph_snapshot_bullets = bullets;
         } else {
@@ -548,7 +548,6 @@ impl DebateCouncil {
         );
         summarizer.to_bullet_points(&summary)
     }
-
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

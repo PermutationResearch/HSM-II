@@ -113,15 +113,14 @@ pub struct DefaultAgentHandler;
 impl AgentTaskHandler for DefaultAgentHandler {
     async fn handle_agent_task(&self, payload: &str) -> JobResult {
         info!(payload, "Executing agent task");
-        
+
         // Here you would:
         // 1. Parse the payload for task details
         // 2. Create/invoke an agent
         // 3. Execute the task
         // 4. Return the result
-        
-        JobResult::success("Agent task completed")
-            .with_output(format!("Processed: {}", payload))
+
+        JobResult::success("Agent task completed").with_output(format!("Processed: {}", payload))
     }
 }
 
@@ -132,19 +131,18 @@ pub struct DefaultHeartbeatHandler;
 impl HeartbeatHandler for DefaultHeartbeatHandler {
     async fn handle_heartbeat(&self, _payload: &str) -> JobResult {
         let start = std::time::Instant::now();
-        
+
         // Perform health checks
         info!("Running system heartbeat");
-        
+
         // Check various system components
         // - Hypergraph connectivity
         // - LLM provider health
         // - Disk space
         // - Memory usage
-        
+
         let duration = start.elapsed().as_millis() as u64;
-        
-        JobResult::success("System healthy")
-            .with_duration(duration)
+
+        JobResult::success("System healthy").with_duration(duration)
     }
 }

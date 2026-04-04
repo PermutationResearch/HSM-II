@@ -42,7 +42,10 @@ pub struct CalibrationReport {
 }
 
 /// Compare measured `TurnMetrics::rubric_pass` to gold on labeled (task, turn) keys only.
-pub fn calibration_report(turns: &[TurnMetrics], gold: &HashMap<(String, usize), bool>) -> CalibrationReport {
+pub fn calibration_report(
+    turns: &[TurnMetrics],
+    gold: &HashMap<(String, usize), bool>,
+) -> CalibrationReport {
     let mut tp = 0usize;
     let mut tn = 0usize;
     let mut fp = 0usize;
@@ -51,7 +54,9 @@ pub fn calibration_report(turns: &[TurnMetrics], gold: &HashMap<(String, usize),
 
     for t in turns {
         let key = (t.task_id.clone(), t.turn_index);
-        let Some(&g_pass) = gold.get(&key) else { continue };
+        let Some(&g_pass) = gold.get(&key) else {
+            continue;
+        };
         labeled += 1;
         let pred = t.rubric_pass;
         match (pred, g_pass) {

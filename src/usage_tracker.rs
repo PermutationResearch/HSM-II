@@ -123,10 +123,7 @@ impl UsageTracker {
     /// Get usage data for a tenant.
     pub async fn get_usage(&self, tenant_id: &str) -> TenantUsage {
         let counters = self.counters.read().await;
-        counters
-            .get(tenant_id)
-            .cloned()
-            .unwrap_or_default()
+        counters.get(tenant_id).cloned().unwrap_or_default()
     }
 
     /// Check if a tenant has exceeded their daily API call limit.

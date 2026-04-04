@@ -45,8 +45,7 @@ pub fn coder_tool_schema_to_parameters_json(schema: &ToolSchema) -> Value {
             "description": ps.description,
         });
         if let Some(def) = &ps.default {
-            prop
-                .as_object_mut()
+            prop.as_object_mut()
                 .expect("object")
                 .insert("default".to_string(), def.clone());
         }
@@ -121,10 +120,7 @@ pub struct McpHttpTool {
 }
 
 impl McpHttpTool {
-    pub fn new(
-        endpoint: impl Into<String>,
-        schema: &ToolSchema,
-    ) -> Self {
+    pub fn new(endpoint: impl Into<String>, schema: &ToolSchema) -> Self {
         Self {
             endpoint: endpoint.into(),
             tool_name: schema.name.clone(),
@@ -211,7 +207,9 @@ impl Tool for McpHttpTool {
     }
 }
 
-fn mcp_endpoint(manifest: &crate::coder_assistant::plugin_lifecycle::PluginManifest) -> Option<String> {
+fn mcp_endpoint(
+    manifest: &crate::coder_assistant::plugin_lifecycle::PluginManifest,
+) -> Option<String> {
     let p = &manifest.provider;
     if p.kind != ToolProviderKind::Mcp {
         return None;
@@ -272,7 +270,10 @@ fn discovered_tool_to_mcp_tool(endpoint: &str, tool: &Value) -> Option<Arc<dyn T
             })
         });
     Some(Arc::new(McpHttpTool::from_discovered(
-        endpoint, name, description, input,
+        endpoint,
+        name,
+        description,
+        input,
     )))
 }
 

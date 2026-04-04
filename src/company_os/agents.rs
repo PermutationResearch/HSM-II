@@ -56,12 +56,15 @@ fn valid_agent_name(s: &str) -> bool {
     let t = s.trim();
     !t.is_empty()
         && t.len() <= 128
-        && t
-            .chars()
+        && t.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-async fn company_has_agent(pool: &PgPool, company_id: Uuid, agent_id: Uuid) -> Result<bool, sqlx::Error> {
+async fn company_has_agent(
+    pool: &PgPool,
+    company_id: Uuid,
+    agent_id: Uuid,
+) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM company_agents WHERE id = $1 AND company_id = $2)",
     )
@@ -189,12 +192,15 @@ async fn create_agent(
         ));
     }
     if let Some(rid) = body.reports_to {
-        if !company_has_agent(pool, company_id, rid).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })? {
+        if !company_has_agent(pool, company_id, rid)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?
+        {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "reports_to agent not in this company" })),
@@ -301,7 +307,10 @@ async fn patch_agent(
             )
         })?
     {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "agent not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent not found" })),
+        ));
     }
 
     let current: CompanyAgentRow = sqlx::query_as::<_, CompanyAgentRow>(
@@ -506,7 +515,10 @@ async fn delete_agent(
             )
         })?
     {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "agent not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent not found" })),
+        ));
     }
     let res = sqlx::query("DELETE FROM company_agents WHERE id = $1 AND company_id = $2")
         .bind(agent_id)
@@ -520,9 +532,15 @@ async fn delete_agent(
             )
         })?;
     if res.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "agent not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent not found" })),
+        ));
     }
-    Ok((StatusCode::OK, Json(json!({ "deleted": true, "agent_id": agent_id }))))
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "deleted": true, "agent_id": agent_id })),
+    ))
 }
 
 #[derive(Serialize)]
@@ -547,15 +565,15 @@ fn build_org_forest(agents: Vec<CompanyAgentRow>) -> Vec<OrgNode> {
                 .unwrap_or_default()
         });
     }
-    fn walk(id: Uuid, by_id: &HashMap<Uuid, CompanyAgentRow>, children: &HashMap<Option<Uuid>, Vec<Uuid>>) -> OrgNode {
+    fn walk(
+        id: Uuid,
+        by_id: &HashMap<Uuid, CompanyAgentRow>,
+        children: &HashMap<Option<Uuid>, Vec<Uuid>>,
+    ) -> OrgNode {
         let agent = by_id.get(&id).unwrap().clone();
         let dr = children
             .get(&Some(id))
-            .map(|ids| {
-                ids.iter()
-                    .map(|cid| walk(*cid, by_id, children))
-                    .collect()
-            })
+            .map(|ids| ids.iter().map(|cid| walk(*cid, by_id, children)).collect())
             .unwrap_or_default();
         OrgNode {
             agent,
@@ -784,29 +802,32 @@ async fn get_task_llm_context(
         )
     })?;
     let Some(t) = t else {
-        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "task not found" }))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
     };
     let checkout_ref = t.checked_out_by.as_deref().unwrap_or("");
-    let profile = resolve_run_profile_for_task(pool, t.company_id, checkout_ref, t.owner_persona.as_deref())
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
-    let company_context_markdown: Option<String> = sqlx::query_scalar(
-        "SELECT context_markdown FROM companies WHERE id = $1",
-    )
-    .bind(t.company_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    let profile =
+        resolve_run_profile_for_task(pool, t.company_id, checkout_ref, t.owner_persona.as_deref())
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+    let company_context_markdown: Option<String> =
+        sqlx::query_scalar("SELECT context_markdown FROM companies WHERE id = $1")
+            .bind(t.company_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
     let company_addon = build_company_wide_context_addon(company_context_markdown.as_deref());
     let company_context_addon_bytes = company_addon.len();
     let combined_system_addon = format!("{company_addon}{}", profile.system_context_addon);

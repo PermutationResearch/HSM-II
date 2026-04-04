@@ -21,7 +21,9 @@ use serde_json::Value;
 pub mod analyst;
 pub mod from_eval;
 
-pub use analyst::{heuristic_lesson, lesson_for_record, merge_sectioned_principle, parallel_lessons};
+pub use analyst::{
+    heuristic_lesson, lesson_for_record, merge_sectioned_principle, parallel_lessons,
+};
 pub use from_eval::{
     default_eval_task_union, import_eval_artifacts_to_jsonl, read_run_manifest,
     read_turn_metrics_jsonl, task_map_for_artifacts, trajectory_from_eval_turn,
@@ -121,9 +123,7 @@ pub fn infer_turn_route(msg: &str, response_council: bool, skills_used: &[String
     if response_council {
         return "council".into();
     }
-    if msg.starts_with("/ralph")
-        || skills_used.iter().any(|s| s.contains("ralph"))
-    {
+    if msg.starts_with("/ralph") || skills_used.iter().any(|s| s.contains("ralph")) {
         return "ralph".into();
     }
     if msg.starts_with("/rlm") || skills_used.iter().any(|s| s.contains("rlm")) {
@@ -135,10 +135,7 @@ pub fn infer_turn_route(msg: &str, response_council: bool, skills_used: &[String
     "skills".into()
 }
 
-pub fn outcome_from_turn(
-    confidence: f64,
-    tool_steps: &[ToolStepRecord],
-) -> TrajectoryOutcome {
+pub fn outcome_from_turn(confidence: f64, tool_steps: &[ToolStepRecord]) -> TrajectoryOutcome {
     if tool_steps.iter().any(|t| !t.ok) {
         return TrajectoryOutcome::Failure;
     }

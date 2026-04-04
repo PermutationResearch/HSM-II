@@ -39,13 +39,14 @@ pub fn primary_path() -> Option<PathBuf> {
 
 /// Run an ad-hoc Cypher string against the primary Ladybug store (for debugging / power users).
 pub fn run_cypher_debug(query: &str) -> anyhow::Result<String> {
-    let path = primary_path().or_else(|| {
-        std::env::var(super::ladybug_native::ENV_HSMII_LADYBUG_PATH)
-            .ok()
-            .filter(|p| !p.trim().is_empty())
-            .map(PathBuf::from)
-    })
-    .context("Set HSMII_LADYBUG_PATH to a database path")?;
+    let path = primary_path()
+        .or_else(|| {
+            std::env::var(super::ladybug_native::ENV_HSMII_LADYBUG_PATH)
+                .ok()
+                .filter(|p| !p.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .context("Set HSMII_LADYBUG_PATH to a database path")?;
 
     let db = Database::new(&path, SystemConfig::default()).map_err(|e| anyhow::anyhow!("{}", e))?;
     let conn = Connection::new(&db).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -61,7 +62,8 @@ pub fn save_world_primary(
 ) -> anyhow::Result<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {:?}", parent))?;
         }
     }
 
@@ -81,10 +83,7 @@ pub fn save_world_primary(
         &mut chk,
         vec![
             ("id", Value::String("singleton".into())),
-            (
-                "saved_at",
-                Value::Int64(snapshot.metadata.saved_at as i64),
-            ),
+            ("saved_at", Value::Int64(snapshot.metadata.saved_at as i64)),
             ("tick", Value::Int64(snapshot.metadata.tick_count as i64)),
             ("fv", Value::String(snapshot.format_version.clone())),
             ("payload", Value::Blob(payload.clone())),

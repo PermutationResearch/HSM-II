@@ -16,9 +16,9 @@ use rusqlite::Connection;
 use hyper_stigmergy::eval::{
     self, append_runs_index, calibration_report, compare, default_runs_index, eval_tasks_for_suite,
     filter_tasks, ingest_json_file, load_gold_labels, parse_weighted_suites,
-    sync_index_line_to_sqlite, write_jsonl, write_manifest, write_turn_metrics_jsonl, ArtifactPaths,
-    BaselineRunner, BipartiteMemoryGraph, ComparisonReport, EvalTask, HsmRunner, HsmRunnerConfig,
-    RunManifest, RunnerMetrics, WeightedEvalSuite,
+    sync_index_line_to_sqlite, write_jsonl, write_manifest, write_turn_metrics_jsonl,
+    ArtifactPaths, BaselineRunner, BipartiteMemoryGraph, ComparisonReport, EvalTask, HsmRunner,
+    HsmRunnerConfig, RunManifest, RunnerMetrics, WeightedEvalSuite,
 };
 use hyper_stigmergy::eval::{init_memory_graph_sqlite_schema, upsert_memory_graph_sqlite};
 use hyper_stigmergy::llm::client::LlmClient;
@@ -159,9 +159,8 @@ fn hsm_runner_config(cli: &Cli) -> anyhow::Result<HsmRunnerConfig> {
     let mut cfg = if let Some(ref path) = cli.hsm_config {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read {}: {}", path.display(), e))?;
-        serde_json::from_str(&text).map_err(|e| {
-            anyhow::anyhow!("parse HSM config {}: {}", path.display(), e)
-        })?
+        serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse HSM config {}: {}", path.display(), e))?
     } else {
         HsmRunnerConfig::default()
     };
@@ -215,11 +214,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("--memory-graph-sqlite-out is required with --memory-graph-json")
         })?;
         ingest_json_file(db_out, json_path)?;
-        println!(
-            "Ingested {} → {}",
-            json_path.display(),
-            db_out.display()
-        );
+        println!("Ingested {} → {}", json_path.display(), db_out.display());
         return Ok(());
     }
 
@@ -238,8 +233,14 @@ async fn main() -> anyhow::Result<()> {
     println!("║         HSM-II Comparative Evaluation Harness           ║");
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Suites: {:<47}║", suite_names.join(", "));
-    println!("║  Tasks: {:>3}                                              ║", total_tasks);
-    println!("║  Total turns: {:>3}                                      ║", total_turns);
+    println!(
+        "║  Tasks: {:>3}                                              ║",
+        total_tasks
+    );
+    println!(
+        "║  Total turns: {:>3}                                      ║",
+        total_turns
+    );
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
     if LlmClient::new().is_err() {
@@ -396,14 +397,8 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if let Some(ref path) = cli.json {
-                let base = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("eval");
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("json");
+                let base = path.file_stem().and_then(|s| s.to_str()).unwrap_or("eval");
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
                 let jp = path.with_file_name(format!("{}_{}.{}", base, ws.name, ext));
                 std::fs::write(&jp, serde_json::to_string_pretty(&report)?)?;
                 println!("Exported {}", jp.display());
@@ -415,8 +410,14 @@ async fn main() -> anyhow::Result<()> {
                     sd.join("comparison_report.json"),
                     serde_json::to_string_pretty(&report)?,
                 )?;
-                std::fs::write(sd.join("baseline_metrics.json"), serde_json::to_string_pretty(b)?)?;
-                std::fs::write(sd.join("hsm_metrics.json"), serde_json::to_string_pretty(h)?)?;
+                std::fs::write(
+                    sd.join("baseline_metrics.json"),
+                    serde_json::to_string_pretty(b)?,
+                )?;
+                std::fs::write(
+                    sd.join("hsm_metrics.json"),
+                    serde_json::to_string_pretty(h)?,
+                )?;
             }
         } else if let Some(ref b) = baseline_metrics {
             if cli.verbose {
@@ -435,14 +436,8 @@ async fn main() -> anyhow::Result<()> {
             let report = compare(b, h, &agg_tasks);
             eval::print_report(&report);
             if let Some(ref path) = cli.json {
-                let base = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("eval");
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("json");
+                let base = path.file_stem().and_then(|s| s.to_str()).unwrap_or("eval");
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
                 let comb = path.with_file_name(format!("{}_combined.{}", base, ext));
                 std::fs::write(&comb, serde_json::to_string_pretty(&report)?)?;
                 println!("Exported {}", comb.display());
@@ -501,7 +496,11 @@ async fn main() -> anyhow::Result<()> {
 
 fn print_turn_details(metrics: &RunnerMetrics) {
     for turn in &metrics.turns {
-        let recall_marker = if turn.requires_recall { " [RECALL]" } else { "" };
+        let recall_marker = if turn.requires_recall {
+            " [RECALL]"
+        } else {
+            ""
+        };
         println!(
             "  [{} T{}S{}{}] score={:.0}% tokens={} latency={}ms",
             turn.task_id,

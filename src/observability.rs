@@ -2,12 +2,12 @@
 //!
 //! Provides metrics, health checks, distributed tracing, and alerting hooks.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use axum::{extract::State, http::StatusCode, response::Json, Router};
-use prometheus::{Counter, Gauge, Histogram, Registry, Encoder, TextEncoder};
+use prometheus::{Counter, Encoder, Gauge, Histogram, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
@@ -39,68 +39,54 @@ impl MetricsRegistry {
     pub fn new() -> anyhow::Result<Self> {
         let registry = Registry::new();
 
-        let http_requests_total = Counter::new(
-            "hsm_http_requests_total",
-            "Total HTTP requests received"
-        )?;
+        let http_requests_total =
+            Counter::new("hsm_http_requests_total", "Total HTTP requests received")?;
         registry.register(Box::new(http_requests_total.clone()))?;
 
         let http_request_duration = Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "hsm_http_request_duration_seconds",
-                "HTTP request duration in seconds"
-            ).buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+                "HTTP request duration in seconds",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
         )?;
         registry.register(Box::new(http_request_duration.clone()))?;
 
-        let active_connections = Gauge::new(
-            "hsm_active_connections",
-            "Number of active connections"
-        )?;
+        let active_connections =
+            Gauge::new("hsm_active_connections", "Number of active connections")?;
         registry.register(Box::new(active_connections.clone()))?;
 
-        let llm_requests_total = Counter::new(
-            "hsm_llm_requests_total",
-            "Total LLM requests"
-        )?;
+        let llm_requests_total = Counter::new("hsm_llm_requests_total", "Total LLM requests")?;
         registry.register(Box::new(llm_requests_total.clone()))?;
 
         let llm_latency_ms = Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "hsm_llm_latency_milliseconds",
-                "LLM request latency in milliseconds"
-            ).buckets(vec![50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0])
+                "LLM request latency in milliseconds",
+            )
+            .buckets(vec![
+                50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+            ]),
         )?;
         registry.register(Box::new(llm_latency_ms.clone()))?;
 
-        let tool_executions_total = Counter::new(
-            "hsm_tool_executions_total",
-            "Total tool executions"
-        )?;
+        let tool_executions_total =
+            Counter::new("hsm_tool_executions_total", "Total tool executions")?;
         registry.register(Box::new(tool_executions_total.clone()))?;
 
-        let failures_total = Counter::new(
-            "hsm_failures_total",
-            "Total failed operations"
-        )?;
+        let failures_total = Counter::new("hsm_failures_total", "Total failed operations")?;
         registry.register(Box::new(failures_total.clone()))?;
 
-        let council_decisions_total = Counter::new(
-            "hsm_council_decisions_total",
-            "Total council decisions"
-        )?;
+        let council_decisions_total =
+            Counter::new("hsm_council_decisions_total", "Total council decisions")?;
         registry.register(Box::new(council_decisions_total.clone()))?;
 
-        let promises_kept = Counter::new(
-            "hsm_promises_kept_total",
-            "Total promises kept"
-        )?;
+        let promises_kept = Counter::new("hsm_promises_kept_total", "Total promises kept")?;
         registry.register(Box::new(promises_kept.clone()))?;
 
-        let promises_broken = Counter::new(
-            "hsm_promises_broken_total",
-            "Total promises broken"
-        )?;
+        let promises_broken = Counter::new("hsm_promises_broken_total", "Total promises broken")?;
         registry.register(Box::new(promises_broken.clone()))?;
 
         Ok(Self {
@@ -179,7 +165,11 @@ impl HealthChecker {
 
             component_health.push(ComponentHealth {
                 name: check.name().to_string(),
-                status: if result.is_ok() { "healthy".to_string() } else { "unhealthy".to_string() },
+                status: if result.is_ok() {
+                    "healthy".to_string()
+                } else {
+                    "unhealthy".to_string()
+                },
                 message: result.err().map(|e| e.to_string()),
                 latency_ms,
             });
@@ -188,7 +178,11 @@ impl HealthChecker {
         let all_healthy = component_health.iter().all(|h| h.status == "healthy");
 
         HealthStatus {
-            status: if all_healthy { "healthy".to_string() } else { "degraded".to_string() },
+            status: if all_healthy {
+                "healthy".to_string()
+            } else {
+                "degraded".to_string()
+            },
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
             checks: component_health,
@@ -223,7 +217,7 @@ impl HealthCheck for LlmHealthCheck {
     async fn check(&self) -> anyhow::Result<()> {
         let results = self.client.health_check().await;
         let any_healthy = results.iter().any(|(_, healthy, _)| *healthy);
-        
+
         if any_healthy {
             Ok(())
         } else {
@@ -244,7 +238,8 @@ impl HealthCheck for DatabaseHealthCheck {
     async fn check(&self) -> anyhow::Result<()> {
         // Implement based on your database setup
         // For now, assume healthy if we can access the data directory
-        tokio::fs::metadata("./data").await
+        tokio::fs::metadata("./data")
+            .await
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("Database check failed: {}", e))
     }
@@ -370,10 +365,7 @@ pub fn init_tracing() {
 }
 
 /// Create observability router
-pub fn observability_router(
-    metrics: Arc<MetricsRegistry>,
-    health: Arc<HealthChecker>,
-) -> Router {
+pub fn observability_router(metrics: Arc<MetricsRegistry>, health: Arc<HealthChecker>) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health_handler))
         .route("/metrics", axum::routing::get(metrics_handler))
@@ -394,7 +386,9 @@ async fn health_handler(State(state): State<ObservabilityState>) -> Json<HealthS
 }
 
 async fn metrics_handler(State(state): State<ObservabilityState>) -> Result<String, StatusCode> {
-    state.metrics.export_prometheus()
+    state
+        .metrics
+        .export_prometheus()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -438,7 +432,7 @@ mod tests {
         let metrics = MetricsRegistry::new().unwrap();
         metrics.http_requests_total.inc();
         metrics.http_requests_total.inc();
-        
+
         let output = metrics.export_prometheus().unwrap();
         assert!(output.contains("hsm_http_requests_total"));
     }
@@ -449,14 +443,12 @@ mod tests {
             status: "healthy".to_string(),
             version: "1.0.0".to_string(),
             uptime_seconds: 3600,
-            checks: vec![
-                ComponentHealth {
-                    name: "database".to_string(),
-                    status: "healthy".to_string(),
-                    message: None,
-                    latency_ms: 5,
-                }
-            ],
+            checks: vec![ComponentHealth {
+                name: "database".to_string(),
+                status: "healthy".to_string(),
+                message: None,
+                latency_ms: 5,
+            }],
         };
 
         let json = serde_json::to_string(&status).unwrap();

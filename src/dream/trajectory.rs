@@ -109,7 +109,12 @@ mod tests {
     use crate::stigmergic_policy::StigmergicTrace;
     use std::collections::HashMap;
 
-    fn make_trace(tick: u64, kind: TraceKind, agent_id: u64, score: Option<f64>) -> StigmergicTrace {
+    fn make_trace(
+        tick: u64,
+        kind: TraceKind,
+        agent_id: u64,
+        score: Option<f64>,
+    ) -> StigmergicTrace {
         StigmergicTrace {
             id: format!("t_{}", tick),
             agent_id,
@@ -240,16 +245,15 @@ mod tests {
         };
         let mut mem = StigmergicMemory::default();
         mem.last_applied_tick = 100;
-        mem.traces = vec![
-            make_trace(50, TraceKind::QueryPlanned, 1, Some(0.5)),
-        ];
+        mem.traces = vec![make_trace(50, TraceKind::QueryPlanned, 1, Some(0.5))];
 
-        let experiences = vec![
-            make_experience(60, ExperienceOutcome::Positive { coherence_delta: 0.3 }),
-        ];
-        let beliefs = vec![
-            make_belief(70, 0.8, 0),
-        ];
+        let experiences = vec![make_experience(
+            60,
+            ExperienceOutcome::Positive {
+                coherence_delta: 0.3,
+            },
+        )];
+        let beliefs = vec![make_belief(70, 0.8, 0)];
 
         let traj = assemble_trajectory(&config, &mem, &experiences, &beliefs);
         assert_eq!(traj.len(), 3);
@@ -269,8 +273,18 @@ mod tests {
         mem.last_applied_tick = 100;
 
         let experiences = vec![
-            make_experience(50, ExperienceOutcome::Positive { coherence_delta: 0.5 }),
-            make_experience(60, ExperienceOutcome::Negative { coherence_delta: -0.3 }),
+            make_experience(
+                50,
+                ExperienceOutcome::Positive {
+                    coherence_delta: 0.5,
+                },
+            ),
+            make_experience(
+                60,
+                ExperienceOutcome::Negative {
+                    coherence_delta: -0.3,
+                },
+            ),
             make_experience(70, ExperienceOutcome::Neutral),
         ];
 

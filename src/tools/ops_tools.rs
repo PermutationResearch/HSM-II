@@ -133,11 +133,7 @@ impl Tool for ListTicketsTool {
                 "Optional: only tickets whose state contains this string (case-insensitive).",
                 false,
             ),
-            (
-                "path",
-                "Optional absolute path to operations.yaml.",
-                false,
-            ),
+            ("path", "Optional absolute path to operations.yaml.", false),
         ])
     }
 
@@ -150,10 +146,7 @@ impl Tool for ListTicketsTool {
             .filter(|s| !s.is_empty());
 
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return ToolOutput::error(format!(
-                "operations config not found: {}",
-                path.display()
-            ));
+            return ToolOutput::error(format!("operations config not found: {}", path.display()));
         }
 
         let p = path.clone();
@@ -177,9 +170,9 @@ impl Tool for ListTicketsTool {
             .tickets
             .iter()
             .filter(|t| {
-                state_filter.as_ref().map_or(true, |f| {
-                    t.state.to_lowercase().contains(f.as_str())
-                })
+                state_filter
+                    .as_ref()
+                    .map_or(true, |f| t.state.to_lowercase().contains(f.as_str()))
             })
             .cloned()
             .collect();
@@ -190,9 +183,7 @@ impl Tool for ListTicketsTool {
             "tickets": tickets,
         });
 
-        ToolOutput::success(
-            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".into()),
-        )
+        ToolOutput::success(serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".into()))
     }
 }
 

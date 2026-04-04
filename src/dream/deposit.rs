@@ -45,10 +45,19 @@ pub fn deposit(
 
         let mut tags = HashMap::new();
         tags.insert("dream_pattern_id".to_string(), pattern.id.clone());
-        tags.insert("dream_generation".to_string(), pattern.origin_generation.to_string());
+        tags.insert(
+            "dream_generation".to_string(),
+            pattern.origin_generation.to_string(),
+        );
         tags.insert("valence".to_string(), format!("{:.3}", pattern.valence));
-        tags.insert("confidence".to_string(), format!("{:.3}", pattern.confidence));
-        tags.insert("observations".to_string(), pattern.observation_count.to_string());
+        tags.insert(
+            "confidence".to_string(),
+            format!("{:.3}", pattern.confidence),
+        );
+        tags.insert(
+            "observations".to_string(),
+            pattern.observation_count.to_string(),
+        );
         tags.insert("type".to_string(), "dream_trail".to_string());
         // Encode the trace sequence for discoverability
         let sequence_str: Vec<&str> = pattern
@@ -197,11 +206,7 @@ mod tests {
         }
     }
 
-    fn make_trace(
-        tick: u64,
-        kind: TraceKind,
-        score: Option<f64>,
-    ) -> StigmergicTrace {
+    fn make_trace(tick: u64, kind: TraceKind, score: Option<f64>) -> StigmergicTrace {
         StigmergicTrace {
             id: format!("t_{}", tick),
             agent_id: 1,
@@ -226,14 +231,12 @@ mod tests {
             ..DreamConfig::default()
         };
 
-        let patterns = vec![
-            make_pattern(
-                "pat_1",
-                0.7,
-                0.8,
-                vec![TraceKind::PromiseMade, TraceKind::PromiseResolved],
-            ),
-        ];
+        let patterns = vec![make_pattern(
+            "pat_1",
+            0.7,
+            0.8,
+            vec![TraceKind::PromiseMade, TraceKind::PromiseResolved],
+        )];
 
         let mut world = HyperStigmergicMorphogenesis::new(0);
         world.stigmergic_memory.last_applied_tick = 100;
@@ -245,14 +248,8 @@ mod tests {
         assert_eq!(world.edges.len(), initial_edges + 1);
         let edge = world.edges.last().unwrap();
         assert!(edge.emergent);
-        assert_eq!(
-            edge.tags.get("type").unwrap(),
-            "dream_trail"
-        );
-        assert_eq!(
-            edge.knowledge_layer,
-            Some(KnowledgeLayer::Distilled)
-        );
+        assert_eq!(edge.tags.get("type").unwrap(), "dream_trail");
+        assert_eq!(edge.knowledge_layer, Some(KnowledgeLayer::Distilled));
     }
 
     #[test]
@@ -262,9 +259,7 @@ mod tests {
             ..DreamConfig::default()
         };
 
-        let patterns = vec![
-            make_pattern("weak", 0.5, 0.3, vec![TraceKind::PromiseMade]),
-        ];
+        let patterns = vec![make_pattern("weak", 0.5, 0.3, vec![TraceKind::PromiseMade])];
 
         let mut world = HyperStigmergicMorphogenesis::new(0);
 
@@ -292,19 +287,29 @@ mod tests {
         let mut world = HyperStigmergicMorphogenesis::new(0);
         world.stigmergic_memory.last_applied_tick = 100;
         world.stigmergic_memory.traces = vec![
-            make_trace(90, TraceKind::PromiseMade, Some(0.5)),     // matches
-            make_trace(80, TraceKind::QueryPlanned, Some(0.5)),    // doesn't match kind
+            make_trace(90, TraceKind::PromiseMade, Some(0.5)), // matches
+            make_trace(80, TraceKind::QueryPlanned, Some(0.5)), // doesn't match kind
         ];
 
         let result = deposit(&config, &patterns, &mut world);
         assert!(result.traces_boosted > 0);
 
         // PromiseMade trace should be boosted
-        let pm_trace = world.stigmergic_memory.traces.iter().find(|t| t.tick == 90).unwrap();
+        let pm_trace = world
+            .stigmergic_memory
+            .traces
+            .iter()
+            .find(|t| t.tick == 90)
+            .unwrap();
         assert!(pm_trace.outcome_score.unwrap() > 0.5);
 
         // QueryPlanned trace should be unchanged
-        let qp_trace = world.stigmergic_memory.traces.iter().find(|t| t.tick == 80).unwrap();
+        let qp_trace = world
+            .stigmergic_memory
+            .traces
+            .iter()
+            .find(|t| t.tick == 80)
+            .unwrap();
         assert!((qp_trace.outcome_score.unwrap() - 0.5).abs() < 1e-9);
     }
 
@@ -327,9 +332,7 @@ mod tests {
 
         let mut world = HyperStigmergicMorphogenesis::new(0);
         world.stigmergic_memory.last_applied_tick = 100;
-        world.stigmergic_memory.traces = vec![
-            make_trace(90, TraceKind::QueryPlanned, Some(0.5)),
-        ];
+        world.stigmergic_memory.traces = vec![make_trace(90, TraceKind::QueryPlanned, Some(0.5))];
 
         let result = deposit(&config, &patterns, &mut world);
         assert!(result.traces_weakened > 0);

@@ -531,7 +531,11 @@ pub fn total_turns(tasks: &[EvalTask]) -> usize {
 
 /// Count turns that require recall
 pub fn recall_turns(tasks: &[EvalTask]) -> usize {
-    tasks.iter().flat_map(|t| &t.turns).filter(|t| t.requires_recall).count()
+    tasks
+        .iter()
+        .flat_map(|t| &t.turns)
+        .filter(|t| t.requires_recall)
+        .count()
 }
 
 #[cfg(test)]
@@ -560,11 +564,19 @@ mod tests {
     #[test]
     fn test_multi_session_tasks_exist() {
         let suite = load_eval_suite();
-        let multi_session = suite.iter().filter(|t| {
-            let sessions: std::collections::HashSet<u32> = t.turns.iter().map(|turn| turn.session).collect();
-            sessions.len() > 1
-        }).count();
-        assert!(multi_session >= 15, "Expected at least 15 multi-session tasks, got {}", multi_session);
+        let multi_session = suite
+            .iter()
+            .filter(|t| {
+                let sessions: std::collections::HashSet<u32> =
+                    t.turns.iter().map(|turn| turn.session).collect();
+                sessions.len() > 1
+            })
+            .count();
+        assert!(
+            multi_session >= 15,
+            "Expected at least 15 multi-session tasks, got {}",
+            multi_session
+        );
     }
 
     #[test]

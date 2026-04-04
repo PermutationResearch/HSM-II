@@ -5,5 +5,5 @@
 pub mod discord;
 pub mod telegram;
 
-pub use discord::{RealDiscordBot, DiscordConfig};
+pub use discord::{DiscordConfig, RealDiscordBot};
 pub use telegram::{RealTelegramBot, TelegramConfig};

@@ -60,8 +60,7 @@ pub fn evaluate_turn_rubric(
 ) -> RubricExtras {
     let kw_thr = deterministic_keyword_threshold();
     let deterministic_pass = keyword_score >= kw_thr;
-    let concision_relevance_score =
-        concision_relevance_score(&turn.user, response, keyword_score);
+    let concision_relevance_score = concision_relevance_score(&turn.user, response, keyword_score);
 
     let (grounding_applicable, grounding_score, grounding_pass) =
         grounding_metrics(turn.requires_recall, injected_memory_context, response);
@@ -99,10 +98,7 @@ fn concision_relevance_score(user_prompt: &str, response: &str, keyword_score: f
 }
 
 pub fn rubric_turn_pass(extras: &RubricExtras) -> bool {
-    let tool_ok = extras
-        .tool_pass
-        .map(|p| p)
-        .unwrap_or(true);
+    let tool_ok = extras.tool_pass.map(|p| p).unwrap_or(true);
     extras.deterministic_pass && extras.grounding_pass && tool_ok
 }
 
@@ -154,10 +150,7 @@ pub fn grounding_metrics(
         return (true, 1.0, true);
     }
     let resp_lower = response.to_lowercase();
-    let hits = ctx_words
-        .iter()
-        .filter(|w| resp_lower.contains(*w))
-        .count();
+    let hits = ctx_words.iter().filter(|w| resp_lower.contains(*w)).count();
     let score = hits as f64 / ctx_words.len() as f64;
     let pass = score >= grounding_pass_threshold();
     (true, score, pass)
@@ -207,7 +200,10 @@ pub fn parse_tool_json(text: &str) -> Option<(String, Value)> {
 fn tool_from_value(v: Value) -> Option<(String, Value)> {
     let obj = v.as_object()?;
     let name = obj.get("tool")?.as_str()?.to_string();
-    let params = obj.get("parameters").cloned().unwrap_or(Value::Object(Default::default()));
+    let params = obj
+        .get("parameters")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     Some((name, params))
 }
 
@@ -288,7 +284,11 @@ mod tests {
         assert!(s.contains("openapi"));
         assert!(s.contains("pagination"));
         assert!(!s.contains("[belief"));
-        let (_, score, _) = grounding_metrics(true, injected, "We use OpenAPI with webhooks and pagination.");
+        let (_, score, _) = grounding_metrics(
+            true,
+            injected,
+            "We use OpenAPI with webhooks and pagination.",
+        );
         assert!(score > 0.2);
     }
 }

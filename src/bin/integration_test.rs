@@ -15,16 +15,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use hyper_stigmergy::agent::Role;
-use hyper_stigmergy::council::{
-    CouncilMember, CouncilMode, Proposal, SimpleCouncil,
-};
+use hyper_stigmergy::council::{CouncilMember, CouncilMode, Proposal, SimpleCouncil};
 use hyper_stigmergy::email::{Email, EmailClassifier, LadybugEmailStorage, StoredEmail};
 use hyper_stigmergy::flags::{FeatureFlag, FlagMetadata, FlagStore};
 use hyper_stigmergy::gateways::{RealTelegramBot, TelegramConfig};
 use hyper_stigmergy::ollama_client::{OllamaClient, OllamaConfig};
 use hyper_stigmergy::personal::EnhancedPersonalAgent;
 use hyper_stigmergy::scheduler::{Job, JobType};
-use hyper_stigmergy::tools::{PredictionTool, ToolRegistry, Tool, register_all_tools};
+use hyper_stigmergy::tools::{register_all_tools, PredictionTool, Tool, ToolRegistry};
 
 const QWEN_MODEL: &str = "qwen3-coder:480b-cloud";
 
@@ -68,10 +66,10 @@ async fn main() -> anyhow::Result<()> {
     // 2. Model availability - try primary, then fallback chain
     const FALLBACK_MODELS: &[&str] = &[
         "qwen3-coder:480b-cloud",
-        "qwen3.5-9b-q4km",  // custom import (scripts/import_qwen9b.sh)
-        "qwen3.5:9b",       // official Ollama
-        "qwen2.5:14b",      // smaller fallback
-        "llama3.2",         // common default
+        "qwen3.5-9b-q4km", // custom import (scripts/import_qwen9b.sh)
+        "qwen3.5:9b",      // official Ollama
+        "qwen2.5:14b",     // smaller fallback
+        "llama3.2",        // common default
     ];
 
     let working_model = if passed > 0 {
@@ -82,7 +80,10 @@ async fn main() -> anyhow::Result<()> {
         // Try primary first
         let result = client.generate("Say only: OK").await;
         if !result.timed_out && !result.text.is_empty() && !result.text.contains("[FALLBACK") {
-            println!("  ✓ Model responded: {}...", result.text.trim().chars().take(50).collect::<String>());
+            println!(
+                "  ✓ Model responded: {}...",
+                result.text.trim().chars().take(50).collect::<String>()
+            );
             passed += 1;
             found = Some(model.clone());
         } else {
@@ -96,11 +97,21 @@ async fn main() -> anyhow::Result<()> {
                 if *candidate == model {
                     continue; // already tried
                 }
-                let cfg = OllamaConfig { model: (*candidate).to_string(), ..OllamaConfig::default() };
+                let cfg = OllamaConfig {
+                    model: (*candidate).to_string(),
+                    ..OllamaConfig::default()
+                };
                 let c = OllamaClient::new(cfg);
                 let result = c.generate("Say only: OK").await;
-                if !result.timed_out && !result.text.is_empty() && !result.text.contains("[FALLBACK") {
-                    println!("  ✓ Fallback model ({}) responded: {}...", candidate, result.text.trim().chars().take(30).collect::<String>());
+                if !result.timed_out
+                    && !result.text.is_empty()
+                    && !result.text.contains("[FALLBACK")
+                {
+                    println!(
+                        "  ✓ Fallback model ({}) responded: {}...",
+                        candidate,
+                        result.text.trim().chars().take(30).collect::<String>()
+                    );
                     passed += 1;
                     found = Some(candidate.to_string());
                     break;
@@ -113,12 +124,19 @@ async fn main() -> anyhow::Result<()> {
             let fallback = OllamaConfig::detect_model(
                 &OllamaConfig::default().host,
                 OllamaConfig::default().port,
-            ).await;
+            )
+            .await;
             if !FALLBACK_MODELS.contains(&fallback.as_str()) {
-                let cfg = OllamaConfig { model: fallback.clone(), ..OllamaConfig::default() };
+                let cfg = OllamaConfig {
+                    model: fallback.clone(),
+                    ..OllamaConfig::default()
+                };
                 let c = OllamaClient::new(cfg);
                 let result = c.generate("Say only: OK").await;
-                if !result.timed_out && !result.text.is_empty() && !result.text.contains("[FALLBACK") {
+                if !result.timed_out
+                    && !result.text.is_empty()
+                    && !result.text.contains("[FALLBACK")
+                {
                     println!("  ✓ Auto-detected model ({}) responded", fallback);
                     passed += 1;
                     found = Some(fallback);
@@ -148,7 +166,9 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = ToolRegistry::new();
     register_all_tools(&mut registry);
     let calc_tool = registry.get("calculator").expect("calculator tool exists");
-    let result = calc_tool.execute(serde_json::json!({"expression": "2 + 2"})).await;
+    let result = calc_tool
+        .execute(serde_json::json!({"expression": "2 + 2"}))
+        .await;
     let tool_ok = result.success;
     if tool_ok {
         println!("  ✓ Calculator: 2+2 = {}", result.result);
@@ -162,13 +182,18 @@ async fn main() -> anyhow::Result<()> {
     if passed >= 2 {
         println!("\n[4/6] Testing prediction tool (scenario simulator)...");
         let pred = PredictionTool::new();
-        let output = pred.execute(serde_json::json!({
-            "topic": "Rust adoption in 2025",
-            "seeds": ["Rust 2024 edition released", "memory-safe systems language"]
-        })).await;
+        let output = pred
+            .execute(serde_json::json!({
+                "topic": "Rust adoption in 2025",
+                "seeds": ["Rust 2024 edition released", "memory-safe systems language"]
+            }))
+            .await;
         if output.success {
             println!("  ✓ Prediction tool executed");
-            println!("    Result preview: {}...", output.result.chars().take(120).collect::<String>());
+            println!(
+                "    Result preview: {}...",
+                output.result.chars().take(120).collect::<String>()
+            );
             passed += 1;
         } else {
             eprintln!("  ✗ Prediction tool failed: {:?}", output.error);
@@ -211,10 +236,16 @@ async fn main() -> anyhow::Result<()> {
     match resp {
         Ok(r) => {
             if r.contains("hello_from_tool") || r.contains("hello") {
-                println!("  ✓ /tool bash returned: {}...", r.chars().take(80).collect::<String>());
+                println!(
+                    "  ✓ /tool bash returned: {}...",
+                    r.chars().take(80).collect::<String>()
+                );
                 passed += 1;
             } else {
-                println!("  ? Agent responded: {}...", r.chars().take(80).collect::<String>());
+                println!(
+                    "  ? Agent responded: {}...",
+                    r.chars().take(80).collect::<String>()
+                );
                 passed += 1; // Still counts as agent working
             }
         }
@@ -241,13 +272,20 @@ async fn main() -> anyhow::Result<()> {
         };
         let mut agent = EnhancedPersonalAgent::initialize(&home).await?;
         let resp = agent.handle_message(msg).await?;
-        let used_tool = resp.contains("test") && (resp.contains("[Tool:") || resp.contains("Tool Result"));
+        let used_tool =
+            resp.contains("test") && (resp.contains("[Tool:") || resp.contains("Tool Result"));
         if used_tool {
-            println!("  ✓ LLM produced tool call, result: {}...", resp.chars().take(100).collect::<String>());
+            println!(
+                "  ✓ LLM produced tool call, result: {}...",
+                resp.chars().take(100).collect::<String>()
+            );
             passed += 1;
         } else {
             println!("  ? LLM may not have output JSON tool call (model-dependent)");
-            println!("    Response: {}...", resp.chars().take(100).collect::<String>());
+            println!(
+                "    Response: {}...",
+                resp.chars().take(100).collect::<String>()
+            );
             passed += 1; // Agent responded
         }
     } else {
@@ -266,10 +304,16 @@ async fn main() -> anyhow::Result<()> {
     let has_bash = tools.iter().any(|(n, _)| *n == "bash");
     let has_pred = tools.iter().any(|(n, _)| *n == "predict");
     if has_calc && has_bash && has_pred && tools.len() >= 3 {
-        println!("  ✓ {} tools registered (calculator, bash, predict)", tools.len());
+        println!(
+            "  ✓ {} tools registered (calculator, bash, predict)",
+            tools.len()
+        );
         passed += 1;
     } else {
-        eprintln!("  ✗ Missing tools. Found: {:?}", tools.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        eprintln!(
+            "  ✗ Missing tools. Found: {:?}",
+            tools.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+        );
         failed += 1;
     }
 
@@ -284,14 +328,27 @@ async fn main() -> anyhow::Result<()> {
     println!("\n[9] Simple council...");
     let council_id = uuid::Uuid::new_v4();
     let members = vec![
-        CouncilMember { agent_id: 1, role: Role::Architect, expertise_score: 0.8, participation_weight: 1.0 },
-        CouncilMember { agent_id: 2, role: Role::Catalyst, expertise_score: 0.7, participation_weight: 1.0 },
+        CouncilMember {
+            agent_id: 1,
+            role: Role::Architect,
+            expertise_score: 0.8,
+            participation_weight: 1.0,
+        },
+        CouncilMember {
+            agent_id: 2,
+            role: Role::Catalyst,
+            expertise_score: 0.7,
+            participation_weight: 1.0,
+        },
     ];
     let mut council = SimpleCouncil::new(council_id, members);
     let proposal = Proposal::new("test-1", "Routine task", "Simple maintenance task", 1);
     match council.evaluate(&proposal, CouncilMode::Simple).await {
         Ok(decision) => {
-            println!("  ✓ Council decided: {:?} (conf: {:.2})", decision.decision, decision.confidence);
+            println!(
+                "  ✓ Council decided: {:?} (conf: {:.2})",
+                decision.decision, decision.confidence
+            );
             passed += 1;
         }
         Err(e) => {
@@ -303,7 +360,10 @@ async fn main() -> anyhow::Result<()> {
     // 10. Flag store
     println!("\n[10] Flag store...");
     let store = Arc::new(FlagStore::new());
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let flag = FeatureFlag {
         key: "test_feature".to_string(),
         enabled: true,
@@ -343,7 +403,10 @@ async fn main() -> anyhow::Result<()> {
         attachments: vec![],
     };
     let classification = classifier.classify(&email).await;
-    if matches!(classification.category, hyper_stigmergy::email::Category::Newsletter) {
+    if matches!(
+        classification.category,
+        hyper_stigmergy::email::Category::Newsletter
+    ) {
         println!("  ✓ Email classified as Newsletter");
         passed += 1;
     } else {

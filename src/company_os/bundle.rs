@@ -95,14 +95,20 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
     .fetch_all(pool)
     .await?;
 
-    let tasks: Vec<(String, Option<String>, Option<Uuid>, String, Option<String>, i32)> =
-        sqlx::query_as(
-            r#"SELECT title, specification, primary_goal_id, state, owner_persona, priority
+    let tasks: Vec<(
+        String,
+        Option<String>,
+        Option<Uuid>,
+        String,
+        Option<String>,
+        i32,
+    )> = sqlx::query_as(
+        r#"SELECT title, specification, primary_goal_id, state, owner_persona, priority
                FROM tasks WHERE company_id = $1 ORDER BY created_at"#,
-        )
-        .bind(company_id)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await?;
 
     let agents_rows: Vec<(
         Uuid,
@@ -296,7 +302,9 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
     while !pending_agents.is_empty() {
         iter_agents += 1;
         if iter_agents > guard_agents {
-            return Err(anyhow!("agent org chart cycle or missing manager in import"));
+            return Err(anyhow!(
+                "agent org chart cycle or missing manager in import"
+            ));
         }
         let mut next_agents: Vec<&AgentExport> = Vec::new();
         let mut inserted_agent = false;
@@ -336,7 +344,9 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
             inserted_agent = true;
         }
         if !inserted_agent {
-            return Err(anyhow!("agent org chart cycle or missing manager in import"));
+            return Err(anyhow!(
+                "agent org chart cycle or missing manager in import"
+            ));
         }
         pending_agents = next_agents;
     }

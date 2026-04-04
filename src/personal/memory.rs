@@ -24,11 +24,7 @@ pub async fn append_turn_journal(
     let ts = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
     let block = format!(
         "\n### {ts}\n\n**User:** {}\n\n**Assistant:** {}\n\n---\n",
-        user_message
-            .trim()
-            .chars()
-            .take(4000)
-            .collect::<String>(),
+        user_message.trim().chars().take(4000).collect::<String>(),
         assistant_message
             .trim()
             .chars()

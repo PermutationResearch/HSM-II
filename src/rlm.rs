@@ -243,11 +243,20 @@ pub struct RlmMessage {
 pub enum RlmAction {
     ExecuteAction(crate::action::Action),
     QueryEnvironment(String),
-    PredictCoherence { context: String },
-    ComputeNovelty { proposal: String },
+    PredictCoherence {
+        context: String,
+    },
+    ComputeNovelty {
+        proposal: String,
+    },
     /// Trigger one world `execute_self_improvement_cycle` (supervision loop: propose → review → record).
-    SelfImprove { intent: String },
-    SpawnSubAgent { role: Role, specialty: String },
+    SelfImprove {
+        intent: String,
+    },
+    SpawnSubAgent {
+        role: Role,
+        specialty: String,
+    },
 }
 
 /// Record of a tool execution for learning feedback
@@ -382,7 +391,8 @@ impl RLM {
 
         // Trim log to last 50 entries
         if self.tool_execution_log.len() > 50 {
-            self.tool_execution_log.drain(..self.tool_execution_log.len() - 50);
+            self.tool_execution_log
+                .drain(..self.tool_execution_log.len() - 50);
         }
 
         Context::ToolResult {
@@ -397,9 +407,15 @@ impl RLM {
     }
 
     /// Ask the LLM to select tools for an intent, then execute them
-    async fn llm_driven_tool_dispatch(&mut self, intent: &str, role: Role) -> anyhow::Result<Vec<Context>> {
+    async fn llm_driven_tool_dispatch(
+        &mut self,
+        intent: &str,
+        role: Role,
+    ) -> anyhow::Result<Vec<Context>> {
         // Build a tool-selection prompt
-        let available_tools: Vec<_> = self.tool_registry.list_tools()
+        let available_tools: Vec<_> = self
+            .tool_registry
+            .list_tools()
             .into_iter()
             .map(|(name, desc)| format!("  - {}: {}", name, desc))
             .collect();
@@ -423,7 +439,8 @@ impl RLM {
                 let tool_calls = Self::parse_tool_calls(&response);
                 if tool_calls.is_empty() {
                     return Ok(vec![Context::Text(format!(
-                        "{:?} analyzed intent (no tools needed): {}", role, intent
+                        "{:?} analyzed intent (no tools needed): {}",
+                        role, intent
                     ))]);
                 }
 
@@ -442,7 +459,11 @@ impl RLM {
     }
 
     /// Heuristic tool dispatch when LLM is unavailable
-    async fn heuristic_tool_dispatch(&mut self, intent: &str, role: Role) -> anyhow::Result<Vec<Context>> {
+    async fn heuristic_tool_dispatch(
+        &mut self,
+        intent: &str,
+        role: Role,
+    ) -> anyhow::Result<Vec<Context>> {
         let intent_lower = intent.to_lowercase();
         let mut results = Vec::new();
 
@@ -450,16 +471,33 @@ impl RLM {
             Role::Coder => {
                 if intent_lower.contains("read") || intent_lower.contains("file") {
                     // Try to extract a file path from intent
-                    let path = Self::extract_path_from_intent(intent).unwrap_or_else(|| ".".to_string());
-                    results.push(self.run_tool("list_directory", serde_json::json!({"path": path})).await);
+                    let path =
+                        Self::extract_path_from_intent(intent).unwrap_or_else(|| ".".to_string());
+                    results.push(
+                        self.run_tool("list_directory", serde_json::json!({"path": path}))
+                            .await,
+                    );
                 }
-                if intent_lower.contains("search") || intent_lower.contains("find") || intent_lower.contains("grep") {
+                if intent_lower.contains("search")
+                    || intent_lower.contains("find")
+                    || intent_lower.contains("grep")
+                {
                     let pattern = Self::extract_pattern_from_intent(intent);
-                    results.push(self.run_tool("grep", serde_json::json!({"pattern": pattern, "path": "."})).await);
+                    results.push(
+                        self.run_tool("grep", serde_json::json!({"pattern": pattern, "path": "."}))
+                            .await,
+                    );
                 }
-                if intent_lower.contains("run") || intent_lower.contains("execute") || intent_lower.contains("test") {
-                    let cmd = Self::extract_command_from_intent(intent).unwrap_or_else(|| "echo 'no command specified'".to_string());
-                    results.push(self.run_tool("bash", serde_json::json!({"command": cmd})).await);
+                if intent_lower.contains("run")
+                    || intent_lower.contains("execute")
+                    || intent_lower.contains("test")
+                {
+                    let cmd = Self::extract_command_from_intent(intent)
+                        .unwrap_or_else(|| "echo 'no command specified'".to_string());
+                    results.push(
+                        self.run_tool("bash", serde_json::json!({"command": cmd}))
+                            .await,
+                    );
                 }
                 if intent_lower.contains("status") || intent_lower.contains("git") {
                     results.push(self.run_tool("git_status", serde_json::json!({})).await);
@@ -467,24 +505,45 @@ impl RLM {
             }
             Role::Architect => {
                 // Structural analysis: read project structure
-                results.push(self.run_tool("list_directory", serde_json::json!({"path": ".", "recursive": false})).await);
+                results.push(
+                    self.run_tool(
+                        "list_directory",
+                        serde_json::json!({"path": ".", "recursive": false}),
+                    )
+                    .await,
+                );
                 if intent_lower.contains("topology") || intent_lower.contains("structure") {
                     results.push(self.run_tool("grep", serde_json::json!({"pattern": "pub struct|pub fn|pub mod", "path": "src/"})).await);
                 }
             }
             Role::Catalyst => {
                 // Exploration: search for novelty
-                if intent_lower.contains("web") || intent_lower.contains("search") || intent_lower.contains("research") {
+                if intent_lower.contains("web")
+                    || intent_lower.contains("search")
+                    || intent_lower.contains("research")
+                {
                     let query = Self::extract_pattern_from_intent(intent);
-                    results.push(self.run_tool("web_search", serde_json::json!({"query": query})).await);
+                    results.push(
+                        self.run_tool("web_search", serde_json::json!({"query": query}))
+                            .await,
+                    );
                 } else {
                     // Search codebase for innovation opportunities
-                    results.push(self.run_tool("grep", serde_json::json!({"pattern": "TODO|FIXME|HACK|OPTIMIZE", "path": "."})).await);
+                    results.push(
+                        self.run_tool(
+                            "grep",
+                            serde_json::json!({"pattern": "TODO|FIXME|HACK|OPTIMIZE", "path": "."}),
+                        )
+                        .await,
+                    );
                 }
             }
             Role::Chronicler => {
                 // Documentation: gather system state
-                results.push(self.run_tool("git_log", serde_json::json!({"count": 10})).await);
+                results.push(
+                    self.run_tool("git_log", serde_json::json!({"count": 10}))
+                        .await,
+                );
                 results.push(self.run_tool("system_info", serde_json::json!({})).await);
             }
             Role::Critic => {
@@ -493,14 +552,21 @@ impl RLM {
             }
             Role::Explorer => {
                 // Broad exploration: find files and patterns
-                results.push(self.run_tool("find", serde_json::json!({"pattern": "*.rs", "path": "src/"})).await);
+                results.push(
+                    self.run_tool(
+                        "find",
+                        serde_json::json!({"pattern": "*.rs", "path": "src/"}),
+                    )
+                    .await,
+                );
             }
         }
 
         // Fallback if no tools matched
         if results.is_empty() {
             results.push(Context::Text(format!(
-                "{:?} processed intent (heuristic, no tool match): {}", role, intent
+                "{:?} processed intent (heuristic, no tool match): {}",
+                role, intent
             )));
         }
 
@@ -525,7 +591,8 @@ impl RLM {
             Err(_) => return Vec::new(),
         };
 
-        parsed.get("tool_calls")
+        parsed
+            .get("tool_calls")
             .and_then(|tc| tc.as_array())
             .map(|arr| {
                 arr.iter()
@@ -546,7 +613,9 @@ impl RLM {
         for word in intent.split_whitespace() {
             if word.contains('/') || word.contains('.') && !word.starts_with('.') {
                 // Looks like a path
-                let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
+                let cleaned = word.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+                });
                 if !cleaned.is_empty() {
                     return Some(cleaned.to_string());
                 }
@@ -565,7 +634,11 @@ impl RLM {
             .replace("look for", "")
             .trim()
             .to_string();
-        if cleaned.is_empty() { intent.to_string() } else { cleaned }
+        if cleaned.is_empty() {
+            intent.to_string()
+        } else {
+            cleaned
+        }
     }
 
     /// Extract a shell command from an intent string
@@ -604,13 +677,25 @@ impl RLM {
 
         // Log tool execution summary to living prompt
         let tool_results_in_batch: Vec<_> = match &results {
-            Ok(ctxs) => ctxs.iter().filter_map(|c| match c {
-                Context::ToolResult { tool_name, success, output } => {
-                    let preview: String = output.chars().take(100).collect();
-                    Some(format!("{}:{} → {}", tool_name, if *success { "ok" } else { "FAIL" }, preview))
-                }
-                _ => None,
-            }).collect(),
+            Ok(ctxs) => ctxs
+                .iter()
+                .filter_map(|c| match c {
+                    Context::ToolResult {
+                        tool_name,
+                        success,
+                        output,
+                    } => {
+                        let preview: String = output.chars().take(100).collect();
+                        Some(format!(
+                            "{}:{} → {}",
+                            tool_name,
+                            if *success { "ok" } else { "FAIL" },
+                            preview
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect(),
             Err(_) => Vec::new(),
         };
 
@@ -636,12 +721,12 @@ impl RLM {
 
     async fn architect_handler(&mut self, intent: &str) -> anyhow::Result<Vec<Context>> {
         let prediction = self.world.predict_coherence(intent);
-        let mut results = vec![
-            Context::Prediction(prediction),
-        ];
+        let mut results = vec![Context::Prediction(prediction)];
 
         // Execute real tools for structural analysis
-        let tool_results = self.llm_driven_tool_dispatch(intent, Role::Architect).await?;
+        let tool_results = self
+            .llm_driven_tool_dispatch(intent, Role::Architect)
+            .await?;
         results.extend(tool_results);
 
         Ok(results)
@@ -657,22 +742,24 @@ impl RLM {
         }
 
         // Execute real tools for exploration
-        let tool_results = self.llm_driven_tool_dispatch(intent, Role::Catalyst).await?;
+        let tool_results = self
+            .llm_driven_tool_dispatch(intent, Role::Catalyst)
+            .await?;
         results.extend(tool_results);
 
         Ok(results)
     }
 
     async fn chronicler_handler(&mut self, intent: &str) -> anyhow::Result<Vec<Context>> {
-        let mut results = vec![
-            Context::Text(format!(
-                "Recorded {} improvement events",
-                self.world.improvement_history.len()
-            )),
-        ];
+        let mut results = vec![Context::Text(format!(
+            "Recorded {} improvement events",
+            self.world.improvement_history.len()
+        ))];
 
         // Execute real tools for documentation/logging
-        let tool_results = self.llm_driven_tool_dispatch(intent, Role::Chronicler).await?;
+        let tool_results = self
+            .llm_driven_tool_dispatch(intent, Role::Chronicler)
+            .await?;
         results.extend(tool_results);
 
         Ok(results)
@@ -1013,7 +1100,11 @@ impl RLM {
         // Analyze tool execution patterns
         if !self.tool_execution_log.is_empty() {
             let total = self.tool_execution_log.len();
-            let failures = self.tool_execution_log.iter().filter(|r| !r.success).count();
+            let failures = self
+                .tool_execution_log
+                .iter()
+                .filter(|r| !r.success)
+                .count();
             let failure_rate = failures as f64 / total as f64;
 
             if failure_rate > 0.5 {
@@ -1031,9 +1122,16 @@ impl RLM {
             }
 
             // Check for slow tools
-            let avg_ms: f64 = self.tool_execution_log.iter().map(|r| r.duration_ms as f64).sum::<f64>() / total as f64;
+            let avg_ms: f64 = self
+                .tool_execution_log
+                .iter()
+                .map(|r| r.duration_ms as f64)
+                .sum::<f64>()
+                / total as f64;
             if avg_ms > 5000.0 {
-                analysis.push_str("INSIGHT: Tool execution is slow — consider caching or lighter tools\n");
+                analysis.push_str(
+                    "INSIGHT: Tool execution is slow — consider caching or lighter tools\n",
+                );
             }
         }
 
@@ -1097,10 +1195,16 @@ mod tests {
     async fn test_run_tool_read_file() {
         let mut rlm = make_test_rlm();
 
-        let result = rlm.run_tool("read_file", serde_json::json!({"path": "Cargo.toml"})).await;
+        let result = rlm
+            .run_tool("read_file", serde_json::json!({"path": "Cargo.toml"}))
+            .await;
 
         match result {
-            Context::ToolResult { tool_name, success, output } => {
+            Context::ToolResult {
+                tool_name,
+                success,
+                output,
+            } => {
                 assert_eq!(tool_name, "read_file");
                 assert!(success, "read_file failed: {}", output);
                 assert!(output.contains("[package]"), "Expected Cargo.toml contents");
@@ -1118,10 +1222,16 @@ mod tests {
     async fn test_run_tool_calculator() {
         let mut rlm = make_test_rlm();
 
-        let result = rlm.run_tool("calculator", serde_json::json!({"expression": "3 * 7"})).await;
+        let result = rlm
+            .run_tool("calculator", serde_json::json!({"expression": "3 * 7"}))
+            .await;
 
         match result {
-            Context::ToolResult { tool_name, success, output } => {
+            Context::ToolResult {
+                tool_name,
+                success,
+                output,
+            } => {
                 assert_eq!(tool_name, "calculator");
                 assert!(success, "calculator failed: {}", output);
                 assert!(output.contains("21"), "3*7 should be 21, got: {}", output);
@@ -1134,12 +1244,20 @@ mod tests {
     async fn test_run_tool_nonexistent() {
         let mut rlm = make_test_rlm();
 
-        let result = rlm.run_tool("nonexistent_tool", serde_json::json!({})).await;
+        let result = rlm
+            .run_tool("nonexistent_tool", serde_json::json!({}))
+            .await;
 
         match result {
-            Context::ToolResult { success, output, .. } => {
+            Context::ToolResult {
+                success, output, ..
+            } => {
                 assert!(!success, "Should have failed for nonexistent tool");
-                assert!(output.contains("not found"), "Error should mention 'not found': {}", output);
+                assert!(
+                    output.contains("not found"),
+                    "Error should mention 'not found': {}",
+                    output
+                );
             }
             other => panic!("Expected ToolResult, got {:?}", other),
         }
@@ -1149,33 +1267,60 @@ mod tests {
     async fn test_heuristic_dispatch_coder_git() {
         let mut rlm = make_test_rlm();
 
-        let results = rlm.heuristic_tool_dispatch("check git status", Role::Coder).await.unwrap();
+        let results = rlm
+            .heuristic_tool_dispatch("check git status", Role::Coder)
+            .await
+            .unwrap();
 
         // Should have called git_status
-        let has_tool_result = results.iter().any(|r| matches!(r, Context::ToolResult { tool_name, .. } if tool_name == "git_status"));
-        assert!(has_tool_result, "Expected git_status tool result, got: {:?}", results);
+        let has_tool_result = results.iter().any(
+            |r| matches!(r, Context::ToolResult { tool_name, .. } if tool_name == "git_status"),
+        );
+        assert!(
+            has_tool_result,
+            "Expected git_status tool result, got: {:?}",
+            results
+        );
     }
 
     #[tokio::test]
     async fn test_heuristic_dispatch_architect() {
         let mut rlm = make_test_rlm();
 
-        let results = rlm.heuristic_tool_dispatch("analyze project structure", Role::Architect).await.unwrap();
+        let results = rlm
+            .heuristic_tool_dispatch("analyze project structure", Role::Architect)
+            .await
+            .unwrap();
 
         // Should have at least one tool result (list_directory)
-        let has_tool_result = results.iter().any(|r| matches!(r, Context::ToolResult { .. }));
-        assert!(has_tool_result, "Architect should execute at least one tool, got: {:?}", results);
+        let has_tool_result = results
+            .iter()
+            .any(|r| matches!(r, Context::ToolResult { .. }));
+        assert!(
+            has_tool_result,
+            "Architect should execute at least one tool, got: {:?}",
+            results
+        );
     }
 
     #[tokio::test]
     async fn test_heuristic_dispatch_critic() {
         let mut rlm = make_test_rlm();
 
-        let results = rlm.heuristic_tool_dispatch("review code safety", Role::Critic).await.unwrap();
+        let results = rlm
+            .heuristic_tool_dispatch("review code safety", Role::Critic)
+            .await
+            .unwrap();
 
         // Should have called grep for unwrap/panic/unsafe
-        let has_tool_result = results.iter().any(|r| matches!(r, Context::ToolResult { tool_name, .. } if tool_name == "grep"));
-        assert!(has_tool_result, "Critic should grep for unsafe patterns, got: {:?}", results);
+        let has_tool_result = results
+            .iter()
+            .any(|r| matches!(r, Context::ToolResult { tool_name, .. } if tool_name == "grep"));
+        assert!(
+            has_tool_result,
+            "Critic should grep for unsafe patterns, got: {:?}",
+            results
+        );
     }
 
     #[tokio::test]
@@ -1184,12 +1329,19 @@ mod tests {
 
         // Execute many tools
         for i in 0..60 {
-            rlm.run_tool("calculator", serde_json::json!({"expression": format!("{} + 1", i)})).await;
+            rlm.run_tool(
+                "calculator",
+                serde_json::json!({"expression": format!("{} + 1", i)}),
+            )
+            .await;
         }
 
         // Log should be capped at 50
-        assert!(rlm.tool_execution_log.len() <= 50,
-            "Log should be capped at 50, got {}", rlm.tool_execution_log.len());
+        assert!(
+            rlm.tool_execution_log.len() <= 50,
+            "Log should be capped at 50, got {}",
+            rlm.tool_execution_log.len()
+        );
     }
 
     #[test]
@@ -1224,14 +1376,23 @@ mod tests {
 
     #[test]
     fn test_extract_path_from_intent() {
-        assert_eq!(RLM::extract_path_from_intent("read src/main.rs"), Some("src/main.rs".to_string()));
+        assert_eq!(
+            RLM::extract_path_from_intent("read src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
         assert_eq!(RLM::extract_path_from_intent("no path here"), None);
     }
 
     #[test]
     fn test_extract_command_from_intent() {
-        assert_eq!(RLM::extract_command_from_intent("run `cargo test`"), Some("cargo test".to_string()));
-        assert_eq!(RLM::extract_command_from_intent("execute cargo build"), Some("cargo build".to_string()));
+        assert_eq!(
+            RLM::extract_command_from_intent("run `cargo test`"),
+            Some("cargo test".to_string())
+        );
+        assert_eq!(
+            RLM::extract_command_from_intent("execute cargo build"),
+            Some("cargo build".to_string())
+        );
         assert_eq!(RLM::extract_command_from_intent("just some text"), None);
     }
 }

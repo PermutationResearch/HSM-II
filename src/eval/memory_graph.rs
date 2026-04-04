@@ -328,7 +328,10 @@ impl BipartiteMemoryGraph {
                     properties: serde_json::json!({}),
                 },
             );
-            let fid = format!("fact:session_boundary:{}:{}:{}", ss.task_id, ss.session, row);
+            let fid = format!(
+                "fact:session_boundary:{}:{}:{}",
+                ss.task_id, ss.session, row
+            );
             g.facts.push(ReifiedFact {
                 id: fid.clone(),
                 layer: MemoryLayer::Episodic,
@@ -614,7 +617,10 @@ mod tests {
         assert!(layers.contains(&MemoryLayer::Procedural));
         assert!(g.incidence.iter().any(|i| i.role == "subject"));
         assert!(g.facts.iter().any(|f| f.relation == "belief_asserted"));
-        assert!(g.facts.iter().any(|f| f.relation == "session_summarized_at_boundary"));
+        assert!(g
+            .facts
+            .iter()
+            .any(|f| f.relation == "session_summarized_at_boundary"));
         assert!(g.facts.iter().any(|f| f.relation == "expertise_for_domain"));
     }
 
@@ -643,7 +649,10 @@ mod tests {
         }];
         let g = BipartiteMemoryGraph::project_from_snapshot_with_traces(&snap, &traces);
         assert!(g.facts.iter().any(|f| f.relation == "retrieval_turn"));
-        assert!(g.facts.iter().any(|f| f.relation == "ranked_belief_at_turn"));
+        assert!(g
+            .facts
+            .iter()
+            .any(|f| f.relation == "ranked_belief_at_turn"));
         assert!(g
             .incidence
             .iter()

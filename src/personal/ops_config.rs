@@ -137,8 +137,8 @@ pub fn resolve_ops_config_path(home: &Path) -> PathBuf {
 pub fn load_ops_config(path: &Path) -> Result<OperationsConfig> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("read operations config {}", path.display()))?;
-    let cfg: OperationsConfig = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse YAML {}", path.display()))?;
+    let cfg: OperationsConfig =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))?;
     Ok(cfg)
 }
 

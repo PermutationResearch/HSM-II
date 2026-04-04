@@ -879,15 +879,8 @@ impl SkillBank {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        if let Some(skill) = self
-            .general_skills
-            .iter_mut()
-            .find(|s| s.title == title)
-        {
-            skill.principle = format!(
-                "{}\n\n--- trace2skill ---\n{}",
-                skill.principle, principle
-            );
+        if let Some(skill) = self.general_skills.iter_mut().find(|s| s.title == title) {
+            skill.principle = format!("{}\n\n--- trace2skill ---\n{}", skill.principle, principle);
             skill.last_evolved = now;
             skill.curation = SkillCuration::Proposed {
                 source_description,

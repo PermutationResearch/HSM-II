@@ -76,30 +76,41 @@ impl RunnerMetrics {
 
     /// Average keyword score across all turns
     pub fn avg_keyword_score(&self) -> f64 {
-        if self.turns.is_empty() { return 0.0; }
+        if self.turns.is_empty() {
+            return 0.0;
+        }
         let sum: f64 = self.turns.iter().map(|t| t.keyword_score).sum();
         sum / self.turns.len() as f64
     }
 
     /// Average keyword score only for turns that require recall
     pub fn avg_recall_score(&self) -> f64 {
-        let recall_turns: Vec<&TurnMetrics> = self.turns.iter().filter(|t| t.requires_recall).collect();
-        if recall_turns.is_empty() { return 0.0; }
+        let recall_turns: Vec<&TurnMetrics> =
+            self.turns.iter().filter(|t| t.requires_recall).collect();
+        if recall_turns.is_empty() {
+            return 0.0;
+        }
         let sum: f64 = recall_turns.iter().map(|t| t.keyword_score).sum();
         sum / recall_turns.len() as f64
     }
 
     /// Average keyword score for first-turn (no recall needed)
     pub fn avg_cold_score(&self) -> f64 {
-        let cold_turns: Vec<&TurnMetrics> = self.turns.iter().filter(|t| !t.requires_recall).collect();
-        if cold_turns.is_empty() { return 0.0; }
+        let cold_turns: Vec<&TurnMetrics> =
+            self.turns.iter().filter(|t| !t.requires_recall).collect();
+        if cold_turns.is_empty() {
+            return 0.0;
+        }
         let sum: f64 = cold_turns.iter().map(|t| t.keyword_score).sum();
         sum / cold_turns.len() as f64
     }
 
     /// Total tokens consumed
     pub fn total_tokens(&self) -> usize {
-        self.turns.iter().map(|t| t.prompt_tokens + t.completion_tokens).sum()
+        self.turns
+            .iter()
+            .map(|t| t.prompt_tokens + t.completion_tokens)
+            .sum()
     }
 
     /// Total prompt tokens
@@ -114,14 +125,18 @@ impl RunnerMetrics {
 
     /// Average latency per turn
     pub fn avg_latency_ms(&self) -> f64 {
-        if self.turns.is_empty() { return 0.0; }
+        if self.turns.is_empty() {
+            return 0.0;
+        }
         let sum: u64 = self.turns.iter().map(|t| t.latency_ms).sum();
         sum as f64 / self.turns.len() as f64
     }
 
     /// Error rate
     pub fn error_rate(&self) -> f64 {
-        if self.turns.is_empty() { return 0.0; }
+        if self.turns.is_empty() {
+            return 0.0;
+        }
         let errors = self.turns.iter().filter(|t| t.error.is_some()).count();
         errors as f64 / self.turns.len() as f64
     }
@@ -154,24 +169,41 @@ impl RunnerMetrics {
         let mut domain_map: HashMap<String, Vec<&TurnMetrics>> = HashMap::new();
         for turn in &self.turns {
             if let Some(task) = tasks.iter().find(|t| t.id == turn.task_id) {
-                domain_map.entry(task.domain.clone()).or_default().push(turn);
+                domain_map
+                    .entry(task.domain.clone())
+                    .or_default()
+                    .push(turn);
             }
         }
-        domain_map.into_iter().map(|(domain, turns)| {
-            let keyword_avg = turns.iter().map(|t| t.keyword_score).sum::<f64>() / turns.len() as f64;
-            let recall_turns: Vec<&&TurnMetrics> = turns.iter().filter(|t| t.requires_recall).collect();
-            let recall_avg = if recall_turns.is_empty() { 0.0 } else {
-                recall_turns.iter().map(|t| t.keyword_score).sum::<f64>() / recall_turns.len() as f64
-            };
-            let tokens: usize = turns.iter().map(|t| t.prompt_tokens + t.completion_tokens).sum();
-            (domain.clone(), DomainMetrics {
-                domain: domain,
-                turn_count: turns.len(),
-                avg_keyword_score: keyword_avg,
-                avg_recall_score: recall_avg,
-                total_tokens: tokens,
+        domain_map
+            .into_iter()
+            .map(|(domain, turns)| {
+                let keyword_avg =
+                    turns.iter().map(|t| t.keyword_score).sum::<f64>() / turns.len() as f64;
+                let recall_turns: Vec<&&TurnMetrics> =
+                    turns.iter().filter(|t| t.requires_recall).collect();
+                let recall_avg = if recall_turns.is_empty() {
+                    0.0
+                } else {
+                    recall_turns.iter().map(|t| t.keyword_score).sum::<f64>()
+                        / recall_turns.len() as f64
+                };
+                let tokens: usize = turns
+                    .iter()
+                    .map(|t| t.prompt_tokens + t.completion_tokens)
+                    .sum();
+                (
+                    domain.clone(),
+                    DomainMetrics {
+                        domain: domain,
+                        turn_count: turns.len(),
+                        avg_keyword_score: keyword_avg,
+                        avg_recall_score: recall_avg,
+                        total_tokens: tokens,
+                    },
+                )
             })
-        }).collect()
+            .collect()
     }
 }
 
@@ -338,7 +370,13 @@ pub fn compare(
     let http_delta = h.total_llm_http_requests as f64 - b.total_llm_http_requests as f64;
     let wall_delta = h.total_wall_clock_ms as f64 - b.total_wall_clock_ms as f64;
 
-    let safe_pct = |delta: f64, base: f64| if base.abs() < 1e-9 { 0.0 } else { (delta / base) * 100.0 };
+    let safe_pct = |delta: f64, base: f64| {
+        if base.abs() < 1e-9 {
+            0.0
+        } else {
+            (delta / base) * 100.0
+        }
+    };
 
     let improvement = ImprovementMetrics {
         keyword_score_delta: keyword_delta,
@@ -370,14 +408,24 @@ pub fn compare(
                 domain: domain.clone(),
                 baseline_keyword_score: bd.avg_keyword_score,
                 hsm_keyword_score: hd.avg_keyword_score,
-                improvement_pct: safe_pct(hd.avg_keyword_score - bd.avg_keyword_score, bd.avg_keyword_score),
+                improvement_pct: safe_pct(
+                    hd.avg_keyword_score - bd.avg_keyword_score,
+                    bd.avg_keyword_score,
+                ),
                 baseline_tokens: bd.total_tokens,
                 hsm_tokens: hd.total_tokens,
-                token_reduction_pct: safe_pct(bd.total_tokens as f64 - hd.total_tokens as f64, bd.total_tokens as f64),
+                token_reduction_pct: safe_pct(
+                    bd.total_tokens as f64 - hd.total_tokens as f64,
+                    bd.total_tokens as f64,
+                ),
             });
         }
     }
-    domain_breakdown.sort_by(|a, b| b.improvement_pct.partial_cmp(&a.improvement_pct).unwrap_or(std::cmp::Ordering::Equal));
+    domain_breakdown.sort_by(|a, b| {
+        b.improvement_pct
+            .partial_cmp(&a.improvement_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Verdict
     let mut components = vec![improvement.keyword_score_pct, improvement.recall_score_pct];
@@ -392,11 +440,20 @@ pub fn compare(
     let verdict = if overall_improvement >= 30.0 {
         format!("VALIDATED: {:.1}% average improvement across quality, recall, and cost. Exceeds 30% threshold.", overall_improvement)
     } else if overall_improvement >= 15.0 {
-        format!("PROMISING: {:.1}% average improvement. Approaching but not yet at 30% threshold.", overall_improvement)
+        format!(
+            "PROMISING: {:.1}% average improvement. Approaching but not yet at 30% threshold.",
+            overall_improvement
+        )
     } else if overall_improvement > 0.0 {
-        format!("MARGINAL: {:.1}% average improvement. Below fundability threshold.", overall_improvement)
+        format!(
+            "MARGINAL: {:.1}% average improvement. Below fundability threshold.",
+            overall_improvement
+        )
     } else {
-        format!("NO IMPROVEMENT: {:.1}% — HSM-II did not outperform baseline.", overall_improvement)
+        format!(
+            "NO IMPROVEMENT: {:.1}% — HSM-II did not outperform baseline.",
+            overall_improvement
+        )
     };
 
     ComparisonReport {
@@ -416,22 +473,84 @@ pub fn print_report(report: &ComparisonReport) {
 
     println!("\n{:<40} {:>20} {:>20}", "", "Baseline", "HSM-II");
     println!("{:-<90}", "");
-    println!("{:<40} {:>19.1}% {:>19.1}%", "Avg keyword score", report.baseline.avg_keyword_score * 100.0, report.hsm.avg_keyword_score * 100.0);
-    println!("{:<40} {:>19.1}% {:>19.1}%", "Avg recall score (cross-session)", report.baseline.avg_recall_score * 100.0, report.hsm.avg_recall_score * 100.0);
-    println!("{:<40} {:>19.1}% {:>19.1}%", "Avg cold score (no recall needed)", report.baseline.avg_cold_score * 100.0, report.hsm.avg_cold_score * 100.0);
-    println!("{:<40} {:>20} {:>20}", "Total tokens", report.baseline.total_tokens, report.hsm.total_tokens);
-    println!("{:<40} {:>20} {:>20}", "Total prompt tokens", report.baseline.total_prompt_tokens, report.hsm.total_prompt_tokens);
-    println!("{:<40} {:>20} {:>20}", "Total LLM calls", report.baseline.total_llm_calls, report.hsm.total_llm_calls);
-    println!("{:<40} {:>18.0}ms {:>18.0}ms", "Avg latency/turn", report.baseline.avg_latency_ms, report.hsm.avg_latency_ms);
-    println!("{:<40} {:>19.1}% {:>19.1}%", "Error rate", report.baseline.error_rate * 100.0, report.hsm.error_rate * 100.0);
-    println!("{:<40} {:>20.3} {:>20.3}", "Avg rubric composite", report.baseline.avg_rubric_composite, report.hsm.avg_rubric_composite);
-    println!("{:<40} {:>19.1}% {:>19.1}%", "Rubric pass rate", report.baseline.rubric_pass_rate * 100.0, report.hsm.rubric_pass_rate * 100.0);
-    println!("{:<40} {:>20} {:>20}", "Total LLM HTTP reqs", report.baseline.total_llm_http_requests, report.hsm.total_llm_http_requests);
-    println!("{:<40} {:>20} {:>20}", "Total wall-clock (turns ms)", report.baseline.total_wall_clock_ms, report.hsm.total_wall_clock_ms);
+    println!(
+        "{:<40} {:>19.1}% {:>19.1}%",
+        "Avg keyword score",
+        report.baseline.avg_keyword_score * 100.0,
+        report.hsm.avg_keyword_score * 100.0
+    );
+    println!(
+        "{:<40} {:>19.1}% {:>19.1}%",
+        "Avg recall score (cross-session)",
+        report.baseline.avg_recall_score * 100.0,
+        report.hsm.avg_recall_score * 100.0
+    );
+    println!(
+        "{:<40} {:>19.1}% {:>19.1}%",
+        "Avg cold score (no recall needed)",
+        report.baseline.avg_cold_score * 100.0,
+        report.hsm.avg_cold_score * 100.0
+    );
+    println!(
+        "{:<40} {:>20} {:>20}",
+        "Total tokens", report.baseline.total_tokens, report.hsm.total_tokens
+    );
+    println!(
+        "{:<40} {:>20} {:>20}",
+        "Total prompt tokens", report.baseline.total_prompt_tokens, report.hsm.total_prompt_tokens
+    );
+    println!(
+        "{:<40} {:>20} {:>20}",
+        "Total LLM calls", report.baseline.total_llm_calls, report.hsm.total_llm_calls
+    );
+    println!(
+        "{:<40} {:>18.0}ms {:>18.0}ms",
+        "Avg latency/turn", report.baseline.avg_latency_ms, report.hsm.avg_latency_ms
+    );
+    println!(
+        "{:<40} {:>19.1}% {:>19.1}%",
+        "Error rate",
+        report.baseline.error_rate * 100.0,
+        report.hsm.error_rate * 100.0
+    );
+    println!(
+        "{:<40} {:>20.3} {:>20.3}",
+        "Avg rubric composite",
+        report.baseline.avg_rubric_composite,
+        report.hsm.avg_rubric_composite
+    );
+    println!(
+        "{:<40} {:>19.1}% {:>19.1}%",
+        "Rubric pass rate",
+        report.baseline.rubric_pass_rate * 100.0,
+        report.hsm.rubric_pass_rate * 100.0
+    );
+    println!(
+        "{:<40} {:>20} {:>20}",
+        "Total LLM HTTP reqs",
+        report.baseline.total_llm_http_requests,
+        report.hsm.total_llm_http_requests
+    );
+    println!(
+        "{:<40} {:>20} {:>20}",
+        "Total wall-clock (turns ms)",
+        report.baseline.total_wall_clock_ms,
+        report.hsm.total_wall_clock_ms
+    );
 
     println!("\n--- Improvements (positive = HSM-II better) ---");
-    println!("{:<40} {:>+10.1}% (delta: {:>+.3})", "Keyword quality", report.improvement.keyword_score_pct, report.improvement.keyword_score_delta);
-    println!("{:<40} {:>+10.1}% (delta: {:>+.3})", "Cross-session recall", report.improvement.recall_score_pct, report.improvement.recall_score_delta);
+    println!(
+        "{:<40} {:>+10.1}% (delta: {:>+.3})",
+        "Keyword quality",
+        report.improvement.keyword_score_pct,
+        report.improvement.keyword_score_delta
+    );
+    println!(
+        "{:<40} {:>+10.1}% (delta: {:>+.3})",
+        "Cross-session recall",
+        report.improvement.recall_score_pct,
+        report.improvement.recall_score_delta
+    );
     println!(
         "{:<40} {:>+10.1}% ({:+} total tok vs baseline; + = HSM lower)",
         "Total tokens (Δ)",
@@ -444,23 +563,55 @@ pub fn print_report(report: &ComparisonReport) {
         report.improvement.prompt_token_reduction_pct,
         report.improvement.prompt_token_reduction as i64,
     );
-    println!("{:<40} {:>+10.1}% ({:.0} calls saved)", "LLM call reduction", report.improvement.llm_call_reduction_pct, report.improvement.llm_call_reduction);
-    println!("{:<40} {:>+10.1}% ({:>+.0}ms)", "Latency", report.improvement.latency_delta_pct, report.improvement.latency_delta_ms);
-    println!("{:<40} {:>+10.3} (Δ pass rate {:>+.3})", "Rubric composite", report.improvement.rubric_composite_delta, report.improvement.rubric_pass_rate_delta);
-    println!("{:<40} {:>+10.1} ({:>+.0} extra reqs)", "LLM HTTP requests", report.improvement.llm_http_requests_delta, report.improvement.llm_http_requests_delta);
-    println!("{:<40} {:>+10.0}ms", "Wall-clock (sum turns)", report.improvement.wall_clock_ms_delta);
+    println!(
+        "{:<40} {:>+10.1}% ({:.0} calls saved)",
+        "LLM call reduction",
+        report.improvement.llm_call_reduction_pct,
+        report.improvement.llm_call_reduction
+    );
+    println!(
+        "{:<40} {:>+10.1}% ({:>+.0}ms)",
+        "Latency", report.improvement.latency_delta_pct, report.improvement.latency_delta_ms
+    );
+    println!(
+        "{:<40} {:>+10.3} (Δ pass rate {:>+.3})",
+        "Rubric composite",
+        report.improvement.rubric_composite_delta,
+        report.improvement.rubric_pass_rate_delta
+    );
+    println!(
+        "{:<40} {:>+10.1} ({:>+.0} extra reqs)",
+        "LLM HTTP requests",
+        report.improvement.llm_http_requests_delta,
+        report.improvement.llm_http_requests_delta
+    );
+    println!(
+        "{:<40} {:>+10.0}ms",
+        "Wall-clock (sum turns)", report.improvement.wall_clock_ms_delta
+    );
     if !report.improvement.token_metrics_available {
-        println!("{:<40} {}", "Token accounting", "unavailable (excluded from verdict)");
+        println!(
+            "{:<40} {}",
+            "Token accounting", "unavailable (excluded from verdict)"
+        );
     }
 
     if !report.domain_breakdown.is_empty() {
         println!("\n--- Domain Breakdown ---");
-        println!("{:<25} {:>12} {:>12} {:>12} {:>12}", "Domain", "Base Score", "HSM Score", "Quality +%", "Token -%");
+        println!(
+            "{:<25} {:>12} {:>12} {:>12} {:>12}",
+            "Domain", "Base Score", "HSM Score", "Quality +%", "Token -%"
+        );
         println!("{:-<75}", "");
         for d in &report.domain_breakdown {
-            println!("{:<25} {:>11.1}% {:>11.1}% {:>+11.1}% {:>+11.1}%",
-                d.domain, d.baseline_keyword_score * 100.0, d.hsm_keyword_score * 100.0,
-                d.improvement_pct, d.token_reduction_pct);
+            println!(
+                "{:<25} {:>11.1}% {:>11.1}% {:>+11.1}% {:>+11.1}%",
+                d.domain,
+                d.baseline_keyword_score * 100.0,
+                d.hsm_keyword_score * 100.0,
+                d.improvement_pct,
+                d.token_reduction_pct
+            );
         }
     }
 

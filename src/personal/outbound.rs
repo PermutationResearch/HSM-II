@@ -17,7 +17,10 @@ pub async fn post_json_webhook(url: &str, payload: &Value) -> Result<()> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("webhook HTTP {status}: {}", body.chars().take(200).collect::<String>());
+        anyhow::bail!(
+            "webhook HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        );
     }
     Ok(())
 }
