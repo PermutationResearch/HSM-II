@@ -23,6 +23,8 @@ import {
   LayoutDashboard,
   Layers,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRight,
   PanelRightClose,
   ShieldCheck,
@@ -93,6 +95,8 @@ const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
 ];
 
 type Crumb = { label: string; href: string | null };
+
+const SIDEBAR_OPEN_KEY = "pc-ws-sidebar-open";
 
 const AGENT_TAB_LABELS: Record<string, string> = {
   workspace: "Workspace",
@@ -228,6 +232,24 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
 
   const [cmdOpen, setCmdOpen] = useState(false);
   const [propsOpen, setPropsOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  useEffect(() => {
+    try {
+      const v = window.localStorage.getItem(SIDEBAR_OPEN_KEY);
+      if (v === "0") setSidebarOpen(false);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_OPEN_KEY, sidebarOpen ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarOpen]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -260,66 +282,138 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
       className="flex h-[100dvh] max-h-[100dvh] min-h-0 w-full flex-row overflow-hidden bg-black text-foreground"
       suppressHydrationWarning
     >
-      <aside className="flex h-full min-h-0 w-[15.5rem] shrink-0 flex-col overflow-hidden border-r border-[#222222] bg-[#111111]">
-        <div className="shrink-0 border-b border-[#222222] px-3 py-4">
-          <Link href="/workspace/dashboard" className="block outline-none ring-offset-black focus-visible:ring-2 focus-visible:ring-[#333333]">
-            <span className="pc-sidebar-brand">Company console</span>
-            <span className="pc-sidebar-eyebrow">Workspace</span>
-          </Link>
-        </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain p-2" aria-label="Workspace">
-          {NAV_SECTIONS.map((section) => (
-            <Fragment key={section.heading}>
-              <div className="nd-ws-nav-section-label">{section.heading}</div>
-              {section.items.map(({ href, label, icon: Icon, title }) => {
-                const active =
-                  pathname === href ||
-                  (href !== "/workspace/dashboard" && pathname?.startsWith(href)) ||
-                  (href === "/workspace/agents" && /^\/workspace\/agents\//i.test(pathname ?? ""));
-                return (
-                  <Link
-                    key={href}
-                    href={href}
-                    title={title}
-                    className={cn("nd-ws-nav-link", active ? "nd-ws-nav-link--active" : "nd-ws-nav-link--idle")}
-                  >
-                    <Icon className="size-4 shrink-0 opacity-90" strokeWidth={1.5} aria-hidden />
-                    {label}
-                  </Link>
-                );
-              })}
-            </Fragment>
-          ))}
-          <div className="mt-1 border-t border-[#222222] pt-2">
-            <WorkspaceProjectsNav />
+      {sidebarOpen ? (
+        <aside className="flex h-full min-h-0 w-[15.5rem] shrink-0 flex-col overflow-hidden border-r border-[#222222] bg-[#111111]">
+          <div className="shrink-0 border-b border-[#222222] px-3 py-3">
+            <div className="flex items-start gap-1">
+              <Link
+                href="/workspace/dashboard"
+                className="min-w-0 flex-1 outline-none ring-offset-black focus-visible:ring-2 focus-visible:ring-[#333333]"
+              >
+                <span className="pc-sidebar-brand">Company console</span>
+                <span className="pc-sidebar-eyebrow">Workspace</span>
+              </Link>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 border border-transparent text-[#888888] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+                title="Collapse workspace navigation"
+                onClick={() => setSidebarOpen(false)}
+              >
+                <PanelLeftClose className="size-4" strokeWidth={1.5} aria-hidden />
+                <span className="sr-only">Collapse workspace navigation</span>
+              </Button>
+            </div>
           </div>
-          <Separator className="my-2 bg-[#222222]" />
-          <Link
-            href="/"
-            className="nd-ws-nav-link nd-ws-nav-link--idle rounded-sm px-2 py-2 font-mono text-[11px] uppercase tracking-[0.06em]"
+          <nav className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain p-2" aria-label="Workspace">
+            {NAV_SECTIONS.map((section) => (
+              <Fragment key={section.heading}>
+                <div className="nd-ws-nav-section-label">{section.heading}</div>
+                {section.items.map(({ href, label, icon: Icon, title }) => {
+                  const active =
+                    pathname === href ||
+                    (href !== "/workspace/dashboard" && pathname?.startsWith(href)) ||
+                    (href === "/workspace/agents" && /^\/workspace\/agents\//i.test(pathname ?? ""));
+                  return (
+                    <Link
+                      key={href}
+                      href={href}
+                      title={title}
+                      className={cn("nd-ws-nav-link", active ? "nd-ws-nav-link--active" : "nd-ws-nav-link--idle")}
+                    >
+                      <Icon className="size-4 shrink-0 opacity-90" strokeWidth={1.5} aria-hidden />
+                      {label}
+                    </Link>
+                  );
+                })}
+              </Fragment>
+            ))}
+            <div className="mt-1 border-t border-[#222222] pt-2">
+              <WorkspaceProjectsNav />
+            </div>
+            <Separator className="my-2 bg-[#222222]" />
+            <Link
+              href="/"
+              className="nd-ws-nav-link nd-ws-nav-link--idle rounded-sm px-2 py-2 font-mono text-[11px] uppercase tracking-[0.06em]"
+            >
+              Legacy console →
+            </Link>
+          </nav>
+          <div className="shrink-0 border-t border-[#222222] p-2 font-mono text-[10px] uppercase tracking-[0.06em] text-[#666666]">
+            API
+            <div className="mt-0.5 break-all font-mono text-[9px] normal-case tracking-normal text-[#999999]">{apiBase || "(same origin /api/*)"}</div>
+            {apiHealthError ? (
+              <span className="mt-1 block normal-case text-[#D4A843]" title={apiHealthError}>
+                API health failed — check API is up and CORS
+              </span>
+            ) : !postgresOk ? (
+              <span className="mt-1 block normal-case text-[#D4A843]">
+                {!postgresConfigured
+                  ? "Postgres off — add HSM_COMPANY_OS_DATABASE_URL to repo .env, restart hsm_console"
+                  : "Postgres not responding — check DB is running"}
+              </span>
+            ) : null}
+          </div>
+        </aside>
+      ) : (
+        <aside
+          className="flex h-full min-h-0 w-12 shrink-0 flex-col items-center overflow-hidden border-r border-[#222222] bg-[#111111] py-2"
+          aria-label="Workspace navigation collapsed"
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="border border-transparent text-[#888888] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+            title="Expand workspace navigation"
+            onClick={() => setSidebarOpen(true)}
           >
-            Legacy console →
+            <PanelLeftOpen className="size-4" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Expand workspace navigation</span>
+          </Button>
+          <Link
+            href="/workspace/dashboard"
+            title="Dashboard"
+            className="mt-3 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
+          >
+            <LayoutDashboard className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Dashboard</span>
           </Link>
-        </nav>
-        <div className="shrink-0 border-t border-[#222222] p-2 font-mono text-[10px] uppercase tracking-[0.06em] text-[#666666]">
-          API
-          <div className="mt-0.5 break-all font-mono text-[9px] normal-case tracking-normal text-[#999999]">{apiBase || "(same origin /api/*)"}</div>
-          {apiHealthError ? (
-            <span className="mt-1 block normal-case text-[#D4A843]" title={apiHealthError}>
-              API health failed — check API is up and CORS
-            </span>
-          ) : !postgresOk ? (
-            <span className="mt-1 block normal-case text-[#D4A843]">
-              {!postgresConfigured
-                ? "Postgres off — add HSM_COMPANY_OS_DATABASE_URL to repo .env, restart hsm_console"
-                : "Postgres not responding — check DB is running"}
-            </span>
-          ) : null}
-        </div>
-      </aside>
+          <Link
+            href="/workspace/issues"
+            title="Issues"
+            className="mt-1 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
+          >
+            <FolderKanban className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Issues</span>
+          </Link>
+          <Link
+            href="/workspace/agents"
+            title="Agents"
+            className="mt-1 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
+          >
+            <Bot className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Agents</span>
+          </Link>
+        </aside>
+      )}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[#222222] bg-black px-4">
+          {!sidebarOpen ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 border border-transparent text-[#999999] hover:bg-white/[0.06] hover:text-[#e8e8e8] sm:inline-flex"
+              title="Show workspace navigation"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <PanelLeftOpen className="size-4" strokeWidth={1.5} aria-hidden />
+              <span className="sr-only">Show workspace navigation</span>
+            </Button>
+          ) : null}
           {onAgentDetail ? (
             <AgentDetailBreadcrumbs />
           ) : (

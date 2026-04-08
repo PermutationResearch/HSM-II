@@ -130,7 +130,7 @@ function MiniBars({
 }) {
   const max = Math.max(1, ...values);
   return (
-    <div className="flex h-28 items-end gap-1">
+    <div className="flex h-28 min-w-0 items-end gap-1">
       {values.map((v, i) => {
         const pct = (v / max) * 100;
         const style = {

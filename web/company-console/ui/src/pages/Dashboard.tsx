@@ -265,7 +265,8 @@ export function Dashboard({
   const activityAnimationTimersRef = useRef<number[]>([]);
 
   const DRAG_HANDLE_CLASS = "dashboard-drag-handle";
-  const { containerRef: gridContainerRef, width: gridWidth } = useContainerWidth();
+  /** Avoid initialWidth 1280 (hook default) stretching the grid wider than the canvas before measure. */
+  const { containerRef: gridContainerRef, width: gridWidth } = useContainerWidth({ initialWidth: 0 });
 
   useEffect(() => {
     layoutsRef.current = layouts;
@@ -472,7 +473,7 @@ export function Dashboard({
   const metricClick = (fn: () => void) => (drill ? fn : undefined);
 
   return (
-    <div className="-mx-6 space-y-6 bg-[#010409] px-6 pb-10">
+    <div className="w-full min-w-0 max-w-full space-y-6 overflow-x-hidden bg-[#010409] pb-10">
       <header className="flex flex-col gap-3 border-b border-[#30363D] pb-6 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0">
           <h1 className="text-lg font-medium tracking-tight text-white">Dashboard</h1>
@@ -562,7 +563,8 @@ export function Dashboard({
       ) : null}
 
       {data && (
-        <div ref={gridContainerRef as React.Ref<HTMLDivElement>}>
+        <div ref={gridContainerRef as React.Ref<HTMLDivElement>} className="min-w-0 max-w-full">
+        {gridWidth > 0 ? (
         <ResponsiveGridLayout
           className="layout"
           layouts={layouts}
@@ -857,6 +859,9 @@ export function Dashboard({
             </WidgetShell>
           </div>
         </ResponsiveGridLayout>
+        ) : (
+          <div className="min-h-[min(60vh,520px)] rounded-2xl border border-[#2a2a2a] bg-[#0a0a0a]" aria-hidden />
+        )}
         </div>
       )}
     </div>

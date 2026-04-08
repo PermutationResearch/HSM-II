@@ -203,6 +203,9 @@ body {
 .react-grid-layout {
   position: relative;
   transition: height 150ms ease;
+  /* RGL sets an explicit pixel width; cap to the canvas so narrow viewports don’t scroll horizontally */
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .react-grid-item {
