@@ -9,12 +9,16 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::console::ConsoleState;
 
+use super::company_memory::{fetch_agent_memory_addon, fetch_shared_memory_addon};
+use super::markdown_toc::heading_outline;
 use super::no_db;
+use super::workspace_files::list_agent_markdown_instructions;
 
 pub fn router() -> Router<ConsoleState> {
     Router::new()
@@ -23,6 +27,14 @@ pub fn router() -> Router<ConsoleState> {
             get(list_agents).post(create_agent),
         )
         .route("/api/company/companies/:company_id/org", get(org_chart))
+        .route(
+            "/api/company/companies/:company_id/agents/:agent_id/inventory",
+            get(get_agent_inventory),
+        )
+        .route(
+            "/api/company/companies/:company_id/agents/:agent_id/operator-thread",
+            get(get_agent_operator_thread),
+        )
         .route(
             "/api/company/companies/:company_id/agents/:agent_id",
             patch(patch_agent).delete(delete_agent),
@@ -161,6 +173,372 @@ async fn list_agents(
         })
         .collect();
     Ok(Json(json!({ "agents": agents })))
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct CompanySkillSummaryRow {
+    id: Uuid,
+    slug: String,
+    name: String,
+    description: String,
+    skill_path: String,
+    source: String,
+    updated_at: String,
+}
+
+fn normalize_skill_key(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+fn paperclip_skill_refs(adapter_config: &Value) -> Vec<String> {
+    adapter_config
+        .get("paperclip")
+        .and_then(|p| p.get("skills"))
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn capability_csv_refs(capabilities: &Option<String>) -> Vec<String> {
+    capabilities
+        .as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_roster_skill_refs(adapter_config: &Value, capabilities: &Option<String>) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut out = Vec::new();
+    for r in paperclip_skill_refs(adapter_config)
+        .into_iter()
+        .chain(capability_csv_refs(capabilities))
+    {
+        let k = normalize_skill_key(&r);
+        if k.is_empty() {
+            continue;
+        }
+        if seen.insert(k) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// Paperclip roster + `company_skills` + Markdown instruction files discoverable on disk.
+async fn get_agent_inventory(
+    State(st): State<ConsoleState>,
+    Path((company_id, agent_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let agent = sqlx::query_as::<_, CompanyAgentRow>(
+        r#"SELECT id, company_id, name, role, title, capabilities, reports_to, adapter_type,
+                  adapter_config, budget_monthly_cents, briefing, status, sort_order,
+                  created_at::text, updated_at::text
+           FROM company_agents WHERE id = $1 AND company_id = $2"#,
+    )
+    .bind(agent_id)
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(agent) = agent else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent not found" })),
+        ));
+    };
+
+    let home_cell: Option<Option<String>> =
+        sqlx::query_scalar("SELECT hsmii_home FROM companies WHERE id = $1")
+            .bind(company_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+
+    let instruction_files = match home_cell.as_ref().and_then(|o| o.as_ref()) {
+        Some(h) if !h.trim().is_empty() => {
+            match list_agent_markdown_instructions(h.trim(), &agent.name, 4, 200) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "list_agent_markdown_instructions failed");
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+
+    let skills: Vec<CompanySkillSummaryRow> = sqlx::query_as(
+        r#"SELECT id, slug, name, description, skill_path, source, updated_at::text
+           FROM company_skills WHERE company_id = $1
+           ORDER BY lower(name), lower(slug)"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let by_slug: HashMap<String, &CompanySkillSummaryRow> = skills
+        .iter()
+        .map(|s| (normalize_skill_key(&s.slug), s))
+        .collect();
+
+    let roster_refs = merge_roster_skill_refs(&agent.adapter_config.0, &agent.capabilities);
+    let roster_keys: HashSet<String> = roster_refs.iter().map(|r| normalize_skill_key(r)).collect();
+
+    let skills_linked: Vec<Value> = roster_refs
+        .iter()
+        .filter_map(|r| {
+            let row = by_slug.get(&normalize_skill_key(r))?;
+            Some(json!({
+                "ref": r,
+                "skill": {
+                    "id": row.id,
+                    "slug": row.slug,
+                    "name": row.name,
+                    "description": row.description,
+                    "skill_path": row.skill_path,
+                    "source": row.source,
+                    "updated_at": row.updated_at,
+                }
+            }))
+        })
+        .collect();
+
+    let unresolved_skill_refs: Vec<String> = roster_refs
+        .iter()
+        .filter(|r| !by_slug.contains_key(&normalize_skill_key(r)))
+        .cloned()
+        .collect();
+
+    let company_skills_catalog: Vec<Value> = skills
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "slug": s.slug,
+                "name": s.name,
+                "description": s.description,
+                "skill_path": s.skill_path,
+                "source": s.source,
+                "updated_at": s.updated_at,
+                "on_agent_roster": roster_keys.contains(&normalize_skill_key(&s.slug)),
+            })
+        })
+        .collect();
+
+    let briefing_preview = agent
+        .briefing
+        .as_ref()
+        .map(|b| b.chars().take(480).collect::<String>());
+
+    Ok(Json(json!({
+        "agent": {
+            "id": agent.id,
+            "company_id": agent.company_id,
+            "name": agent.name,
+            "role": agent.role,
+            "title": agent.title,
+            "capabilities": agent.capabilities,
+            "adapter_type": agent.adapter_type,
+            "adapter_config": agent.adapter_config.0.clone(),
+            "briefing_preview": briefing_preview,
+        },
+        "roster_skill_refs": roster_refs,
+        "skills_linked": skills_linked,
+        "unresolved_skill_refs": unresolved_skill_refs,
+        "company_skills_catalog": company_skills_catalog,
+        "instruction_markdown_files": instruction_files,
+        "hsmii_home_configured": matches!(
+            home_cell.as_ref(),
+            Some(Some(s)) if !s.trim().is_empty()
+        ),
+    })))
+}
+
+const OPERATOR_THREAD_DIGEST_MAX: usize = 12_000;
+
+fn normalize_stig_notes_json(v: &Value) -> Vec<Value> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(o) = item.as_object() else {
+            continue;
+        };
+        let text = o
+            .get("text")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if text.is_empty() {
+            continue;
+        }
+        out.push(json!({
+            "at": o.get("at").and_then(|x| x.as_str()).unwrap_or(""),
+            "actor": o.get("actor").and_then(|x| x.as_str()).unwrap_or("operator"),
+            "text": text,
+        }));
+    }
+    out
+}
+
+fn build_operator_thread_digest(agent_name: &str, tasks: &[(Uuid, String, Value, String)]) -> String {
+    let mut digest = format!("## Operator ↔ {agent_name} — compact thread (for LLM / handoff)\n\n");
+    for (id, title, notes_val, _created) in tasks {
+        let notes = normalize_stig_notes_json(notes_val);
+        if notes.is_empty() {
+            continue;
+        }
+        digest.push_str(&format!("### Task: {title} (`{id}`)\n"));
+        for n in notes {
+            let at = n["at"].as_str().unwrap_or("");
+            let actor = n["actor"].as_str().unwrap_or("operator");
+            let text = n["text"].as_str().unwrap_or("");
+            digest.push_str(&format!("- [{at}] {actor}: {text}\n"));
+        }
+        digest.push('\n');
+    }
+    if digest.len() > OPERATOR_THREAD_DIGEST_MAX {
+        let mut t = digest.chars().take(OPERATOR_THREAD_DIGEST_MAX).collect::<String>();
+        t.push_str("\n\n…(truncated; narrow tasks or copy per-task notes)");
+        t
+    } else {
+        digest
+    }
+}
+
+/// Stigmergic `context_notes` on tasks owned by or checked out to this roster agent (operator rail).
+async fn get_agent_operator_thread(
+    State(st): State<ConsoleState>,
+    Path((company_id, agent_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let agent = sqlx::query_as::<_, CompanyAgentRow>(
+        r#"SELECT id, company_id, name, role, title, capabilities, reports_to, adapter_type,
+                  adapter_config, budget_monthly_cents, briefing, status, sort_order,
+                  created_at::text, updated_at::text
+           FROM company_agents WHERE id = $1 AND company_id = $2"#,
+    )
+    .bind(agent_id)
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(agent) = agent else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent not found" })),
+        ));
+    };
+
+    #[derive(FromRow)]
+    struct OperatorTaskNotesRow {
+        id: Uuid,
+        title: String,
+        context_notes: SqlxJson<Value>,
+        created_at: String,
+    }
+
+    let persona = agent.name.trim();
+    let rows = sqlx::query_as::<_, OperatorTaskNotesRow>(
+        r#"SELECT id, title, context_notes, created_at::text
+           FROM tasks
+           WHERE company_id = $1
+             AND (
+               lower(trim(coalesce(owner_persona, ''))) = lower(trim($2))
+               OR lower(trim(coalesce(checked_out_by, ''))) = lower(trim($2))
+             )
+           ORDER BY created_at DESC
+           LIMIT 200"#,
+    )
+    .bind(company_id)
+    .bind(persona)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let mut tasks_out: Vec<Value> = Vec::new();
+    let mut flat: Vec<Value> = Vec::new();
+    let mut digest_inputs: Vec<(Uuid, String, Value, String)> = Vec::new();
+
+    for row in rows {
+        let notes = normalize_stig_notes_json(&row.context_notes.0);
+        digest_inputs.push((
+            row.id,
+            row.title.clone(),
+            row.context_notes.0.clone(),
+            row.created_at.clone(),
+        ));
+        for n in &notes {
+            flat.push(json!({
+                "task_id": row.id,
+                "task_title": &row.title,
+                "note": n,
+            }));
+        }
+        tasks_out.push(json!({
+            "task_id": row.id,
+            "title": row.title,
+            "created_at": row.created_at,
+            "notes": notes,
+        }));
+    }
+
+    let compact_digest = build_operator_thread_digest(persona, &digest_inputs);
+
+    Ok(Json(json!({
+        "agent_id": agent_id,
+        "agent_name": agent.name,
+        "tasks": tasks_out,
+        "notes_flat": flat,
+        "compact_digest": compact_digest,
+        "total_tasks": tasks_out.len(),
+    })))
 }
 
 async fn create_agent(
@@ -776,21 +1154,28 @@ pub async fn resolve_run_profile_for_task(
 }
 
 #[derive(sqlx::FromRow)]
-struct TaskPersonaRow {
+struct TaskLlmContextRow {
     company_id: Uuid,
     checked_out_by: Option<String>,
     owner_persona: Option<String>,
+    title: String,
+    specification: Option<String>,
+    workspace_attachment_paths: Value,
+    capability_refs: SqlxJson<Value>,
+    context_notes: SqlxJson<Value>,
 }
 
 async fn get_task_llm_context(
     State(st): State<ConsoleState>,
     Path(task_id): Path<Uuid>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    crate::policy_config::ensure_loaded();
     let Some(ref pool) = st.company_db else {
         return Err(no_db());
     };
-    let t = sqlx::query_as::<_, TaskPersonaRow>(
-        r#"SELECT company_id, checked_out_by, owner_persona FROM tasks WHERE id = $1"#,
+    let t = sqlx::query_as::<_, TaskLlmContextRow>(
+        r#"SELECT company_id, checked_out_by, owner_persona, title, specification, workspace_attachment_paths, capability_refs, context_notes
+           FROM tasks WHERE id = $1"#,
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -828,10 +1213,165 @@ async fn get_task_llm_context(
                     Json(json!({ "error": e.to_string() })),
                 )
             })?;
-    let company_addon = build_company_wide_context_addon(company_context_markdown.as_deref());
+    let hsmii_home: Option<String> =
+        sqlx::query_scalar("SELECT hsmii_home FROM companies WHERE id = $1")
+            .bind(t.company_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+    let hsmii_home_for_task = hsmii_home.clone();
+    let shared_mem_addon = fetch_shared_memory_addon(pool, t.company_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    let mut agent_mem_addon = String::new();
+    if let Some(aid) = profile.agent_id {
+        agent_mem_addon = fetch_agent_memory_addon(pool, t.company_id, aid)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+    }
+    let agent_memory_addon_bytes = agent_mem_addon.len();
+    let mut task_addon = format!("## Current task\n\n- **Title:** {}\n", t.title);
+    if let Some(spec) = t
+        .specification
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        task_addon.push_str(&format!("\n### Specification\n\n{spec}\n"));
+    }
+    let paths: Vec<String> = match &t.workspace_attachment_paths {
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => vec![],
+    };
+    if !paths.is_empty() {
+        task_addon.push_str("\n### Workspace file references\n\nPaths are relative to the company pack home (`hsmii_home`).\n\n");
+        for p in &paths {
+            task_addon.push_str(&format!("- `{p}`\n"));
+        }
+        task_addon.push('\n');
+    }
+    if let Value::Array(caps) = &t.capability_refs.0 {
+        if !caps.is_empty() {
+            task_addon.push_str("\n### Linked capabilities\n\nExplicit skill / SOP / tool / pack / agent refs on this task.\n\n");
+            for c in caps.iter().take(24) {
+                let kind = c.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
+                let rf = c.get("ref").and_then(|x| x.as_str()).unwrap_or("");
+                if !rf.is_empty() {
+                    task_addon.push_str(&format!("- **{kind}**: `{rf}`\n"));
+                }
+            }
+            task_addon.push('\n');
+        }
+    }
+    if let Value::Array(arr) = &t.context_notes.0 {
+        if !arr.is_empty() {
+            task_addon.push_str("\n### Task handoff notes (stigmergic)\n\n");
+            let take = arr.len().saturating_sub(20);
+            for n in arr.iter().skip(take) {
+                let text = n.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                let actor = n.get("actor").and_then(|x| x.as_str()).unwrap_or("");
+                let at = n.get("at").and_then(|x| x.as_str()).unwrap_or("");
+                if !text.is_empty() {
+                    task_addon.push_str(&format!("- **{at}** `{actor}`: {text}\n"));
+                }
+            }
+            task_addon.push('\n');
+        }
+    }
+    if let Some(home) = hsmii_home_for_task
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        task_addon.push_str(&format!("### Pack home (`hsmii_home`)\n\n`{home}`\n\n"));
+    }
+    task_addon.push_str(
+        "Workspace discipline:\n\
+         - Paths above are **pointers** (files stay on disk under `hsmii_home`); they may live under another agent’s folder (e.g. `agents/<id>/…`)—resolve from the pack root.\n\
+         - If the pack has a curated **index / TOC** markdown (operator-maintained), **open that first** before loading deep files—same idea as a small surface over a large corpus.\n\
+         - Per-agent instructions after pack import: `agents/<agent_folder>/AGENTS.md` (see company import).\n\n\
+         Tools: `company_memory_search` / `company_memory_append`; `company_run_feedback_append` / `company_promote_feedback_to_task` (HTTP tools on full registry); optional `GET …/memory/export.md` for a git-friendly index.\n\
+         Memory writes (`company_memory_append`): you must pass `scope` as the literal `shared` or `agent` every time (no default). Prefer **`shared`** for durable facts any other agent on this company should see (policies, URLs, decisions, handoffs). Use **`agent`** only for private preference, scratch, or explicitly sensitive per-agent notes. For urgent company-wide lines, use shared with **`kind`: broadcast**.\n\
+         Memory reads (`company_memory_search`): default mode is company-wide **`shared`**; use **`mine`** for this agent’s scoped rows only, or **`both`** when you need shared + private together.\n\n",
+    );
+    let mut company_addon = build_company_wide_context_addon(company_context_markdown.as_deref());
+    let toc = heading_outline(company_context_markdown.as_deref().unwrap_or(""), 40);
+    if !toc.is_empty() {
+        company_addon.push_str("## Company context — heading outline\n\n");
+        company_addon.push_str(&toc);
+        company_addon.push_str("\n\n");
+    }
     let company_context_addon_bytes = company_addon.len();
-    let combined_system_addon = format!("{company_addon}{}", profile.system_context_addon);
+    let shared_memory_addon_bytes = shared_mem_addon.len();
+    let task_context_addon_bytes = task_addon.len();
+    let combined_system_addon = format!(
+        "{company_addon}{shared_mem_addon}{agent_mem_addon}{task_addon}{}",
+        profile.system_context_addon
+    );
     let combined_system_addon_bytes = combined_system_addon.len();
+
+    let pol = crate::policy_config::get();
+    let context_manifest = crate::context_manifest::company_task_llm_context_manifest(
+        vec![
+            ("company", company_context_addon_bytes),
+            ("shared_memory", shared_memory_addon_bytes),
+            ("agent_memory", agent_memory_addon_bytes),
+            ("task", task_context_addon_bytes),
+            ("agent_profile", profile.system_context_addon_bytes),
+        ],
+        |k| pol.tier_for_company_llm_section(k),
+    );
+
+    tracing::info!(
+        target: "hsm.context_manifest",
+        summary = %context_manifest.summary_line(),
+        scope = "company_llm_context",
+        task_id = %task_id,
+        company_id = %t.company_id,
+        "assembled company task llm-context"
+    );
+    if std::env::var("HSM_LOG_CONTEXT_MANIFEST")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        if let Ok(json) = serde_json::to_string(&context_manifest) {
+            tracing::debug!(target: "hsm.context_manifest", %json, "full company llm-context manifest");
+        }
+    }
+
+    crate::telemetry::client().record_technical(
+        "company.task.llm_context",
+        json!({
+            "task_id": task_id,
+            "company_id": t.company_id,
+            "combined_system_addon_bytes": combined_system_addon_bytes,
+            "sections": context_manifest.sections.iter().map(|s| json!({
+                "key": s.key,
+                "bytes": s.emitted_bytes,
+                "tier": format!("{:?}", s.tier),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+
     tracing::info!(
         target: "hsm_company_agent_inject",
         task_id = %task_id,
@@ -839,18 +1379,32 @@ async fn get_task_llm_context(
         endpoint = "llm_context_get",
         company_agent_row_found = profile.resolved,
         company_context_addon_bytes,
+        shared_memory_addon_bytes,
+        agent_memory_addon_bytes,
+        task_context_addon_bytes,
         combined_system_addon_bytes,
         addon_bytes = profile.system_context_addon_bytes,
         matched_as = ?profile.matched_as,
         agent_id = ?profile.agent_id,
     );
+    let context_manifest_json =
+        serde_json::to_value(&context_manifest).unwrap_or_else(|_| json!({}));
     Ok(Json(json!({
         "task_id": task_id,
+        "company_id": t.company_id,
         "company_context_markdown": company_context_markdown,
+        "hsmii_home": hsmii_home,
+        "context_notes": t.context_notes.0.clone(),
+        "capability_refs": t.capability_refs.0.clone(),
+        "workspace_attachment_paths": paths,
         "company_context_addon_bytes": company_context_addon_bytes,
+        "shared_memory_addon_bytes": shared_memory_addon_bytes,
+        "agent_memory_addon_bytes": agent_memory_addon_bytes,
+        "task_context_addon_bytes": task_context_addon_bytes,
         "agent_run_profile": profile,
         "combined_system_addon": combined_system_addon,
         "combined_system_addon_bytes": combined_system_addon_bytes,
+        "context_manifest": context_manifest_json,
     })))
 }
 

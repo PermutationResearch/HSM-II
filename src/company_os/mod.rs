@@ -1,12 +1,23 @@
-//! Company OS API — PostgreSQL-backed companies, goals, tasks (Paperclip-class control plane, MVP).
+//! Company OS API — PostgreSQL-backed **operational graph** per `company_id` (companies, goals, tasks,
+//! memory, spend, workforce, `llm-context`, governance events, etc.).
+//!
+//! **Product contract:** this store is the canonical world model for a company; optional global
+//! `/api/paperclip/*` is demo/experiment — do not treat it as a second source of truth in UIs.
+//! See `docs/company-os/world-model-and-intelligence.md`.
 //!
 //! Enable with `HSM_COMPANY_OS_DATABASE_URL=postgres://...`. Migrations in `migrations/` run on startup.
 
+mod agent_runs;
 mod agents;
 mod bundle;
+mod company_memory;
+pub mod markdown_toc;
+mod memory_summaries;
 pub mod onboarding_contracts;
 mod paperclip_import;
+mod paperclip_sync;
 mod spend;
+mod workspace_files;
 
 use axum::{
     extract::{Path, Query, State},
@@ -15,6 +26,7 @@ use axum::{
     Json, Router,
 };
 pub use bundle::{export_bundle, import_bundle as run_import_bundle, CompanyBundle, ImportRequest};
+use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -22,12 +34,17 @@ pub use spend::spawn_record_llm_spend;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json as SqlxJson;
 use sqlx::{PgPool, Postgres, Transaction};
+use std::path::Path as StdPath;
 use uuid::Uuid;
 
 use self::onboarding_contracts::{
     evaluate_gate_results, find_contract, load_contracts_hot, OnboardingGateResult,
 };
 use crate::console::ConsoleState;
+use crate::personal::ops_config::{
+    heartbeat_state_path, load_heartbeat_state, load_ops_config, resolve_ops_config_path,
+    BudgetScope, Ticket,
+};
 
 /// Max size for `companies.context_markdown` (POST/PATCH body).
 const MAX_COMPANY_CONTEXT_MARKDOWN_BYTES: usize = 512 * 1024;
@@ -49,6 +66,9 @@ pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
 pub fn router() -> Router<ConsoleState> {
     Router::new()
         .merge(agents::router())
+        .merge(agent_runs::router())
+        .merge(workspace_files::router())
+        .merge(company_memory::router())
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
         .route(
@@ -76,12 +96,24 @@ pub fn router() -> Router<ConsoleState> {
             get(company_api_catalog),
         )
         .route(
-            "/api/company/companies/:company_id",
-            get(get_company).patch(patch_company).delete(delete_company),
-        )
-        .route(
             "/api/company/companies/:company_id/import-paperclip-home",
             post(import_paperclip_home),
+        )
+        .route(
+            "/api/company/companies/:company_id/sync/paperclip-goals",
+            post(sync_paperclip_goals_post),
+        )
+        .route(
+            "/api/company/companies/:company_id/sync/paperclip-dris",
+            post(sync_paperclip_dris_post),
+        )
+        .route(
+            "/api/company/companies/:company_id/dri-assignments",
+            get(list_dri_assignments).post(create_dri_assignment),
+        )
+        .route(
+            "/api/company/companies/:company_id/dri-assignments/:row_id",
+            patch(patch_dri_assignment).delete(delete_dri_assignment),
         )
         .route(
             "/api/company/companies/:company_id/skills",
@@ -98,6 +130,10 @@ pub fn router() -> Router<ConsoleState> {
         .route(
             "/api/company/companies/:company_id/spend/summary",
             get(spend_summary),
+        )
+        .route(
+            "/api/company/companies/:company_id/ops/overview",
+            get(company_ops_overview),
         )
         .route(
             "/api/company/companies/:company_id/governance/events",
@@ -118,6 +154,18 @@ pub fn router() -> Router<ConsoleState> {
         .route(
             "/api/company/companies/:company_id/goals/:goal_id",
             patch(patch_goal),
+        )
+        .route(
+            "/api/company/companies/:company_id/intelligence/summary",
+            get(company_intelligence_summary),
+        )
+        .route(
+            "/api/company/companies/:company_id/projects",
+            get(list_projects).post(create_project),
+        )
+        .route(
+            "/api/company/companies/:company_id/projects/:project_id",
+            patch(patch_project),
         )
         .route(
             "/api/company/companies/:company_id/tasks",
@@ -175,16 +223,34 @@ pub fn router() -> Router<ConsoleState> {
             "/api/company/companies/:company_id/tasks/queue",
             get(list_task_queue),
         )
+        // Register after all longer `companies/:company_id/...` paths so matchit does not
+        // bind subpaths (e.g. `/projects`) to this handler (avoids spurious 404 on nested routes).
+        .route(
+            "/api/company/companies/:company_id",
+            get(get_company).patch(patch_company).delete(delete_company),
+        )
+        .route(
+            "/api/company/tasks/:task_id/context",
+            patch(patch_task_context),
+        )
         .route("/api/company/tasks/:task_id/sla", patch(patch_task_sla))
         .route(
             "/api/company/tasks/:task_id/decision",
             post(post_task_decision),
+        )
+        .route(
+            "/api/company/tasks/:task_id/requires-human",
+            post(post_task_requires_human),
         )
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
         .route(
             "/api/company/tasks/:task_id/run-telemetry",
             post(post_task_run_telemetry),
+        )
+        .route(
+            "/api/company/tasks/:task_id/stigmergic-note",
+            post(post_task_stigmergic_note),
         )
 }
 
@@ -723,6 +789,392 @@ async fn import_paperclip_home(
         })
 }
 
+#[derive(Deserialize, Default)]
+struct SyncPaperclipGoalsBody {
+    #[serde(default)]
+    goals: Option<Vec<crate::paperclip::goal::Goal>>,
+}
+
+/// One-way sync: Paperclip in-memory goals → Postgres `goals` (`paperclip_goal_id` + snapshot). Body optional when `ConsoleState` carries a Paperclip layer (`hsm_console` with intelligence).
+async fn sync_paperclip_goals_post(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<SyncPaperclipGoalsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let goals: Vec<crate::paperclip::goal::Goal> = if let Some(g) = body.goals {
+        g
+    } else if let Some(ref il) = st.paperclip {
+        let layer = il.lock().await;
+        layer.list_goals().iter().map(|x| (*x).clone()).collect()
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "No in-process Paperclip layer. POST { \"goals\": … } from GET /api/paperclip/goals (same process as IntelligenceLayer) or run hsm_console with intelligence enabled."
+            })),
+        ));
+    };
+
+    let report = paperclip_sync::sync_paperclip_goals(pool, company_id, goals)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, 'sync', 'paperclip_goals_synced', 'company', $2, $3, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(company_id.to_string())
+    .bind(SqlxJson(report.clone()))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({ "ok": true, "report": report })))
+}
+
+#[derive(Deserialize, Default)]
+struct SyncPaperclipDrisBody {
+    #[serde(default)]
+    dris: Option<Vec<crate::paperclip::dri::DriEntry>>,
+}
+
+async fn sync_paperclip_dris_post(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<SyncPaperclipDrisBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let entries: Vec<crate::paperclip::dri::DriEntry> = if let Some(d) = body.dris {
+        d
+    } else if let Some(ref il) = st.paperclip {
+        let layer = il.lock().await;
+        layer.dri_registry.all().cloned().collect()
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "No in-process Paperclip layer. POST { \"dris\": … } from GET /api/paperclip/dris or run hsm_console with intelligence enabled."
+            })),
+        ));
+    };
+
+    let report = paperclip_sync::sync_paperclip_dris(pool, company_id, entries)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, 'sync', 'paperclip_dris_synced', 'company', $2, $3, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(company_id.to_string())
+    .bind(SqlxJson(report.clone()))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({ "ok": true, "report": report })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct DriAssignmentRow {
+    id: Uuid,
+    company_id: Uuid,
+    dri_key: String,
+    display_name: String,
+    agent_ref: String,
+    domains: Vec<String>,
+    authority: SqlxJson<Value>,
+    tenure_kind: String,
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    paperclip_dri_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+async fn list_dri_assignments(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, DriAssignmentRow>(
+        r#"SELECT id, company_id, dri_key, display_name, agent_ref, domains, authority,
+                  tenure_kind, valid_from, valid_until, paperclip_dri_id,
+                  created_at::text, updated_at::text
+           FROM dri_assignments WHERE company_id = $1 ORDER BY dri_key"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "dri_assignments": rows })))
+}
+
+#[derive(Deserialize)]
+struct CreateDriAssignmentBody {
+    dri_key: String,
+    display_name: String,
+    agent_ref: String,
+    #[serde(default)]
+    domains: Vec<String>,
+    #[serde(default)]
+    authority: Value,
+    #[serde(default)]
+    tenure_kind: String,
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    valid_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn create_dri_assignment(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateDriAssignmentBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let key = body.dri_key.trim().to_string();
+    if key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "dri_key required" })),
+        ));
+    }
+    let name = body.display_name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "display_name required" })),
+        ));
+    }
+    let agent = body.agent_ref.trim().to_string();
+    if agent.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_ref required" })),
+        ));
+    }
+    let tk = body.tenure_kind.trim().to_ascii_lowercase();
+    let tenure_kind = if tk.is_empty() {
+        "persistent".to_string()
+    } else {
+        tk
+    };
+    if !matches!(tenure_kind.as_str(), "persistent" | "time_bound") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "tenure_kind must be persistent|time_bound" })),
+        ));
+    }
+
+    let row = sqlx::query_as::<_, DriAssignmentRow>(
+        r#"INSERT INTO dri_assignments (
+            company_id, dri_key, display_name, agent_ref, domains, authority,
+            tenure_kind, valid_from, valid_until, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, NOW())
+        RETURNING id, company_id, dri_key, display_name, agent_ref, domains, authority,
+                  tenure_kind, valid_from, valid_until, paperclip_dri_id,
+                  created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(&key)
+    .bind(&name)
+    .bind(&agent)
+    .bind(&body.domains)
+    .bind(SqlxJson(body.authority))
+    .bind(&tenure_kind)
+    .bind(body.valid_from)
+    .bind(body.valid_until)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(ref d) = e {
+            if d.constraint() == Some("uq_dri_assignments_company_key") {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "dri_key already exists for company" })),
+                );
+            }
+        }
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "dri_assignment": row }))))
+}
+
+#[derive(Deserialize, Default)]
+struct PatchDriAssignmentBody {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    agent_ref: Option<String>,
+    #[serde(default)]
+    domains: Option<Vec<String>>,
+    #[serde(default)]
+    authority: Option<Value>,
+    #[serde(default)]
+    tenure_kind: Option<String>,
+    #[serde(default)]
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    valid_until: Option<Option<chrono::DateTime<chrono::Utc>>>,
+}
+
+async fn patch_dri_assignment(
+    State(st): State<ConsoleState>,
+    Path((company_id, row_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<PatchDriAssignmentBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let cur = sqlx::query_as::<_, DriAssignmentRow>(
+        r#"SELECT id, company_id, dri_key, display_name, agent_ref, domains, authority,
+                  tenure_kind, valid_from, valid_until, paperclip_dri_id,
+                  created_at::text, updated_at::text
+           FROM dri_assignments WHERE id = $1 AND company_id = $2"#,
+    )
+    .bind(row_id)
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(cur) = cur else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "dri_assignment not found" })),
+        ));
+    };
+
+    let display_name = body
+        .display_name
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cur.display_name);
+    let agent_ref = body
+        .agent_ref
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cur.agent_ref);
+    let domains = body.domains.unwrap_or(cur.domains);
+    let authority = SqlxJson(body.authority.unwrap_or_else(|| cur.authority.0.clone()));
+    let tenure_kind = body
+        .tenure_kind
+        .as_ref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cur.tenure_kind.clone());
+    if !matches!(tenure_kind.as_str(), "persistent" | "time_bound") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "tenure_kind must be persistent|time_bound" })),
+        ));
+    }
+    let valid_from = body.valid_from.or(cur.valid_from);
+    let valid_until = match body.valid_until {
+        None => cur.valid_until,
+        Some(None) => None,
+        Some(Some(t)) => Some(t),
+    };
+
+    let row = sqlx::query_as::<_, DriAssignmentRow>(
+        r#"UPDATE dri_assignments SET
+            display_name = $3,
+            agent_ref = $4,
+            domains = $5,
+            authority = $6::jsonb,
+            tenure_kind = $7,
+            valid_from = $8,
+            valid_until = $9,
+            updated_at = NOW()
+           WHERE id = $1 AND company_id = $2
+           RETURNING id, company_id, dri_key, display_name, agent_ref, domains, authority,
+                     tenure_kind, valid_from, valid_until, paperclip_dri_id,
+                     created_at::text, updated_at::text"#,
+    )
+    .bind(row_id)
+    .bind(company_id)
+    .bind(&display_name)
+    .bind(&agent_ref)
+    .bind(&domains)
+    .bind(authority)
+    .bind(&tenure_kind)
+    .bind(valid_from)
+    .bind(valid_until)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({ "dri_assignment": row })))
+}
+
+async fn delete_dri_assignment(
+    State(st): State<ConsoleState>,
+    Path((company_id, row_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let r = sqlx::query("DELETE FROM dri_assignments WHERE id = $1 AND company_id = $2")
+        .bind(row_id)
+        .bind(company_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    if r.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "dri_assignment not found" })),
+        ));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "deleted": true, "id": row_id })),
+    ))
+}
+
 #[derive(sqlx::FromRow, Serialize)]
 struct CompanySkillRow {
     id: Uuid,
@@ -905,7 +1357,10 @@ fn score_domain_text(
             matched_terms.insert((*term).to_string());
             score += weight;
             if evidence.len() < 5 {
-                evidence.push(format!("{domain}: {}", text.chars().take(160).collect::<String>()));
+                evidence.push(format!(
+                    "{domain}: {}",
+                    text.chars().take(160).collect::<String>()
+                ));
             }
         }
     }
@@ -947,14 +1402,8 @@ fn compute_domain_scores(
                 &mut evidence,
             );
             if let Some(title) = agent.title.as_deref() {
-                score += score_domain_text(
-                    domain,
-                    terms,
-                    title,
-                    1.2,
-                    &mut matched_terms,
-                    &mut evidence,
-                );
+                score +=
+                    score_domain_text(domain, terms, title, 1.2, &mut matched_terms, &mut evidence);
             }
             if let Some(capabilities) = agent.capabilities.as_deref() {
                 score += score_domain_text(
@@ -1005,14 +1454,8 @@ fn compute_domain_scores(
                 &mut evidence,
             );
             for line in skill.body.lines().take(12) {
-                score += score_domain_text(
-                    domain,
-                    terms,
-                    line,
-                    0.8,
-                    &mut matched_terms,
-                    &mut evidence,
-                );
+                score +=
+                    score_domain_text(domain, terms, line, 0.8, &mut matched_terms, &mut evidence);
             }
         }
 
@@ -1037,7 +1480,11 @@ fn collect_agent_hints(
     agents: &[agents::CompanyAgentRow],
     domain_scores: &[YcBenchDomainScore],
 ) -> Vec<YcBenchAgentHint> {
-    let top_domains: Vec<String> = domain_scores.iter().take(3).map(|d| d.domain.clone()).collect();
+    let top_domains: Vec<String> = domain_scores
+        .iter()
+        .take(3)
+        .map(|d| d.domain.clone())
+        .collect();
     let top_terms: std::collections::BTreeMap<String, Vec<String>> = domain_scores
         .iter()
         .take(3)
@@ -1122,7 +1569,14 @@ fn build_yc_bench_controller_prompt(
     let top_domains = domain_scores
         .iter()
         .take(3)
-        .map(|d| format!("- {}: score {:.1}, matched {}", d.domain, d.score, d.matched_terms.join(", ")))
+        .map(|d| {
+            format!(
+                "- {}: score {:.1}, matched {}",
+                d.domain,
+                d.score,
+                d.matched_terms.join(", ")
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let top_agents = agents
@@ -1369,7 +1823,15 @@ fn company_os_api_catalog_endpoints() -> Value {
     json!([
         { "scope": "company", "methods": ["GET", "PATCH", "DELETE"], "path": "/api/company/companies/{company_id}?confirm_slug=", "summary": "Company record; PATCH updates context_markdown, display_name, hsmii_home; DELETE removes workspace and cascades (confirm_slug must match slug)" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/api-catalog", "summary": "Discovery: this list + company" },
-        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/import-paperclip-home", "summary": "Import Paperclip pack agents from hsmii_home/agents and skills index into context" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/import-paperclip-home", "summary": "Import pack agents + nested skills/**/SKILL.md; merges HSM_SKILL_EXTERNAL_DIRS (e.g. hermes-agent/skills) then pack overrides by slug" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/workspace/list?path=", "summary": "List files/dirs under hsmii_home (relative path); Paperclip pack browser" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/workspace/mkdir", "summary": "Create directory tree JSON body { path } under hsmii_home (mkdir -p)" },
+        { "scope": "company", "methods": ["GET", "PUT", "DELETE"], "path": "/api/company/companies/{company_id}/workspace/file?path=", "summary": "Read, write, or delete a regular file under hsmii_home (relative path)" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/workspace/file/delete", "summary": "Delete file JSON body { path } — use when DELETE returns 405 via proxy" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/sync/paperclip-goals", "summary": "Upsert in-memory Paperclip goals into Postgres goals (paperclip_goal_id); optional JSON body { goals }" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/sync/paperclip-dris", "summary": "Upsert Paperclip dri_registry into dri_assignments; optional JSON body { dris }" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/dri-assignments", "summary": "List / create org-level DRI assignments" },
+        { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/dri-assignments/{row_id}", "summary": "Update or delete a DRI assignment row" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills", "summary": "Imported skill templates saved from pack skills/<slug>/SKILL.md files" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/yc-bench-profile", "summary": "Deterministic YC-Bench controller profile derived from company context, workforce agents, and imported skills" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/export", "summary": "Export bundle JSON" },
@@ -1379,7 +1841,18 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/policies/evaluate", "summary": "Evaluate policy for an action" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/goals", "summary": "Goals tree" },
         { "scope": "company", "methods": ["PATCH"], "path": "/api/company/companies/{company_id}/goals/{goal_id}", "summary": "Update goal" },
-        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/tasks", "summary": "List / create tasks" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/intelligence/summary", "summary": "Per-company intelligence: goals/tasks/spend/workforce + workflow feed (governance_events)" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/projects", "summary": "Paperclip-style project containers for tasks" },
+        { "scope": "company", "methods": ["PATCH"], "path": "/api/company/companies/{company_id}/projects/{project_id}", "summary": "Update project" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/agent-runs", "summary": "List / create agent execution runs (optional external_run_id idempotency)" },
+        { "scope": "company", "methods": ["GET", "PATCH"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}", "summary": "Get run + feedback timeline; patch status/summary/meta" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}/feedback", "summary": "Append human feedback on a run (optional step_index)" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}/feedback/{event_id}/promote-task", "summary": "Create a task from feedback; sets spawned_task_id on the event" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/memory", "summary": "Company shared / agent-scoped memory pool (FTS + ILIKE when q= set)" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/export.md", "summary": "Export shared memories as SHARED_MEMORY_INDEX.md markdown" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/{memory_id}/delete", "summary": "Delete memory entry (POST alias when DELETE is blocked)" },
+        { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/memory/{memory_id}", "summary": "Update or delete memory entry" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/tasks", "summary": "List / create tasks (optional capability_refs[])" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/tasks/queue", "summary": "Filtered task queue (tabs)" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/spawn-rules", "summary": "Spawn rules" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/tasks/{task_id}/spawn-subagents", "summary": "Spawn subtasks from rules" },
@@ -1389,13 +1862,17 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/go-live-checklist/seed", "summary": "Seed checklist items" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/agents", "summary": "Workforce agents registry" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/org", "summary": "Org chart" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/agents/{agent_id}/inventory", "summary": "Agent roster skill refs, resolved company_skills, full company skill catalog, Markdown instruction files under agents/<name>/" },
         { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/agents/{agent_id}", "summary": "Update or delete agent row (delete clears direct reports’ manager link)" },
+        { "scope": "task", "methods": ["PATCH"], "path": "/api/company/tasks/{task_id}/context", "summary": "Task specification, workspace_attachment_paths, capability_refs (skill/sop/tool/pack/agent links)" },
         { "scope": "task", "methods": ["PATCH"], "path": "/api/company/tasks/{task_id}/sla", "summary": "Task SLA fields" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/decision", "summary": "Policy decision on task" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/requires-human", "summary": "Set or clear requires_human (human inbox)" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/checkout", "summary": "Lease task to an agent ref" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/release", "summary": "Release checkout" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/run-telemetry", "summary": "Append run snapshot / log tail" },
-        { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context_markdown + workforce agent profile" },
+        { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/stigmergic-note", "summary": "Append task handoff note (context_notes); shown in llm-context" },
+        { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context + shared memories + task spec/attachments + agent profile" },
         { "scope": "global", "methods": ["GET"], "path": "/api/company/health", "summary": "Postgres connectivity" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/import", "summary": "Import company bundle" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/{handoff_id}/review", "summary": "Review handoff" },
@@ -1576,6 +2053,8 @@ struct GoalRow {
     title: String,
     description: Option<String>,
     status: String,
+    paperclip_goal_id: Option<String>,
+    paperclip_snapshot: SqlxJson<Value>,
     created_at: String,
 }
 
@@ -1587,7 +2066,7 @@ async fn list_goals(
         return Err(no_db());
     };
     let rows = sqlx::query_as::<_, GoalRow>(
-        r#"SELECT id, company_id, parent_goal_id, title, description, status, created_at::text
+        r#"SELECT id, company_id, parent_goal_id, title, description, status, paperclip_goal_id, paperclip_snapshot, created_at::text
            FROM goals WHERE company_id = $1 ORDER BY sort_order, created_at"#,
     )
     .bind(company_id)
@@ -1650,7 +2129,7 @@ async fn create_goal(
     let row = sqlx::query_as::<_, GoalRow>(
         r#"INSERT INTO goals (company_id, parent_goal_id, title, description)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, company_id, parent_goal_id, title, description, status, created_at::text"#,
+           RETURNING id, company_id, parent_goal_id, title, description, status, paperclip_goal_id, paperclip_snapshot, created_at::text"#,
     )
     .bind(company_id)
     .bind(&body.parent_goal_id)
@@ -1704,13 +2183,16 @@ pub(super) async fn next_task_display_number_tx(
 }
 
 #[derive(sqlx::FromRow, Serialize)]
-struct TaskRow {
+pub(super) struct TaskRow {
     id: Uuid,
     company_id: Uuid,
     primary_goal_id: Option<Uuid>,
+    project_id: Option<Uuid>,
     goal_ancestry: Value,
     title: String,
     specification: Option<String>,
+    workspace_attachment_paths: Value,
+    capability_refs: SqlxJson<Value>,
     state: String,
     owner_persona: Option<String>,
     parent_task_id: Option<Uuid>,
@@ -1719,6 +2201,7 @@ struct TaskRow {
     checked_out_until: Option<chrono::DateTime<chrono::Utc>>,
     priority: i32,
     display_number: i32,
+    requires_human: bool,
     created_at: String,
 }
 
@@ -1921,6 +2404,21 @@ async fn post_task_run_telemetry(
         )
     })?;
 
+    if matches!(body.run_status.as_deref(), Some("success") | Some("error")) {
+        let _ = sqlx::query(
+            r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+               VALUES ($1, 'run_telemetry', 'task_run_terminal', 'task', $2, $3, 'info')"#,
+        )
+        .bind(company_id)
+        .bind(task_id.to_string())
+        .bind(SqlxJson(json!({
+            "run_status": updated.run_status,
+            "tool_calls": updated.tool_calls,
+        })))
+        .execute(pool)
+        .await;
+    }
+
     Ok(Json(json!({
         "run": {
             "status": updated.run_status,
@@ -1932,6 +2430,86 @@ async fn post_task_run_telemetry(
     })))
 }
 
+const MAX_STIGMERGIC_NOTES: usize = 100;
+
+#[derive(Deserialize)]
+struct PostStigmergicNoteBody {
+    text: String,
+    #[serde(default)]
+    actor: String,
+}
+
+/// Append a short handoff note on the task (`context_notes`); merged into `llm-context` for the next assignee.
+async fn post_task_stigmergic_note(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PostStigmergicNoteBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let text = body.text.trim();
+    if text.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text required" })),
+        ));
+    }
+    let actor = body.actor.trim();
+    let actor = if actor.is_empty() {
+        "operator".to_string()
+    } else {
+        actor.to_string()
+    };
+
+    let row =
+        sqlx::query_as::<_, (SqlxJson<Value>,)>("SELECT context_notes FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?;
+    let Some((SqlxJson(notes_val_raw),)) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+
+    let mut arr = match notes_val_raw {
+        Value::Array(a) => a,
+        _ => Vec::new(),
+    };
+    arr.push(json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "actor": actor,
+        "text": text,
+    }));
+    if arr.len() > MAX_STIGMERGIC_NOTES {
+        let drop = arr.len() - MAX_STIGMERGIC_NOTES;
+        arr = arr.split_off(drop);
+    }
+    let new_notes = Value::Array(arr);
+
+    sqlx::query("UPDATE tasks SET context_notes = $2, updated_at = NOW() WHERE id = $1")
+        .bind(task_id)
+        .bind(SqlxJson(new_notes.clone()))
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok(Json(json!({ "ok": true, "context_notes": new_notes })))
+}
+
 async fn list_tasks(
     State(st): State<ConsoleState>,
     Path(company_id): Path<Uuid>,
@@ -1940,8 +2518,8 @@ async fn list_tasks(
         return Err(no_db());
     };
     let rows = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text
+        r#"SELECT id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text
            FROM tasks WHERE company_id = $1 ORDER BY priority DESC, created_at"#,
     )
     .bind(company_id)
@@ -1997,14 +2575,95 @@ struct CreateTaskBody {
     title: String,
     #[serde(default)]
     specification: Option<String>,
+    /// Paths relative to company `hsmii_home` workspace (Paperclip-style pointers).
+    #[serde(default)]
+    workspace_attachment_paths: Option<Vec<String>>,
+    /// Links to skills, SOPs, tools, packs, or agent templates: strings or `{ "kind", "ref" }`.
+    #[serde(default)]
+    capability_refs: Option<Vec<Value>>,
     #[serde(default)]
     primary_goal_id: Option<Uuid>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
     #[serde(default)]
     owner_persona: Option<String>,
     #[serde(default)]
     parent_task_id: Option<Uuid>,
     #[serde(default)]
     spawned_by_rule_id: Option<Uuid>,
+}
+
+pub(super) fn workspace_attachment_paths_json(paths: Option<Vec<String>>) -> Value {
+    let arr: Vec<Value> = paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(Value::String)
+        .collect();
+    Value::Array(arr)
+}
+
+const MAX_CAPABILITY_REFS: usize = 32;
+const MAX_CAPABILITY_REF_LEN: usize = 256;
+
+/// Normalize task capability links: strings become `{ kind: skill, ref }`; objects require `ref` and optional `kind`.
+pub(super) fn normalize_capability_refs(raw: Option<Vec<Value>>) -> Result<Value, String> {
+    let Some(items) = raw else {
+        return Ok(json!([]));
+    };
+    if items.len() > MAX_CAPABILITY_REFS {
+        return Err(format!(
+            "capability_refs: at most {MAX_CAPABILITY_REFS} entries"
+        ));
+    }
+    let mut out: Vec<Value> = Vec::new();
+    for (i, v) in items.into_iter().enumerate() {
+        let obj = match v {
+            Value::String(s) => {
+                let r = s.trim();
+                if r.is_empty() {
+                    return Err(format!("capability_refs[{i}]: empty string"));
+                }
+                if r.len() > MAX_CAPABILITY_REF_LEN {
+                    return Err(format!("capability_refs[{i}]: ref too long"));
+                }
+                json!({ "kind": "skill", "ref": r })
+            }
+            Value::Object(map) => {
+                let ref_v = map
+                    .get("ref")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let Some(r) = ref_v else {
+                    return Err(format!("capability_refs[{i}]: missing ref"));
+                };
+                if r.len() > MAX_CAPABILITY_REF_LEN {
+                    return Err(format!("capability_refs[{i}]: ref too long"));
+                }
+                let kind = map
+                    .get("kind")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("skill")
+                    .to_ascii_lowercase();
+                if !matches!(
+                    kind.as_str(),
+                    "skill" | "sop" | "tool" | "pack" | "agent" | "ticket" | "mode"
+                ) {
+                    return Err(format!(
+                        "capability_refs[{i}]: kind must be skill|sop|tool|pack|agent|ticket|mode"
+                    ));
+                }
+                json!({ "kind": kind, "ref": r })
+            }
+            _ => return Err(format!("capability_refs[{i}]: expected string or object")),
+        };
+        out.push(obj);
+    }
+    Ok(Value::Array(out))
 }
 
 async fn compute_goal_ancestry(
@@ -2117,6 +2776,30 @@ async fn create_task(
         ancestry_json = serde_json::to_value(&chain).unwrap_or(json!([]));
     }
 
+    let mut project_uuid: Option<Uuid> = None;
+    if let Some(pid) = body.project_id {
+        let ok = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND company_id = $2)",
+        )
+        .bind(pid)
+        .bind(company_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        if !ok {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "project_id not in company" })),
+            ));
+        }
+        project_uuid = Some(pid);
+    }
+
     let mut tx = pool.begin().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2131,17 +2814,23 @@ async fn create_task(
                 Json(json!({ "error": e.to_string() })),
             )
         })?;
+    let ws_json = workspace_attachment_paths_json(body.workspace_attachment_paths.clone());
+    let caps_json = normalize_capability_refs(body.capability_refs.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, owner_persona, parent_task_id, spawned_by_rule_id, display_number)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
+        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, owner_persona, parent_task_id, spawned_by_rule_id, display_number)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
     .bind(company_id)
     .bind(&body.primary_goal_id)
+    .bind(project_uuid)
     .bind(SqlxJson(ancestry_json))
     .bind(&title)
     .bind(&body.specification)
+    .bind(SqlxJson(ws_json))
+    .bind(SqlxJson(caps_json))
     .bind(&body.owner_persona)
     .bind(&body.parent_task_id)
     .bind(&body.spawned_by_rule_id)
@@ -2160,7 +2849,192 @@ async fn create_task(
             Json(json!({ "error": e.to_string() })),
         )
     })?;
+
+    let actor = row
+        .owner_persona
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("company_os");
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, $2, 'task_created', 'task', $3, $4, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(actor)
+    .bind(row.id.to_string())
+    .bind(SqlxJson(json!({
+        "title": row.title,
+        "owner_persona": row.owner_persona,
+        "primary_goal_id": row.primary_goal_id,
+        "parent_task_id": row.parent_task_id,
+        "display_number": row.display_number,
+        "capability_refs": row.capability_refs.0,
+    })))
+    .execute(pool)
+    .await;
+
     Ok((StatusCode::CREATED, Json(json!({ "task": row }))))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct ProjectRow {
+    id: Uuid,
+    company_id: Uuid,
+    title: String,
+    description: Option<String>,
+    status: String,
+    sort_order: i32,
+    created_at: String,
+    updated_at: String,
+}
+
+async fn list_projects(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, ProjectRow>(
+        r#"SELECT id, company_id, title, description, status, sort_order, created_at::text, updated_at::text
+           FROM projects WHERE company_id = $1 ORDER BY sort_order, created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "projects": rows })))
+}
+
+#[derive(Deserialize)]
+struct CreateProjectBody {
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    sort_order: Option<i32>,
+}
+
+async fn create_project(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateProjectBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "title required" })),
+        ));
+    }
+    let status = body
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("active");
+    let sort_order = body.sort_order.unwrap_or(0);
+    let row = sqlx::query_as::<_, ProjectRow>(
+        r#"INSERT INTO projects (company_id, title, description, status, sort_order)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, company_id, title, description, status, sort_order, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(&title)
+    .bind(&body.description)
+    .bind(status)
+    .bind(sort_order)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok((StatusCode::CREATED, Json(json!({ "project": row }))))
+}
+
+#[derive(Deserialize, Default)]
+struct PatchProjectBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    sort_order: Option<i32>,
+}
+
+async fn patch_project(
+    State(st): State<ConsoleState>,
+    Path((company_id, project_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<PatchProjectBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND company_id = $2)",
+    )
+    .bind(project_id)
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    if !exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "project not found" })),
+        ));
+    }
+    let title_upd = body
+        .title
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let row = sqlx::query_as::<_, ProjectRow>(
+        r#"UPDATE projects SET
+            title = COALESCE($3, title),
+            description = COALESCE($4, description),
+            status = COALESCE($5, status),
+            sort_order = COALESCE($6, sort_order),
+            updated_at = NOW()
+           WHERE id = $1 AND company_id = $2
+           RETURNING id, company_id, title, description, status, sort_order, created_at::text, updated_at::text"#,
+    )
+    .bind(project_id)
+    .bind(company_id)
+    .bind(title_upd)
+    .bind(body.description.as_ref())
+    .bind(body.status.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
+    .bind(body.sort_order)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "project": row })))
 }
 
 #[derive(Deserialize, Default)]
@@ -2233,6 +3107,89 @@ async fn patch_task_sla(
 }
 
 #[derive(Deserialize, Default)]
+struct PatchTaskContextBody {
+    #[serde(default)]
+    specification: Option<String>,
+    #[serde(default)]
+    workspace_attachment_paths: Option<Vec<String>>,
+    #[serde(default)]
+    capability_refs: Option<Vec<Value>>,
+}
+
+async fn patch_task_context(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PatchTaskContextBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.specification.is_none()
+        && body.workspace_attachment_paths.is_none()
+        && body.capability_refs.is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({ "error": "specification, workspace_attachment_paths, or capability_refs required" }),
+            ),
+        ));
+    }
+    let ws_bind: Option<SqlxJson<Value>> = body
+        .workspace_attachment_paths
+        .as_ref()
+        .map(|p| SqlxJson(workspace_attachment_paths_json(Some(p.clone()))));
+    let caps_bind: Option<SqlxJson<Value>> = if let Some(ref c) = body.capability_refs {
+        Some(SqlxJson(
+            normalize_capability_refs(Some(c.clone()))
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?,
+        ))
+    } else {
+        None
+    };
+    let row = sqlx::query_as::<_, TaskRow>(
+        r#"UPDATE tasks SET
+            specification = COALESCE($2, specification),
+            workspace_attachment_paths = COALESCE($3, workspace_attachment_paths),
+            capability_refs = COALESCE($4, capability_refs),
+            updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+    )
+    .bind(task_id)
+    .bind(body.specification.as_deref())
+    .bind(ws_bind)
+    .bind(caps_bind)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(task) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+    if body.capability_refs.is_some() {
+        let _ = sqlx::query(
+            r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+               VALUES ($1, 'task_context_patch', 'task_capability_refs_updated', 'task', $2, $3, 'info')"#,
+        )
+        .bind(task.company_id)
+        .bind(task_id.to_string())
+        .bind(SqlxJson(json!({ "capability_refs": task.capability_refs.0 })))
+        .execute(pool)
+        .await;
+    }
+    Ok(Json(json!({ "task": task })))
+}
+
+#[derive(Deserialize, Default)]
 struct TaskQueueQuery {
     #[serde(default)]
     view: Option<String>,
@@ -2250,6 +3207,7 @@ struct QueueTaskRow {
     checked_out_by: Option<String>,
     decision_mode: String,
     created_at: String,
+    requires_human: bool,
 }
 
 async fn list_task_queue(
@@ -2273,9 +3231,11 @@ async fn list_task_queue(
                       CASE
                         WHEN state = 'blocked' THEN 'blocked'
                         WHEN state = 'waiting_admin' THEN 'admin_required'
+                        WHEN requires_human THEN 'admin_required'
                         ELSE 'auto'
                       END AS decision_mode,
-                      created_at::text
+                      created_at::text,
+                      requires_human
                FROM tasks
                WHERE company_id = $1
                  AND due_at IS NOT NULL
@@ -2288,9 +3248,11 @@ async fn list_task_queue(
                       CASE
                         WHEN state = 'blocked' THEN 'blocked'
                         WHEN state = 'waiting_admin' THEN 'admin_required'
+                        WHEN requires_human THEN 'admin_required'
                         ELSE 'auto'
                       END AS decision_mode,
-                      created_at::text
+                      created_at::text,
+                      requires_human
                FROM tasks
                WHERE company_id = $1
                  AND escalate_after IS NOT NULL
@@ -2301,7 +3263,8 @@ async fn list_task_queue(
         "waiting_admin" | "pending_approvals" => {
             r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
                       'admin_required' AS decision_mode,
-                      created_at::text
+                      created_at::text,
+                      requires_human
                FROM tasks
                WHERE company_id = $1
                  AND state = 'waiting_admin'
@@ -2310,10 +3273,27 @@ async fn list_task_queue(
         "blocked" => {
             r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
                       'blocked' AS decision_mode,
-                      created_at::text
+                      created_at::text,
+                      requires_human
                FROM tasks
                WHERE company_id = $1
                  AND state = 'blocked'
+               ORDER BY priority DESC, created_at"#
+        }
+        "human_inbox" => {
+            r#"SELECT id, company_id, title, state, priority, due_at, escalate_after, checked_out_by,
+                      CASE
+                        WHEN state = 'blocked' THEN 'blocked'
+                        WHEN state = 'waiting_admin' THEN 'admin_required'
+                        WHEN requires_human THEN 'admin_required'
+                        ELSE 'auto'
+                      END AS decision_mode,
+                      created_at::text,
+                      requires_human
+               FROM tasks
+               WHERE company_id = $1
+                 AND state NOT IN ('done','closed','cancelled')
+                 AND (requires_human OR state IN ('waiting_admin','blocked'))
                ORDER BY priority DESC, created_at"#
         }
         _ => {
@@ -2321,9 +3301,11 @@ async fn list_task_queue(
                       CASE
                         WHEN state = 'blocked' THEN 'blocked'
                         WHEN state = 'waiting_admin' THEN 'admin_required'
+                        WHEN requires_human THEN 'admin_required'
                         ELSE 'auto'
                       END AS decision_mode,
-                      created_at::text
+                      created_at::text,
+                      requires_human
                FROM tasks
                WHERE company_id = $1
                ORDER BY priority DESC, created_at"#
@@ -2387,10 +3369,11 @@ async fn post_task_decision(
         r#"UPDATE tasks SET
             state = $2,
             status_reason = $3,
+            requires_human = CASE WHEN $2 = 'in_progress' THEN FALSE ELSE requires_human END,
             updated_at = NOW()
            WHERE id = $1
-           RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
     .bind(task_id)
     .bind(next_state)
@@ -2468,6 +3451,76 @@ async fn post_task_decision(
 }
 
 #[derive(Deserialize)]
+struct PostRequiresHumanBody {
+    requires_human: bool,
+    #[serde(default)]
+    actor: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Agents (or operators) set `requires_human` so the item appears in the Paperclip-style human inbox.
+async fn post_task_requires_human(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PostRequiresHumanBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let reason = body.reason.trim();
+    let task = sqlx::query_as::<_, TaskRow>(
+        r#"UPDATE tasks SET
+            requires_human = $2,
+            status_reason = CASE
+              WHEN $3 = '' THEN status_reason
+              ELSE COALESCE(status_reason, '') || ' | human_queue:' || $3
+            END,
+            updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+    )
+    .bind(task_id)
+    .bind(body.requires_human)
+    .bind(reason)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(task) = task else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+    let actor = if body.actor.trim().is_empty() {
+        "agent"
+    } else {
+        body.actor.trim()
+    };
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, $2, 'task_requires_human', 'task', $3, $4, 'info')"#,
+    )
+    .bind(task.company_id)
+    .bind(actor)
+    .bind(task_id.to_string())
+    .bind(SqlxJson(json!({
+        "requires_human": body.requires_human,
+        "reason": reason,
+    })))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({ "task": task })))
+}
+
+#[derive(Deserialize)]
 struct CheckoutBody {
     agent_ref: String,
     #[serde(default = "default_ttl")]
@@ -2493,6 +3546,23 @@ async fn checkout_task(
             Json(json!({ "error": "agent_ref required" })),
         ));
     }
+    let company_id: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    let Some(company_id) = company_id else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+    enforce_runtime_budget_stop(pool, company_id, &agent).await?;
     let row = sqlx::query_as::<_, TaskRow>(
         r#"UPDATE tasks SET
             checked_out_by = $1,
@@ -2501,8 +3571,8 @@ async fn checkout_task(
             updated_at = NOW()
            WHERE id = $3
              AND (checked_out_by IS NULL OR checked_out_until < NOW())
-           RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
     .bind(&agent)
     .bind(body.ttl_sec)
@@ -2600,8 +3670,8 @@ async fn release_task(
             checked_out_until = NULL,
             updated_at = NOW()
            WHERE id = $1
-           RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -2769,8 +3839,8 @@ async fn spawn_subagent_tasks(
         return Err(no_db());
     };
     let parent = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
-                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text
+        r#"SELECT id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona,
+                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text
            FROM tasks WHERE id = $1 AND company_id = $2"#,
     )
     .bind(task_id)
@@ -2884,16 +3954,19 @@ async fn spawn_subagent_tasks(
             let title = format!("{} · {} #{:02}", parent.title, r.subagent_persona, i + 1);
             let row = sqlx::query_as::<_, TaskRow>(
                 r#"INSERT INTO tasks
-                   (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, parent_task_id, spawned_by_rule_id, priority, display_number)
-                   VALUES ($1,$2,$3,$4,$5,'open',$6,$7,$8,$9,$10)
-                   RETURNING id, company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona,
-                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, created_at::text"#,
+                   (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona, parent_task_id, spawned_by_rule_id, priority, display_number)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10,$11,$12,$13)
+                   RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona,
+                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
             )
             .bind(company_id)
             .bind(parent.primary_goal_id)
+            .bind(parent.project_id)
             .bind(SqlxJson(parent.goal_ancestry.clone()))
             .bind(title)
             .bind(parent.specification.clone())
+            .bind(SqlxJson(parent.workspace_attachment_paths.clone()))
+            .bind(SqlxJson(parent.capability_refs.0.clone()))
             .bind(r.subagent_persona.clone())
             .bind(task_id)
             .bind(r.id)
@@ -3869,7 +4942,7 @@ async fn patch_goal(
             sort_order = COALESCE($7, sort_order),
             updated_at = NOW()
            WHERE id = $1 AND company_id = $2
-           RETURNING id, company_id, parent_goal_id, title, description, status, created_at::text"#,
+           RETURNING id, company_id, parent_goal_id, title, description, status, paperclip_goal_id, paperclip_snapshot, created_at::text"#,
     )
     .bind(goal_id)
     .bind(company_id)
@@ -3900,6 +4973,137 @@ struct GovRow {
     subject_id: String,
     payload: SqlxJson<Value>,
     created_at: String,
+}
+
+/// Single read model for workspace Intelligence: Postgres company_os only (goals + tasks + spend + workforce + workflow signals).
+async fn company_intelligence_summary(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+
+    let (goals_total, goals_active): (i64, i64) = sqlx::query_as(
+        r#"SELECT COUNT(*)::bigint,
+                  COUNT(*) FILTER (WHERE lower(trim(status)) IN ('active', 'open'))::bigint
+           FROM goals WHERE company_id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let (
+        tasks_total,
+        tasks_open,
+        tasks_in_progress,
+        tasks_done,
+        tasks_requires_human,
+        tasks_checked_out,
+    ): (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT
+            COUNT(*)::bigint,
+            COUNT(*) FILTER (WHERE state = 'open')::bigint,
+            COUNT(*) FILTER (WHERE state = 'in_progress')::bigint,
+            COUNT(*) FILTER (WHERE state IN ('done', 'closed'))::bigint,
+            COUNT(*) FILTER (
+              WHERE requires_human = true
+                AND state NOT IN ('done', 'closed', 'cancelled')
+            )::bigint,
+            COUNT(*) FILTER (
+              WHERE checked_out_by IS NOT NULL
+                AND (checked_out_until IS NULL OR checked_out_until > NOW())
+            )::bigint
+           FROM tasks WHERE company_id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let workforce_agents: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM company_agents
+           WHERE company_id = $1 AND lower(trim(status)) <> 'terminated'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let spend_total: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::float8 FROM spend_events WHERE company_id = $1",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let workflow_feed = sqlx::query_as::<_, GovRow>(
+        r#"SELECT id, actor, action, subject_type, subject_id, payload, created_at::text
+           FROM governance_events
+           WHERE company_id = $1
+             AND action IN (
+               'task_created',
+               'task_checkout_agent_profile',
+               'release_checkout',
+               'task_requires_human',
+               'task_spawn_subagents',
+               'task_policy_decision',
+               'task_run_terminal',
+               'task_capability_refs_updated',
+               'paperclip_goals_synced',
+               'paperclip_dris_synced'
+             )
+           ORDER BY created_at DESC
+           LIMIT 100"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "company_id": company_id,
+        "source": "postgres_company_os",
+        "goals": { "total": goals_total, "active": goals_active },
+        "tasks": {
+            "total": tasks_total,
+            "open": tasks_open,
+            "in_progress": tasks_in_progress,
+            "done_or_closed": tasks_done,
+            "requires_human_open": tasks_requires_human,
+            "checked_out_now": tasks_checked_out,
+        },
+        "workforce": { "agents_non_terminated": workforce_agents },
+        "spend": { "total_usd": spend_total },
+        "workflow_feed": workflow_feed,
+    })))
 }
 
 #[derive(sqlx::FromRow, Serialize)]
@@ -4206,6 +5410,560 @@ async fn spend_summary(
         "company_id": company_id,
         "by_kind": rows.iter().map(|(k, a)| json!({ "kind": k, "amount_usd": a })).collect::<Vec<_>>(),
         "total_usd": total,
+    })))
+}
+
+struct LoadedOpsOverview {
+    path: Option<String>,
+    error: Option<String>,
+    summary: Value,
+    org: Value,
+    heartbeats: Value,
+    tickets: Value,
+    config: Option<crate::personal::ops_config::OperationsConfig>,
+}
+
+fn load_company_ops_overview(hsmii_home: Option<&str>) -> LoadedOpsOverview {
+    let Some(home_str) = hsmii_home.map(str::trim).filter(|s| !s.is_empty()) else {
+        return LoadedOpsOverview {
+            path: None,
+            error: Some("company has no hsmii_home configured".to_string()),
+            summary: Value::Null,
+            org: Value::Null,
+            heartbeats: Value::Null,
+            tickets: Value::Null,
+            config: None,
+        };
+    };
+    let home = StdPath::new(home_str);
+    let path = resolve_ops_config_path(home);
+    let path_string = path.display().to_string();
+    if !path.is_file() {
+        return LoadedOpsOverview {
+            path: Some(path_string),
+            error: Some("operations config not found".to_string()),
+            summary: Value::Null,
+            org: Value::Null,
+            heartbeats: Value::Null,
+            tickets: Value::Null,
+            config: None,
+        };
+    }
+    match load_ops_config(&path).and_then(|cfg| {
+        cfg.validate()?;
+        Ok(cfg)
+    }) {
+        Ok(cfg) => LoadedOpsOverview {
+            path: Some(path_string),
+            error: None,
+            summary: cfg.summary_without_tickets(),
+            org: serde_json::to_value(&cfg.org).unwrap_or(Value::Null),
+            heartbeats: serde_json::to_value(&cfg.heartbeats).unwrap_or(Value::Null),
+            tickets: serde_json::to_value(&cfg.tickets).unwrap_or(Value::Null),
+            config: Some(cfg),
+        },
+        Err(e) => LoadedOpsOverview {
+            path: Some(path_string),
+            error: Some(e.to_string()),
+            summary: Value::Null,
+            org: Value::Null,
+            heartbeats: Value::Null,
+            tickets: Value::Null,
+            config: None,
+        },
+    }
+}
+
+async fn enforce_runtime_budget_stop(
+    pool: &PgPool,
+    company_id: Uuid,
+    agent_ref: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let company_home: Option<String> =
+        sqlx::query_scalar("SELECT hsmii_home FROM companies WHERE id = $1")
+            .bind(company_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?
+            .flatten();
+    let ops = load_company_ops_overview(company_home.as_deref());
+    let Some(cfg) = ops.config else {
+        return Ok(());
+    };
+    if cfg.budgets.is_empty() {
+        return Ok(());
+    }
+    let spend_total: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::float8 FROM spend_events WHERE company_id = $1",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0.0);
+    let spend_by_agent: Vec<(String, f64)> = sqlx::query_as(
+        r#"SELECT agent_ref, COALESCE(SUM(amount), 0)::float8
+           FROM spend_events WHERE company_id = $1 GROUP BY agent_ref"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for budget in cfg.budgets {
+        if !budget.hard_stop || budget.cap_monthly <= 0.0 {
+            continue;
+        }
+        let usage = match budget.scope {
+            BudgetScope::Company => Some(spend_total),
+            BudgetScope::Role => budget.role_id.as_ref().and_then(|rid| {
+                if rid == agent_ref {
+                    spend_by_agent
+                        .iter()
+                        .find_map(|(ref_name, amount)| (ref_name == agent_ref).then_some(*amount))
+                } else {
+                    None
+                }
+            }),
+        };
+        if let Some(used) = usage {
+            if used >= budget.cap_monthly {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "hard_stop budget exceeded",
+                        "budget_id": budget.id,
+                        "scope": budget.scope,
+                        "role_id": budget.role_id,
+                        "usage_usd": used,
+                        "cap_monthly_usd": budget.cap_monthly,
+                        "agent_ref": agent_ref,
+                    })),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn mirror_ops_tickets_to_tasks(
+    pool: &PgPool,
+    company_id: Uuid,
+    tickets: &[Ticket],
+) -> Result<Value, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    for ticket in tickets {
+        let ticket_id = ticket.id.trim();
+        let title = ticket.title.trim();
+        if ticket_id.is_empty() || title.is_empty() {
+            continue;
+        }
+        let capability = json!([{ "kind": "ticket", "ref": ticket_id }]);
+        let spec = format!(
+            "operations ticket mirror\nrequester_role={}\nstate={}\nbudget_ticket_usd={}\ndelegated_to={}",
+            ticket.requester_role,
+            ticket.state,
+            ticket
+                .budget_ticket_usd
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into()),
+            ticket.delegated_to.clone().unwrap_or_default()
+        );
+        let desired_state = match ticket.state.trim().to_ascii_lowercase().as_str() {
+            "done" | "closed" | "cancelled" => "done",
+            "blocked" => "blocked",
+            "waiting_admin" | "admin_required" => "waiting_admin",
+            "in_progress" => "in_progress",
+            _ => "open",
+        };
+        let existing: Option<(Uuid, String)> = sqlx::query_as(
+            r#"SELECT id, state
+               FROM tasks
+               WHERE company_id = $1
+                 AND capability_refs @> $2::jsonb
+               ORDER BY created_at DESC
+               LIMIT 1"#,
+        )
+        .bind(company_id)
+        .bind(SqlxJson(capability.clone()))
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((task_id, current_state)) = existing {
+            let next_state = if matches!(current_state.as_str(), "done" | "closed" | "cancelled") {
+                current_state
+            } else {
+                desired_state.to_string()
+            };
+            sqlx::query(
+                r#"UPDATE tasks
+                   SET title = $2,
+                       specification = $3,
+                       owner_persona = $4,
+                       capability_refs = $5,
+                       state = $6,
+                       updated_at = NOW()
+                   WHERE id = $1"#,
+            )
+            .bind(task_id)
+            .bind(title)
+            .bind(&spec)
+            .bind(ticket.owner_role.trim())
+            .bind(SqlxJson(capability))
+            .bind(next_state)
+            .execute(&mut *tx)
+            .await?;
+            updated += 1;
+        } else {
+            let display_n = next_task_display_number_tx(&mut tx, company_id).await?;
+            sqlx::query(
+                r#"INSERT INTO tasks
+                   (company_id, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona, priority, display_number)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8)"#,
+            )
+            .bind(company_id)
+            .bind(title)
+            .bind(&spec)
+            .bind(SqlxJson(json!([])))
+            .bind(SqlxJson(capability))
+            .bind(desired_state)
+            .bind(ticket.owner_role.trim())
+            .bind(display_n)
+            .execute(&mut *tx)
+            .await?;
+            created += 1;
+        }
+    }
+    tx.commit().await?;
+    Ok(json!({
+        "configured_tickets": tickets.len(),
+        "created": created,
+        "updated": updated,
+    }))
+}
+
+struct AuditSummary {
+    available: bool,
+    payload: Value,
+}
+
+async fn load_company_audit_summary(hsmii_home: Option<&str>) -> AuditSummary {
+    let Some(home_str) = hsmii_home.map(str::trim).filter(|s| !s.is_empty()) else {
+        return AuditSummary {
+            available: false,
+            payload: json!({ "error": "company has no hsmii_home configured" }),
+        };
+    };
+    let path = StdPath::new(home_str)
+        .join("memory")
+        .join("task_trail.jsonl");
+    if !path.is_file() {
+        return AuditSummary {
+            available: false,
+            payload: json!({
+                "path": path.display().to_string(),
+                "error": "task_trail.jsonl not found",
+            }),
+        };
+    }
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(raw) => raw,
+        Err(e) => {
+            return AuditSummary {
+                available: false,
+                payload: json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            }
+        }
+    };
+    let mut turns = 0usize;
+    let mut tool_prompt_tokens = 0f64;
+    let mut skill_prompt_tokens = 0f64;
+    let mut exposed_tools = 0f64;
+    let mut hidden_tools = 0f64;
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        turns += 1;
+        tool_prompt_tokens += v
+            .get("tool_prompt_tokens")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                v.get("tool_prompt_tokens")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as f64)
+            })
+            .unwrap_or(0.0);
+        skill_prompt_tokens += v
+            .get("skill_prompt_tokens")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                v.get("skill_prompt_tokens")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as f64)
+            })
+            .unwrap_or(0.0);
+        exposed_tools += v
+            .get("tool_prompt_exposed_count")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                v.get("tool_prompt_exposed_count")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as f64)
+            })
+            .unwrap_or(0.0);
+        hidden_tools += v
+            .get("tool_prompt_hidden_count")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                v.get("tool_prompt_hidden_count")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as f64)
+            })
+            .unwrap_or(0.0);
+    }
+    let denom = if turns == 0 { 1.0 } else { turns as f64 };
+    AuditSummary {
+        available: turns > 0,
+        payload: json!({
+            "path": path.display().to_string(),
+            "turns": turns,
+            "avg_tool_prompt_tokens": tool_prompt_tokens / denom,
+            "avg_skill_prompt_tokens": skill_prompt_tokens / denom,
+            "avg_exposed_tools": exposed_tools / denom,
+            "avg_hidden_tools": hidden_tools / denom,
+        }),
+    }
+}
+
+async fn company_ops_overview(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let company = sqlx::query_as::<_, CompanyRow>(
+        r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
+                  context_markdown, created_at::text
+           FROM companies WHERE id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(company) = company else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
+    };
+
+    let goals_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM goals WHERE company_id = $1")
+        .bind(company_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let agents_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM company_agents WHERE company_id = $1 AND status <> 'terminated'",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let governance_recent: Vec<GovRow> = sqlx::query_as::<_, GovRow>(
+        r#"SELECT id, actor, action, subject_type, subject_id, payload, created_at::text
+           FROM governance_events WHERE company_id = $1 ORDER BY created_at DESC LIMIT 20"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let spend_rows: Vec<(String, f64)> = sqlx::query_as(
+        r#"SELECT kind, COALESCE(SUM(amount), 0)::float8
+           FROM spend_events WHERE company_id = $1 GROUP BY kind ORDER BY kind"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let spend_total_usd: f64 = spend_rows.iter().map(|(_, amount)| *amount).sum();
+    let spend_by_agent: Vec<(String, f64)> = sqlx::query_as(
+        r#"SELECT agent_ref, COALESCE(SUM(amount), 0)::float8
+           FROM spend_events WHERE company_id = $1 GROUP BY agent_ref ORDER BY agent_ref"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let ops = load_company_ops_overview(company.hsmii_home.as_deref());
+    let ticket_sync = if let Some(cfg) = ops.config.as_ref() {
+        mirror_ops_tickets_to_tasks(pool, company_id, &cfg.tickets)
+            .await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }))
+    } else {
+        json!({ "skipped": true, "reason": "operations config unavailable" })
+    };
+    let tasks_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE company_id = $1")
+        .bind(company_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let tasks_open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE company_id = $1 AND state NOT IN ('done','closed','cancelled')",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let tasks_requires_human: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE company_id = $1 AND requires_human = true AND state NOT IN ('done','closed','cancelled')",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let audit = load_company_audit_summary(company.hsmii_home.as_deref()).await;
+    let heartbeat_runtime = if let Some(home_str) = company
+        .hsmii_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let state_path = heartbeat_state_path(StdPath::new(home_str));
+        match load_heartbeat_state(&state_path) {
+            Ok(state) => serde_json::to_value(state).unwrap_or(Value::Null),
+            Err(e) => json!({
+                "path": state_path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        }
+    } else {
+        Value::Null
+    };
+
+    let budgets = match ops.config.as_ref() {
+        Some(cfg) => cfg
+            .budgets
+            .iter()
+            .map(|b| {
+                let usage_usd = match b.scope {
+                    BudgetScope::Company => Some(spend_total_usd),
+                    BudgetScope::Role => b.role_id.as_ref().and_then(|rid| {
+                        spend_by_agent
+                            .iter()
+                            .find_map(|(agent_ref, amount)| (agent_ref == rid).then_some(*amount))
+                    }),
+                };
+                let utilization = usage_usd.map(|used| {
+                    if b.cap_monthly <= 0.0 {
+                        0.0
+                    } else {
+                        (used / b.cap_monthly).max(0.0)
+                    }
+                });
+                json!({
+                    "id": b.id,
+                    "scope": b.scope,
+                    "role_id": b.role_id,
+                    "kind": b.kind,
+                    "cap_monthly": b.cap_monthly,
+                    "hard_stop": b.hard_stop,
+                    "usage_usd": usage_usd,
+                    "utilization": utilization,
+                    "over_cap": utilization.map(|u| u >= 1.0),
+                    "enforcement_ready": matches!(b.scope, BudgetScope::Company) || usage_usd.is_some(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+
+    Ok(Json(json!({
+        "company": company,
+        "ops_config": {
+            "loaded": ops.config.is_some(),
+            "path": ops.path,
+            "error": ops.error,
+            "summary": ops.summary,
+        },
+        "overview": {
+            "goals_total": goals_total,
+            "tasks_total": tasks_total,
+            "tasks_open": tasks_open,
+            "tasks_requires_human": tasks_requires_human,
+            "agents_total": agents_total,
+            "spend_total_usd": spend_total_usd,
+            "month": format!("{:04}-{:02}", Utc::now().year(), Utc::now().month()),
+        },
+        "budgets": budgets,
+        "heartbeats": {
+            "configured": ops.heartbeats,
+            "runtime_state": heartbeat_runtime,
+        },
+        "tickets": ops.tickets,
+        "ticket_sync": ticket_sync,
+        "org": ops.org,
+        "governance_recent": governance_recent,
+        "spend": {
+            "total_usd": spend_total_usd,
+            "by_kind": spend_rows.iter().map(|(kind, amount)| json!({
+                "kind": kind,
+                "amount_usd": amount,
+            })).collect::<Vec<_>>(),
+            "by_agent_ref": spend_by_agent.iter().map(|(agent_ref, amount)| json!({
+                "agent_ref": agent_ref,
+                "amount_usd": amount,
+            })).collect::<Vec<_>>(),
+        },
+        "audit": audit.payload,
+        "integration_status": {
+            "agent_budget_enforcement": {
+                "configured": ops.config.as_ref().map(|c| !c.budgets.is_empty()).unwrap_or(false),
+                "hard_stop_budget_present": budgets.iter().any(|b| b.get("hard_stop").and_then(|v| v.as_bool()).unwrap_or(false)),
+                "company_budget_usage_available": !budgets.is_empty(),
+            },
+            "heartbeat_scheduler": {
+                "configured": ops.config.as_ref().map(|c| !c.heartbeats.is_empty()).unwrap_or(false),
+                "runtime_present": true,
+            },
+            "task_ticket_runtime": {
+                "implemented": true,
+                "task_count": tasks_total,
+            },
+            "org_chart_role_model": {
+                "configured": !ops.org.is_null(),
+                "agents_total": agents_total,
+            },
+            "governance_layer": {
+                "implemented": true,
+                "recent_events": governance_recent.len(),
+            },
+            "multi_company_isolation": { "implemented": true },
+            "operator_ui": { "implemented": true },
+            "portable_company_templates": {
+                "workspace_home_configured": company.hsmii_home.is_some(),
+                "bundle_export_import": true,
+            },
+            "persistent_audit_views": {
+                "task_trail_available": audit.available,
+                "governance_events_available": true,
+                "spend_events_available": true,
+            },
+        },
     })))
 }
 
@@ -4806,12 +6564,17 @@ async fn apply_onboarding_draft(
                 )
             })?;
         sqlx::query(
-            r#"INSERT INTO tasks (company_id, title, specification, state, owner_persona, priority, display_number)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            r#"INSERT INTO tasks (company_id, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona, priority, display_number)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
         )
         .bind(company_id)
         .bind(w.title.trim())
-        .bind(format!("onboarding workflow · sla_target={} · approval={}", w.sla_target, w.approval))
+        .bind(format!(
+            "onboarding workflow · sla_target={} · approval={}",
+            w.sla_target, w.approval
+        ))
+        .bind(SqlxJson(json!([])))
+        .bind(SqlxJson(json!([])))
         .bind(state)
         .bind(w.owner_role.trim())
         .bind(p)

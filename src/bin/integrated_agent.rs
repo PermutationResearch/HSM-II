@@ -5,7 +5,6 @@
 //! - Email Agent (autonomous inbox management)
 //! - Coder Assistant (dedicated code editing mode)
 //! - Prolog Logic (symbolic reasoning)
-//! - GPU Compute (optional acceleration)
 //! - Ouroboros Compatibility (blockchain integration)
 //! - Pi AI Compatibility (external AI bridges)
 //! - Hermes Bridge (external tool ecosystem)
@@ -172,6 +171,8 @@ enum MaintainAction {
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
+    let _ = dotenvy::dotenv();
+    hyper_stigmergy::telemetry::init_from_env();
 
     let cli = Cli::parse();
 
@@ -284,8 +285,6 @@ async fn cmd_start(
         if status.ouroboros { "✓" } else { "✗" }
     );
     println!("   Hermes:      {}", if status.hermes { "✓" } else { "✗" });
-    #[cfg(feature = "gpu")]
-    println!("   GPU:         {}", if status.gpu { "✓" } else { "✗" });
     println!();
 
     // Gardening status
@@ -651,15 +650,6 @@ async fn cmd_status(home: &PathBuf) -> Result<()> {
     println!(
         "  Hermes:      {}",
         if status.hermes {
-            "✓ enabled"
-        } else {
-            "✗ disabled"
-        }
-    );
-    #[cfg(feature = "gpu")]
-    println!(
-        "  GPU:         {}",
-        if status.gpu {
             "✓ enabled"
         } else {
             "✗ disabled"

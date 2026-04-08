@@ -17,7 +17,8 @@ function downloadJson(filename: string, data: unknown) {
 }
 
 export default function WorkspaceGraphPage() {
-  const { apiBase } = useWorkspace();
+  const { apiBase, companyId, companies } = useWorkspace();
+  const companyLabel = companies.find((c) => c.id === companyId)?.display_name ?? null;
   const [trailGraph, setTrailGraph] = useState<TrailGraphPayload | null>(null);
   const [hyperFileGraph, setHyperFileGraph] = useState<{
     path: string | null;
@@ -87,6 +88,16 @@ export default function WorkspaceGraphPage() {
             Graph view; export file-based hypergraph via{" "}
             <code className="rounded bg-white/5 px-1 font-mono text-[11px]">viz/hyper_graph.json</code> or{" "}
             <code className="rounded bg-white/5 px-1 font-mono text-[11px]">memory/hyper_graph.json</code>.
+            {companyLabel ? (
+              <>
+                {" "}
+                Selected company: <span className="text-foreground/90">{companyLabel}</span> (these endpoints are global; use{" "}
+                <Link href="/workspace/intelligence" className="text-primary underline-offset-4 hover:underline">
+                  Intelligence
+                </Link>{" "}
+                for Postgres company metrics.)
+              </>
+            ) : null}
           </p>
         </div>
         <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void load()}>

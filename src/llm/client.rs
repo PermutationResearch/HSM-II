@@ -9,9 +9,11 @@
 //! available cloud providers are tried first, then Ollama (always included by default).
 
 use anyhow::{anyhow, Result};
+use futures_util::Stream;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -259,7 +261,7 @@ pub struct LlmResponse {
 }
 
 /// Token usage
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -289,6 +291,8 @@ impl Default for RetryConfig {
 /// Production LLM client with failover and retry
 pub struct LlmClient {
     http: Client,
+    /// Long-timeout client for streaming bodies (whole response can exceed default `http` timeout).
+    http_stream: Client,
     providers: Vec<ProviderSlot>,
     retry_config: RetryConfig,
     default_model: String,
@@ -373,14 +377,24 @@ impl LlmClient {
         );
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(crate::llm::policy::http_timeout())
+            .pool_max_idle_per_host(10)
+            .build()?;
+
+        let stream_secs: u64 = std::env::var("HSM_LLM_STREAM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(600);
+        let http_stream = Client::builder()
+            .timeout(Duration::from_secs(stream_secs.max(30)))
             .pool_max_idle_per_host(10)
             .build()?;
 
         Ok(Self {
             http,
+            http_stream,
             providers,
-            retry_config: RetryConfig::default(),
+            retry_config: crate::llm::policy::retry_config_from_env(),
             default_model: std::env::var("DEFAULT_LLM_MODEL")
                 .unwrap_or_else(|_| crate::ollama_client::resolve_model_from_env("gpt-4o-mini")),
             metrics: Arc::new(LlmMetrics::default()),
@@ -405,6 +419,12 @@ impl LlmClient {
         if now_ms < self.breaker_open_until_ms.load(Ordering::SeqCst) {
             return Err(anyhow!(
                 "LLM circuit breaker cooling down (set HSM_LLM_BREAKER_* or wait)"
+            ));
+        }
+
+        if request.stream {
+            return Err(anyhow!(
+                "LlmClient::chat is non-streaming; use LlmClient::chat_stream() for stream: true semantics"
             ));
         }
 
@@ -443,6 +463,16 @@ impl LlmClient {
                         latency_ms = latency_ms,
                         tokens = tokens,
                         "LLM request succeeded"
+                    );
+
+                    crate::telemetry::client().record_technical(
+                        "llm.chat.success",
+                        json!({
+                            "provider": slot.label,
+                            "model": response.model,
+                            "latency_ms": latency_ms,
+                            "total_tokens": tokens,
+                        }),
                     );
 
                     return Ok(LlmResponse {
@@ -484,10 +514,223 @@ impl LlmClient {
         }
 
         error!("All LLM providers failed");
+
+        let breaker_opened = fails >= thresh;
+        crate::telemetry::client().record_technical(
+            "llm.chat.failure",
+            json!({
+                "latency_ms": latency_ms,
+                "breaker_opened": breaker_opened,
+            }),
+        );
+
         Err(anyhow!(
             "All providers failed. Last error: {}",
             last_error.unwrap_or_else(|| anyhow!("Unknown error"))
         ))
+    }
+
+    /// Default chat model from env (`DEFAULT_LLM_MODEL` / Ollama resolution).
+    pub fn default_model(&self) -> &str {
+        self.default_model.as_str()
+    }
+
+    /// Streaming chat with provider failover (no per-chunk retries; tries next slot on HTTP/open errors).
+    #[instrument(skip(self, request))]
+    pub async fn chat_stream(
+        &self,
+        mut request: LlmRequest,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = anyhow::Result<crate::llm::streaming::LlmStreamEvent>> + Send>>,
+    > {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms < self.breaker_open_until_ms.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "LLM circuit breaker cooling down (set HSM_LLM_BREAKER_* or wait)"
+            ));
+        }
+
+        request.stream = true;
+
+        if let Ok(cap) = std::env::var("HSM_LLM_MAX_OUTPUT_TOKENS") {
+            if let Ok(cap_n) = cap.parse::<usize>() {
+                if let Some(ref mut mt) = request.max_tokens {
+                    *mt = (*mt).min(cap_n);
+                }
+            }
+        }
+
+        let mut last_error = None;
+        for slot in &self.providers {
+            match self
+                .post_stream_request(
+                    &request,
+                    &slot.transport,
+                    slot.label,
+                    &slot.api_key,
+                    &slot.base_url,
+                )
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    if !status.is_success() {
+                        let body = response.text().await.unwrap_or_default();
+                        warn!(
+                            provider = %slot.label,
+                            status = %status,
+                            "streaming request rejected"
+                        );
+                        last_error = Some(anyhow!("HTTP {}: {}", status, body));
+                        continue;
+                    }
+                    self.breaker_failures.store(0, Ordering::SeqCst);
+                    let stream: Pin<
+                        Box<
+                            dyn Stream<Item = anyhow::Result<crate::llm::streaming::LlmStreamEvent>>
+                                + Send,
+                        >,
+                    > = match slot.transport {
+                        LlmProvider::OpenAi => {
+                            crate::llm::streaming::openai_sse_stream(response, LlmProvider::OpenAi)
+                        }
+                        LlmProvider::Anthropic => {
+                            crate::llm::streaming::anthropic_sse_stream(response)
+                        }
+                        LlmProvider::Ollama => {
+                            crate::llm::streaming::ollama_ndjson_stream(response)
+                        }
+                    };
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    warn!(provider = %slot.label, error = %e, "streaming open failed, trying next");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        let fails = self.breaker_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        let thresh: u32 = std::env::var("HSM_LLM_BREAKER_FAILURES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        if fails >= thresh {
+            let cool_ms: u64 = std::env::var("HSM_LLM_BREAKER_COOL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000);
+            let now2 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.breaker_open_until_ms
+                .store(now2.saturating_add(cool_ms), Ordering::SeqCst);
+        }
+
+        Err(anyhow!(
+            "All streaming providers failed. Last error: {}",
+            last_error.unwrap_or_else(|| anyhow!("Unknown error"))
+        ))
+    }
+
+    async fn post_stream_request(
+        &self,
+        request: &LlmRequest,
+        provider: &LlmProvider,
+        provider_label: &str,
+        api_key: &str,
+        base_url: &str,
+    ) -> Result<Response> {
+        let _ = provider_label;
+        match provider {
+            LlmProvider::OpenAi => {
+                let url = format!("{}/chat/completions", base_url);
+                let model = Self::openai_compatible_model_id(request.model.as_str(), base_url);
+                let body = json!({
+                    "model": model,
+                    "messages": request.messages.iter().map(|m| json!({
+                        "role": m.role,
+                        "content": m.content
+                    })).collect::<Vec<_>>(),
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "top_p": request.top_p,
+                    "stream": true,
+                });
+                self.http_stream
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+            LlmProvider::Anthropic => {
+                let url = format!("{}/messages", base_url);
+                let system_msg = request
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "system")
+                    .map(|m| m.content.clone());
+                let messages: Vec<_> = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role != "system")
+                    .map(|m| {
+                        json!({
+                            "role": if m.role == "user" { "user" } else { "assistant" },
+                            "content": m.content
+                        })
+                    })
+                    .collect();
+                let mut body = json!({
+                    "model": request.model,
+                    "messages": messages,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens.unwrap_or(4096),
+                    "stream": true,
+                });
+                if let Some(system) = system_msg {
+                    body["system"] = json!(system);
+                }
+                self.http_stream
+                    .post(&url)
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+            LlmProvider::Ollama => {
+                let url = format!("{}/api/chat", base_url);
+                let body = json!({
+                    "model": request.model,
+                    "messages": request.messages.iter().map(|m| json!({
+                        "role": m.role,
+                        "content": m.content
+                    })).collect::<Vec<_>>(),
+                    "options": {
+                        "temperature": request.temperature,
+                        "top_p": request.top_p,
+                    },
+                    "stream": true,
+                });
+                self.http_stream
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+        }
     }
 
     /// Try a single provider with retry logic
@@ -569,6 +812,20 @@ impl LlmClient {
         }
     }
 
+    /// OpenRouter rejects `openrouter/openai/...` (400); their IDs are `openai/...`, `anthropic/...`, etc.
+    fn openai_compatible_model_id(model: &str, base_url: &str) -> String {
+        let m = model.trim();
+        if base_url.to_ascii_lowercase().contains("openrouter") {
+            m.strip_prefix("openrouter/")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(m)
+                .to_string()
+        } else {
+            m.to_string()
+        }
+    }
+
     /// OpenAI API request
     async fn send_openai_request(
         &self,
@@ -577,9 +834,10 @@ impl LlmClient {
         base_url: &str,
     ) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", base_url);
+        let model = Self::openai_compatible_model_id(request.model.as_str(), base_url);
 
         let body = json!({
-            "model": request.model,
+            "model": model,
             "messages": request.messages.iter().map(|m| json!({
                 "role": m.role,
                 "content": m.content
@@ -888,6 +1146,7 @@ mod tests {
     fn test_client() -> LlmClient {
         LlmClient {
             http: Client::new(),
+            http_stream: Client::new(),
             providers: Vec::<ProviderSlot>::new(),
             retry_config: RetryConfig::default(),
             default_model: "test".to_string(),

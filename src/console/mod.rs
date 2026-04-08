@@ -34,6 +34,8 @@ pub struct ConsoleState {
     pub home: PathBuf,
     /// When set (`HSM_COMPANY_OS_DATABASE_URL`), Company OS CRUD is available under `/api/company/*`.
     pub company_db: Option<PgPool>,
+    /// When set, `POST …/sync/paperclip-goals` and `…/sync/paperclip-dris` can read from this layer without a JSON body.
+    pub paperclip: Option<Arc<Mutex<crate::paperclip::IntelligenceLayer>>>,
     /// Lazy-loaded agent for `/api/console/email-draft` (first request may take several seconds).
     draft_agent: Arc<Mutex<Option<EnhancedPersonalAgent>>>,
 }
@@ -43,6 +45,21 @@ impl ConsoleState {
         Self {
             home,
             company_db,
+            paperclip: None,
+            draft_agent: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Same as [`Self::new`] but attaches the in-process Paperclip [`IntelligenceLayer`](crate::paperclip::IntelligenceLayer) for goal/DRI sync into Postgres.
+    pub fn with_paperclip_layer(
+        home: PathBuf,
+        company_db: Option<PgPool>,
+        layer: Arc<Mutex<crate::paperclip::IntelligenceLayer>>,
+    ) -> Self {
+        Self {
+            home,
+            company_db,
+            paperclip: Some(layer),
             draft_agent: Arc::new(Mutex::new(None)),
         }
     }
@@ -155,11 +172,17 @@ async fn root_landing() -> Html<&'static str> {
     body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem; line-height: 1.5; color: #e8e8e8; background: #111; }
     a { color: #7dd3fc; }
     code { background: #222; padding: 0.1em 0.35em; border-radius: 4px; }
+    .warn { border: 2px solid #f85149; background: #2d1b1b; padding: 1rem 1.25rem; border-radius: 8px; margin-bottom: 1.5rem; }
+    .warn strong { color: #ffa198; }
   </style>
 </head>
 <body>
+  <div class="warn" role="alert">
+    <strong>Not the dashboard.</strong> This port (<code>hsm_console</code>) is the <strong>API only</strong> — no Tailwind UI.
+    Open the Next.js app on <strong>http://127.0.0.1:3050</strong> (or the port Electron chose). The footer in the real UI may show this URL as “API base”; that is normal.
+  </div>
   <h1>HSM company console API</h1>
-  <p>This port is mostly JSON APIs for the dashboard. Use the links below or open the Next.js UI.</p>
+  <p>JSON endpoints for the dashboard. Use the links below or open the Next.js UI.</p>
   <ul>
     <li><a href="/api/health"><code>GET /api/health</code></a> — quick check</li>
     <li><a href="/api/company/health"><code>GET /api/company/health</code></a> — Company OS / Postgres (requires <code>HSM_COMPANY_OS_DATABASE_URL</code>)</li>

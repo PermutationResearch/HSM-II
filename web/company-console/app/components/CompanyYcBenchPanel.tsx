@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 
 type YcBenchDomainScore = {
@@ -83,14 +84,20 @@ export function CompanyYcBenchPanel({ api, companyId, setCoErr }: Props) {
   }, [api, companyId, setCoErr]);
 
   return (
-    <details className="mb-6 rounded-lg border border-line bg-panel" open>
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
-        <span className="text-gray-400">▸</span> YC-Bench controller profile{" "}
-        <span className="font-normal text-gray-500">
-          (deterministic adapter from imported company context, agents, and skills)
-        </span>
+    <details className="group mb-6 rounded-xl border border-[#30363D] bg-[#0d1117]">
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="mt-0.5 h-4 w-4 shrink-0 text-[#8B949E] transition-transform duration-200 group-open:rotate-90"
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <span className="text-sm font-medium text-white">YC-Bench profile</span>
+          <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+            Auto-built summary for marketplace benchmarks — optional unless you run YC-Bench workflows.
+          </p>
+        </div>
       </summary>
-      <div className="space-y-4 border-t border-line px-4 py-4">
+      <div className="space-y-4 border-t border-[#30363D] px-4 py-4">
         {loading || !profile ? (
           <div className="rounded-lg border border-dashed border-line/80 bg-black/20 px-4 py-3 text-sm text-gray-500">
             {loading ? "Building YC-Bench controller profile…" : "No YC-Bench profile available yet."}

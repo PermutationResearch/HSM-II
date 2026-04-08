@@ -1,0 +1,26 @@
+{
+  "name": "remotion-company-console-ad",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "remotion studio src/index.ts",
+    "build": "remotion render src/index.ts CompanyConsoleAd out/company-console-ad.mp4",
+    "still": "remotion still src/index.ts CompanyConsoleAd out/poster.png --frame=120"
+  },
+  "dependencies": {
+    "@react-three/drei": "^9.117.3",
+    "@react-three/fiber": "^8.17.10",
+    "@remotion/cli": "^4.0.228",
+    "@remotion/google-fonts": "^4.0.228",
+    "@remotion/three": "^4.0.228",
+    "@types/three": "^0.169.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.228",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "typescript": "^5.6.3"
+  }
+}

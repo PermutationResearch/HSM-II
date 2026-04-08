@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+use crate::harness::redact_secrets;
 /// POST `application/json` to `url`. Short timeout; suitable for background `tokio::spawn`.
 pub async fn post_json_webhook(url: &str, payload: &Value) -> Result<()> {
     let client = reqwest::Client::builder()
@@ -19,7 +21,7 @@ pub async fn post_json_webhook(url: &str, payload: &Value) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!(
             "webhook HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
+            redact_secrets(&body.chars().take(200).collect::<String>())
         );
     }
     Ok(())

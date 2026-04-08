@@ -165,6 +165,9 @@ cargo run --bin personal_agent -- start --telegram &
 cargo run --bin hypergraphd
 ```
 
+#### Company console API (embedded in `personal_agent`)
+`personal_agent start` listens on **`HSM_API_PORT`** (default **3000**) for the world/Honcho/Paperclip demo REST API and, unless **`HSM_EMBED_CONSOLE_API=0`**, also on **`HSM_CONSOLE_PORT`** (default **3847**) for the same **`/api/company/*`** and **`/api/console/*`** routes as **`hsm_console`**, using one shared in-process Paperclip layer and optional **`HSM_COMPANY_OS_DATABASE_URL`**. Repo-root **`.env`** is loaded on startup (like `hsm_console`). For **`web/company-console`**, set **`NEXT_PUBLIC_API_BASE=http://127.0.0.1:3847`** (or your port). Use **`HSM_EMBED_CONSOLE_API=0`** if you run **`hsm_console`** as a separate process.
+
 #### External Rust Harnesses
 `hsm_outer_loop` can now build and run external Rust harnesses from JSON specs, including checked-out side projects such as `claw-code`.
 
@@ -191,6 +194,8 @@ cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench
 ```
 
 Results are written under `runs/external_batch_<timestamp>.json` and picked up by the company console `GET /api/companies-sh/yc-bench` aggregator.
+
+**Self-improving harness (NeoSigma auto-harness × YC-bench, e.g. apex-systems):** pre-wired fork in [`external_integrations/auto-harness-hsm/README_HSM.md`](external_integrations/auto-harness-hsm/README_HSM.md) (`benchmark_backend: yc_hsm`); bridge scripts and normalizer in [`external_integrations/auto-harness-yc-bench/README.md`](external_integrations/auto-harness-yc-bench/README.md). See [NeoSigma’s post on self-improving agentic systems](https://www.neosigma.ai/blog/self-improving-agentic-systems).
 
 ---
 

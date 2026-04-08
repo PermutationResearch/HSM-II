@@ -4,6 +4,8 @@
 
 /* Nothing dark tokens (instrument panel / OLED) */
 :root {
+  --font-space-grotesk: "Space Grotesk", "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
+  --font-space-mono: "Space Mono", "JetBrains Mono", "SFMono-Regular", "SF Mono", "Menlo", monospace;
   --nd-black: #000000;
   --nd-surface: #111111;
   --nd-surface-raised: #1a1a1a;
@@ -64,6 +66,31 @@ body {
   animation: activity-row-enter 0.95s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
+/* Agents rail: green status dot pulses while persona has checkout / running run / in-progress task */
+@keyframes nd-agent-status-busy {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(74, 158, 92, 0.35);
+  }
+  50% {
+    opacity: 0.45;
+    box-shadow: 0 0 0 5px rgba(74, 158, 92, 0.12);
+  }
+}
+
+.nd-agent-status-dot--busy {
+  animation: nd-agent-status-busy 1s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nd-agent-status-dot--busy {
+    animation: none;
+    opacity: 1;
+    box-shadow: none;
+  }
+}
+
 /**
  * Dashboard: one ambient layer only (nothing-gradients). Cards/charts stay flat (#111 + borders).
  */
@@ -92,6 +119,25 @@ body {
 }
 
 /**
+ * `/workspace/*` main canvas — Nothing design: flat OLED (#000), no gradient chrome (see nothing-design §3).
+ * Cards use border-only separation; inset shadow on .pc-panel is stripped here.
+ */
+.nd-ws-main {
+  position: relative;
+  isolation: isolate;
+  background-color: #000000;
+}
+
+.nd-ws-main > * {
+  position: relative;
+  z-index: 1;
+}
+
+.nd-ws-main .pc-panel {
+  box-shadow: none;
+}
+
+/**
  * Paperclip-class workspace surfaces (dense tables, headers) using the same tokens as Nothing/shadcn.
  * Prefer these over one-off hex in new workspace pages.
  */
@@ -105,11 +151,11 @@ body {
   }
 
   .pc-page-title {
-    @apply text-lg font-semibold tracking-tight text-foreground;
+    @apply text-xl font-medium tracking-tight text-[#ffffff] md:text-2xl;
   }
 
   .pc-page-desc {
-    @apply mt-1 text-sm text-muted-foreground;
+    @apply mt-2 max-w-2xl text-sm leading-relaxed text-[#999999];
   }
 
   .pc-panel {
@@ -127,7 +173,25 @@ body {
   }
 
   .pc-sidebar-brand {
-    @apply font-mono text-xs font-semibold uppercase tracking-[0.1em] text-admin-muted hover:text-foreground;
+    @apply font-sans text-[13px] font-medium tracking-tight text-[#e8e8e8] transition-colors hover:text-white;
+  }
+
+  .pc-sidebar-eyebrow {
+    @apply mt-1 block font-mono text-[10px] font-normal uppercase tracking-[0.08em] text-[#999999];
+  }
+
+  /** Nav rail — tertiary default, primary when active; wireframe accent (Nothing §2.5, no decorative red). */
+  .nd-ws-nav-link {
+    @apply flex items-center gap-2 rounded-sm border-l-2 border-transparent py-2 pl-2 pr-2 font-sans text-[13px] leading-snug transition-colors duration-200;
+    transition-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  .nd-ws-nav-link--active {
+    @apply border-[#333333] bg-white/[0.03] text-[#ffffff];
+  }
+
+  .nd-ws-nav-link--idle {
+    @apply text-[#999999] hover:bg-white/[0.04] hover:text-[#e8e8e8];
   }
 }
 

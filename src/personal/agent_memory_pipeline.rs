@@ -1,6 +1,8 @@
 //! Lightweight prompt routing, memory prefetch (LLM-picked files), and post-turn memory extract.
 //!
-//! Config: `config/prompt_routes.yaml` under HSMII home. Env toggles: `HSM_MEMORY_PREFETCH`, `HSM_MEMORY_EXTRACT`.
+//! Config: `config/prompt_routes.yaml` under HSMII home. Env toggles: `HSM_MEMORY_PREFETCH`,
+//! `HSM_MEMORY_PREFETCH_N`, `HSM_MEMORY_PREFETCH_PER_FILE_MAX_BYTES`, `HSM_MEMORY_PREFETCH_TOTAL_MAX_BYTES`,
+//! `HSM_MEMORY_EXTRACT`.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -90,8 +92,21 @@ impl PromptRouter {
 
 const MAX_MANIFEST_FILES: usize = 48;
 const MANIFEST_SNIPPET_CHARS: usize = 160;
-const PREFETCH_PER_FILE_CAP: usize = 6000;
-const PREFETCH_TOTAL_CAP: usize = 20_000;
+fn prefetch_per_file_cap() -> usize {
+    std::env::var("HSM_MEMORY_PREFETCH_PER_FILE_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 100_000)
+        .unwrap_or(2048)
+}
+
+fn prefetch_total_cap() -> usize {
+    std::env::var("HSM_MEMORY_PREFETCH_TOTAL_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 200_000)
+        .unwrap_or(4096)
+}
 
 #[derive(Clone, Debug)]
 pub struct MemoryFileEntry {
@@ -188,9 +203,10 @@ pub async fn prefetch_memory_context(
             continue;
         }
         let body = tokio::fs::read_to_string(&p).await.unwrap_or_default();
+        let per_cap = prefetch_per_file_cap();
         let mut chunk = body;
-        if chunk.len() > PREFETCH_PER_FILE_CAP {
-            let mut n = PREFETCH_PER_FILE_CAP;
+        if chunk.len() > per_cap {
+            let mut n = per_cap;
             while n > 0 && !chunk.is_char_boundary(n) {
                 n -= 1;
             }
@@ -198,7 +214,7 @@ pub async fn prefetch_memory_context(
             chunk.push_str("\n\n_(truncated)_\n");
         }
         let block = format!("### `{}`\n\n{}\n\n", rel, chunk);
-        if total + block.len() > PREFETCH_TOTAL_CAP {
+        if total + block.len() > prefetch_total_cap() {
             break;
         }
         total += block.len();

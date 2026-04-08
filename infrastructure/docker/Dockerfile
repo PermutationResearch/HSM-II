@@ -21,7 +21,7 @@ COPY src ./src
 COPY external_integrations/hermes/hermes-bridge/src ./external_integrations/hermes/hermes-bridge/src
 
 # Build release binary
-RUN cargo build --release --features gpu
+RUN cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim

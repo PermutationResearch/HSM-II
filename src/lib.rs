@@ -1,6 +1,9 @@
+#![recursion_limit = "256"]
+
 pub mod action;
 pub mod agent;
 pub mod analysis;
+pub mod architecture_blueprint;
 pub mod clean;
 pub mod columnar_engine;
 pub mod conductor;
@@ -17,7 +20,6 @@ pub mod external_connectors;
 pub mod federation;
 pub mod gepa;
 pub mod hyper_stigmergy;
-pub mod architecture_blueprint;
 pub mod hypergraph;
 pub mod kuramoto;
 pub mod loop_main;
@@ -32,6 +34,7 @@ pub mod reasoning_braid;
 pub mod rlm;
 pub mod rlm_v2;
 pub mod skill;
+pub mod skill_markdown;
 pub mod trace2skill;
 pub mod transaction_layer;
 pub mod workflow;
@@ -47,7 +50,6 @@ pub mod council;
 pub mod dks;
 pub mod email;
 pub mod governance;
-pub mod gpu;
 pub mod graph_runtime;
 pub mod hnsw_index;
 pub mod lcm;
@@ -76,7 +78,13 @@ pub mod fs_atomic;
 pub mod tools;
 
 // Production observability
+/// Prompt context manifest (bytes, tiers, truncation).
+pub mod context_manifest;
 pub mod observability;
+/// Optional YAML policy (`HSM_POLICY_FILE`) — tiers + tool deny list.
+pub mod policy_config;
+/// Opt-in product telemetry (`HSM_TELEMETRY_*`). Off by default.
+pub mod telemetry;
 
 // Authentication & Authorization
 pub mod auth;
@@ -185,8 +193,9 @@ pub use kuramoto::{
 };
 pub use loop_main::{LoopConfig, LoopRuntime};
 pub use memory::{
-    default_tool_registry, AgentTool, HybridMemory, MemoryEntry, MemoryNetwork, MemoryStats,
-    RecallResult, StrategyScores, ToolContext, ToolRegistry, ToolResult, ToolSideEffect,
+    classify_query_intent, default_tool_registry, network_claim_match, AgentTool, HybridMemory,
+    MemoryEntry, MemoryNetwork, MemoryRetrievalIntent, MemoryStats, RecallResult, StrategyScores,
+    ToolContext, ToolRegistry, ToolResult, ToolSideEffect,
 };
 pub use meta_graph::MetaGraph;
 pub use optimizer::{Assignment, AssignmentMetrics, TaskAssignmentOptimizer, TaskRequirements};
@@ -231,15 +240,22 @@ pub use trace2skill::{
 };
 
 // Feature flags for progressive rollout
+pub use context_manifest::{
+    company_task_llm_context_manifest, ContextManifest, ContextSectionStat, ContextTier,
+};
 pub use flags::{
     EvaluationContext, FeatureFlag, FlagMetadata, FlagStats, FlagStore, FlagsAware, Operator,
     TargetingRule,
 };
 pub use fs_atomic::write_atomic;
+pub use policy_config::{
+    ensure_loaded as ensure_policy_loaded, get as loaded_policy, LoadedPolicy,
+};
 pub use stigmergic_policy::{
     PolicyShift, RoutingDirective, StigmergicMemory as RuntimeStigmergicMemory, StigmergicTrace,
     TraceKind,
 };
+pub use telemetry::{TelemetryCategory, TelemetryClient, TelemetryConfig, TelemetryConsent};
 pub use transaction_layer::{Transaction, TransactionManager};
 pub use workflow::{
     ContextValue, StepResult, Workflow, WorkflowBuilder, WorkflowContext, WorkflowRegistry,
@@ -304,19 +320,6 @@ pub use harness::{
     AntiSycophancyRunResult, ApprovalOutcome, ApprovalService, ApprovalStore, CcAgentSlot,
     CcCrossReviewMode, CcDraft, CcOrchestrator, CcOrchestratorConfig, CcReview, CcRunResult,
     CcTask, CriticParse, CriticVerdict, PendingApproval, RuntimeConfig,
-};
-
-// GPU-accelerated graph processing
-pub use gpu::{
-    graph::{ForceDirectedLayout, GraphLayout, HierarchicalLayout, SpectralLayout},
-    CpuFallback, GpuAccelerator, GraphOperation,
-};
-
-#[cfg(feature = "gpu")]
-pub use gpu::{
-    buffer::{BufferPool, GpuBuffer},
-    compute::{ComputeShader, GpuCompute, ShaderKernel},
-    graph::GpuGraph,
 };
 
 // Local LLM inference (FrankenTorch-style)

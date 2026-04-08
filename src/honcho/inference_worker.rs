@@ -36,10 +36,7 @@ pub struct HonchoInferenceWorker {
 }
 
 impl HonchoInferenceWorker {
-    pub fn new(
-        hsmii_home: impl Into<PathBuf>,
-        hybrid_memory: Arc<RwLock<HybridMemory>>,
-    ) -> Self {
+    pub fn new(hsmii_home: impl Into<PathBuf>, hybrid_memory: Arc<RwLock<HybridMemory>>) -> Self {
         let hsmii_home: PathBuf = hsmii_home.into();
         let honcho_home = hsmii_home.join("honcho");
 
@@ -69,12 +66,7 @@ impl HonchoInferenceWorker {
     ///
     /// Call this at the end of a session (or after a configurable number of turns).
     /// The caller is not blocked; failures are logged and silently dropped.
-    pub fn spawn_post_session(
-        self,
-        peer_id: String,
-        transcript: String,
-        message_count: u32,
-    ) {
+    pub fn spawn_post_session(self, peer_id: String, transcript: String, message_count: u32) {
         tokio::spawn(async move {
             if let Err(e) = self
                 .run_post_session_inference(&peer_id, &transcript, message_count)
@@ -107,10 +99,7 @@ impl HonchoInferenceWorker {
     ///
     /// Returns `UserRepresentation::empty()` if the peer is new.
     /// Also queries `HybridMemory` EntitySummary for supplementary beliefs.
-    pub async fn load_peer_context(
-        &self,
-        peer_id: &str,
-    ) -> Result<UserRepresentation> {
+    pub async fn load_peer_context(&self, peer_id: &str) -> Result<UserRepresentation> {
         // Fast path: JSON file
         let mut repr = UserRepresentation::load(&self.honcho_home, peer_id).await?;
 
@@ -228,7 +217,8 @@ Focus on stable traits, not one-off comments. Confidence 0.0–1.0. Omit arrays 
 
     async fn load_todays_journal(&self) -> Result<(String, u32)> {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let journal_path = self.hsmii_home
+        let journal_path = self
+            .hsmii_home
             .join("memory")
             .join("journal")
             .join(format!("{today}.md"));
@@ -296,7 +286,8 @@ fn strip_json_fences(s: &str) -> String {
 
 fn count_user_messages(journal: &str) -> u32 {
     // Journal format from append_turn_journal: "## User\n..." headers
-    journal.lines()
+    journal
+        .lines()
         .filter(|l| l.starts_with("## User") || l.starts_with("**User**"))
         .count() as u32
 }

@@ -186,6 +186,8 @@ pub async fn route_prompt_execute(
         name: best.name,
         parameters,
         call_id,
+        harness_run: None,
+        idempotency_key: None,
     };
     Ok(registry.execute(call).await)
 }

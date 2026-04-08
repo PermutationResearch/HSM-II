@@ -10,11 +10,17 @@
 //!
 //! **Architecture:** `GET /api/architecture` returns the embedded blueprint (`architecture/hsm-ii-blueprint.ron`)
 //! plus optional runtime counts when a world is mounted.
+//!
+//! **Appliance:** `GET|POST /api/appliance/workspace/:thread_id`, uploads/artifacts listing, multipart upload,
+//! and `POST /api/agent-skills/install` (`.skill` zip → `<appliance_home>/skills`).
+
+mod appliance;
+mod llm_stream;
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -23,12 +29,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+use crate::architecture_blueprint::{
+    embedded_blueprint, ArchitectureBlueprint, WorldArchitectureRuntime,
+};
 use crate::council::CouncilDecision;
 use crate::council::Proposal;
 use crate::federation::trust::TrustEdge;
 use crate::governance;
 use crate::harness::{ApprovalOutcome, ApprovalService, PendingApproval};
-use crate::architecture_blueprint::{embedded_blueprint, ArchitectureBlueprint, WorldArchitectureRuntime};
 use crate::hyper_stigmergy::{AddBeliefExtras, Belief, BeliefSource, HyperStigmergicMorphogenesis};
 use crate::meta_graph::MetaGraph;
 use crate::real::WorldSnapshot;
@@ -102,6 +110,8 @@ pub struct ApiState {
     /// company/tenant served by this process. Populated by the unified `personal_agent` binary, **not**
     /// by importing a company pack (packs add agent/skill **content** elsewhere).
     pub intelligence: Option<Arc<tokio::sync::Mutex<crate::paperclip::IntelligenceLayer>>>,
+    /// Data root for appliance routes (`HSM_APPLIANCE_HOME`, default `~/.hsmii`).
+    pub appliance_home: std::path::PathBuf,
 }
 
 impl ApiState {
@@ -125,6 +135,7 @@ impl ApiState {
             max_belief_posts_per_sec,
             honcho: None,
             intelligence: None,
+            appliance_home: crate::harness::appliance_home(),
         }
     }
 
@@ -331,7 +342,15 @@ pub fn api_router(state: ApiState) -> Router {
             .route("/api/honcho/peers/:id", get(honcho_get_peer))
             .route("/api/honcho/peers/:id/context", get(honcho_packed_context))
             .route("/api/honcho/memory", get(honcho_memory_stats))
-            .route("/api/honcho/sessions/:id/visibility", get(honcho_get_visibility).post(honcho_set_visibility))
+            .route("/api/honcho/memory/entries", get(honcho_memory_entries))
+            .route(
+                "/api/honcho/memory/entry/:id",
+                delete(honcho_memory_delete_entry),
+            )
+            .route(
+                "/api/honcho/sessions/:id/visibility",
+                get(honcho_get_visibility).post(honcho_set_visibility),
+            )
             .with_state(hs.clone())
     } else {
         Router::new()
@@ -341,21 +360,39 @@ pub fn api_router(state: ApiState) -> Router {
     let paperclip_routes = if let Some(ref il) = state.intelligence {
         Router::new()
             .route("/api/paperclip/summary", get(paperclip_summary))
-            .route("/api/paperclip/goals", get(paperclip_list_goals).post(paperclip_create_goal))
+            .route(
+                "/api/paperclip/goals",
+                get(paperclip_list_goals).post(paperclip_create_goal),
+            )
             .route("/api/paperclip/goals/:id", get(paperclip_get_goal))
-            .route("/api/paperclip/goals/:id/complete", post(paperclip_complete_goal))
-            .route("/api/paperclip/capabilities", get(paperclip_list_capabilities))
-            .route("/api/paperclip/dris", get(paperclip_list_dris).post(paperclip_register_dri))
+            .route(
+                "/api/paperclip/goals/:id/complete",
+                post(paperclip_complete_goal),
+            )
+            .route(
+                "/api/paperclip/capabilities",
+                get(paperclip_list_capabilities),
+            )
+            .route(
+                "/api/paperclip/dris",
+                get(paperclip_list_dris).post(paperclip_register_dri),
+            )
             .route("/api/paperclip/signals", post(paperclip_emit_signal))
-            .route("/api/paperclip/template", get(paperclip_export_template).post(paperclip_import_template))
+            .route(
+                "/api/paperclip/template",
+                get(paperclip_export_template).post(paperclip_import_template),
+            )
             .with_state(il.clone())
     } else {
         Router::new()
     };
 
+    let appliance_routes = appliance::routes().with_state(state.clone());
+
     Router::new()
         // Health
         .route("/api/health", get(health))
+        .route("/api/llm/chat/stream", post(llm_stream::llm_chat_stream))
         .route("/api/architecture", get(get_architecture))
         .route("/api/governance", get(get_governance))
         .route("/api/approvals/pending", get(list_pending_approvals))
@@ -383,6 +420,7 @@ pub fn api_router(state: ApiState) -> Router {
         .with_state(state)
         .merge(honcho_routes)
         .merge(paperclip_routes)
+        .merge(appliance_routes)
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────
@@ -862,9 +900,7 @@ struct HonchoMemoryStatsResponse {
 }
 
 /// `GET /api/honcho/memory` — stats on the Honcho HybridMemory store.
-async fn honcho_memory_stats(
-    State(hs): State<HonchoApiState>,
-) -> Json<HonchoMemoryStatsResponse> {
+async fn honcho_memory_stats(State(hs): State<HonchoApiState>) -> Json<HonchoMemoryStatsResponse> {
     let mem = hs.hybrid_memory.read().await;
     let stats = &mem.stats;
     Json(HonchoMemoryStatsResponse {
@@ -873,6 +909,39 @@ async fn honcho_memory_stats(
         beliefs: stats.beliefs,
         experiences: stats.experiences,
     })
+}
+
+#[derive(Deserialize)]
+struct HonchoMemoryEntriesQuery {
+    #[serde(default = "default_honcho_memory_limit")]
+    limit: usize,
+}
+
+fn default_honcho_memory_limit() -> usize {
+    200
+}
+
+/// `GET /api/honcho/memory/entries?limit=N` — recent hybrid-memory rows (Honcho + agent), no embeddings.
+async fn honcho_memory_entries(
+    State(hs): State<HonchoApiState>,
+    AxumQuery(q): AxumQuery<HonchoMemoryEntriesQuery>,
+) -> Json<Vec<crate::memory::MemoryEntryPreview>> {
+    let mem = hs.hybrid_memory.read().await;
+    let lim = q.limit.clamp(1, 2000);
+    Json(mem.list_entries_preview(lim))
+}
+
+/// `DELETE /api/honcho/memory/entry/:id` — remove one memory row by id.
+async fn honcho_memory_delete_entry(
+    State(hs): State<HonchoApiState>,
+    Path(id): Path<usize>,
+) -> StatusCode {
+    let mut mem = hs.hybrid_memory.write().await;
+    if mem.remove_entry_by_id(id) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 /// `GET /api/honcho/sessions/:id/visibility` — get the session visibility config.
@@ -919,17 +988,13 @@ async fn honcho_set_visibility(
 type IntelligenceState = Arc<tokio::sync::Mutex<crate::paperclip::IntelligenceLayer>>;
 
 /// `GET /api/paperclip/summary` — dashboard overview.
-async fn paperclip_summary(
-    State(il): State<IntelligenceState>,
-) -> Json<serde_json::Value> {
+async fn paperclip_summary(State(il): State<IntelligenceState>) -> Json<serde_json::Value> {
     let layer = il.lock().await;
     Json(layer.summary())
 }
 
 /// `GET /api/paperclip/goals` — list all goals.
-async fn paperclip_list_goals(
-    State(il): State<IntelligenceState>,
-) -> Json<serde_json::Value> {
+async fn paperclip_list_goals(State(il): State<IntelligenceState>) -> Json<serde_json::Value> {
     let layer = il.lock().await;
     let goals: Vec<_> = layer.list_goals();
     Json(serde_json::to_value(goals).unwrap_or_default())
@@ -971,7 +1036,11 @@ async fn paperclip_create_goal(
     let assignee = match (req.assignee_ref.as_deref(), req.assignee_type.as_deref()) {
         (Some(r), Some("ic")) => GoalAssignee::Ic {
             agent_ref: r.to_string(),
-            capability_id: req.required_capabilities.first().cloned().unwrap_or_default(),
+            capability_id: req
+                .required_capabilities
+                .first()
+                .cloned()
+                .unwrap_or_default(),
         },
         (Some(r), Some("dri")) => GoalAssignee::Dri {
             agent_ref: r.to_string(),
@@ -1036,9 +1105,7 @@ async fn paperclip_list_capabilities(
 }
 
 /// `GET /api/paperclip/dris` — list all DRIs.
-async fn paperclip_list_dris(
-    State(il): State<IntelligenceState>,
-) -> Json<serde_json::Value> {
+async fn paperclip_list_dris(State(il): State<IntelligenceState>) -> Json<serde_json::Value> {
     let layer = il.lock().await;
     let dris: Vec<_> = layer.dri_registry.all().collect();
     Json(serde_json::to_value(dris).unwrap_or_default())
@@ -1059,8 +1126,7 @@ async fn paperclip_register_dri(
 ) -> Json<serde_json::Value> {
     use crate::paperclip::dri::DriEntry;
 
-    let entry = DriEntry::new(req.id.clone(), req.name, req.agent_ref)
-        .with_domains(req.domains);
+    let entry = DriEntry::new(req.id.clone(), req.name, req.agent_ref).with_domains(req.domains);
 
     let mut layer = il.lock().await;
     layer.dri_registry.register(entry);
@@ -1091,13 +1157,19 @@ async fn paperclip_emit_signal(
 
     let kind = match req.kind.as_str() {
         "external" => SignalKind::ExternalSignal {
-            category: req.metadata.get("category")
+            category: req
+                .metadata
+                .get("category")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
         },
-        "custom" => SignalKind::Custom { label: req.description.clone() },
-        other => SignalKind::Custom { label: other.to_string() },
+        "custom" => SignalKind::Custom {
+            label: req.description.clone(),
+        },
+        other => SignalKind::Custom {
+            label: other.to_string(),
+        },
     };
 
     let signal = Signal {
@@ -1118,12 +1190,9 @@ async fn paperclip_emit_signal(
 }
 
 /// `GET /api/paperclip/template` — export the live Intelligence Layer as a company template.
-async fn paperclip_export_template(
-    State(il): State<IntelligenceState>,
-) -> Json<serde_json::Value> {
+async fn paperclip_export_template(State(il): State<IntelligenceState>) -> Json<serde_json::Value> {
     let layer = il.lock().await;
-    let template =
-        crate::paperclip::template::CompanyTemplate::from_intelligence_layer(&layer);
+    let template = crate::paperclip::template::CompanyTemplate::from_intelligence_layer(&layer);
     Json(serde_json::to_value(template).unwrap_or_default())
 }
 

@@ -33,6 +33,20 @@ impl MemoryLayer {
 
 /// Serializable copy of a stored belief for export / graph projection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TypedClaimSnapshot {
+    pub subject: String,
+    pub relation: String,
+    pub object: String,
+    #[serde(default)]
+    pub negated: bool,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub temporal_hint: Option<String>,
+}
+
+/// Serializable copy of a stored belief for export / graph projection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BeliefSnapshot {
     pub index: usize,
     pub content: String,
@@ -42,6 +56,20 @@ pub struct BeliefSnapshot {
     pub source_turn: usize,
     pub created_at: u64,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub source_excerpt: Option<String>,
+    #[serde(default)]
+    pub supporting_evidence: Vec<String>,
+    #[serde(default)]
+    pub contradicting_evidence: Vec<String>,
+    #[serde(default)]
+    pub supersedes_belief_index: Option<usize>,
+    #[serde(default)]
+    pub evidence_belief_indices: Vec<usize>,
+    #[serde(default)]
+    pub human_committed: bool,
+    #[serde(default)]
+    pub claims: Vec<TypedClaimSnapshot>,
 }
 
 /// One session-line summary row (cross-session recall).
@@ -138,6 +166,22 @@ fn entity_eval_turn(task_id: &str, turn_index: usize) -> String {
     format!("ent:eval_turn:{task_id}:{turn_index}")
 }
 
+fn entity_summary(task_id: &str, session: u32, row: usize) -> String {
+    format!("ent:summary:{task_id}:{session}:{row}")
+}
+
+fn entity_decision(task_id: &str, session: u32, row: usize, decision_index: usize) -> String {
+    format!("ent:decision:{task_id}:{session}:{row}:{decision_index}")
+}
+
+fn entity_contradiction_note(belief_index: usize, note_index: usize) -> String {
+    format!("ent:contradiction:{belief_index}:{note_index}")
+}
+
+fn entity_supporting_evidence(belief_index: usize, evidence_index: usize) -> String {
+    format!("ent:supporting_evidence:{belief_index}:{evidence_index}")
+}
+
 impl BipartiteMemoryGraph {
     /// Build bipartite entity–fact graph from an HSM memory snapshot.
     pub fn project_from_snapshot(snap: &HsmMemorySnapshot) -> Self {
@@ -215,6 +259,8 @@ impl BipartiteMemoryGraph {
                         "source_turn": b.source_turn,
                         "created_at": b.created_at,
                         "keywords": b.keywords,
+                        "human_committed": b.human_committed,
+                        "claims": b.claims,
                     }),
                 },
             );
@@ -227,6 +273,22 @@ impl BipartiteMemoryGraph {
                     kind: "task".into(),
                     label: Some(b.source_task.clone()),
                     properties: serde_json::json!({}),
+                },
+            );
+            let evidence_turn_id = entity_eval_turn(&b.source_task, b.source_turn);
+            add_ent(
+                &mut g,
+                MemoryEntity {
+                    id: evidence_turn_id.clone(),
+                    layer: MemoryLayer::Episodic,
+                    kind: "evidence_turn".into(),
+                    label: Some(format!("{}:{}", b.source_task, b.source_turn)),
+                    properties: serde_json::json!({
+                        "task_id": b.source_task,
+                        "turn_index": b.source_turn,
+                        "excerpt": b.source_excerpt,
+                        "immutable_source": true,
+                    }),
                 },
             );
 
@@ -250,6 +312,11 @@ impl BipartiteMemoryGraph {
                 entity_id: tid,
                 fact_id: fid.clone(),
                 role: "source_task".into(),
+            });
+            g.incidence.push(Incidence {
+                entity_id: evidence_turn_id.clone(),
+                fact_id: fid.clone(),
+                role: "source_evidence".into(),
             });
             if let Some(ref dom) = b.domain {
                 let did = entity_domain(dom);
@@ -299,6 +366,142 @@ impl BipartiteMemoryGraph {
                     role: "keyword".into(),
                 });
             }
+            if let Some(superseded_index) = b.supersedes_belief_index {
+                let older_belief_id = entity_belief(superseded_index);
+                add_ent(
+                    &mut g,
+                    MemoryEntity {
+                        id: older_belief_id.clone(),
+                        layer: MemoryLayer::Semantic,
+                        kind: "belief".into(),
+                        label: Some(format!("belief {superseded_index}")),
+                        properties: serde_json::json!({
+                            "placeholder": true,
+                            "belief_index": superseded_index,
+                        }),
+                    },
+                );
+                let fs = format!("fact:belief_supersedes:{}:{}", b.index, superseded_index);
+                g.facts.push(ReifiedFact {
+                    id: fs.clone(),
+                    layer: MemoryLayer::Semantic,
+                    relation: "belief_supersedes_belief".into(),
+                    properties: serde_json::json!({}),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: entity_belief(b.index),
+                    fact_id: fs.clone(),
+                    role: "newer_belief".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: older_belief_id,
+                    fact_id: fs,
+                    role: "older_belief".into(),
+                });
+            }
+            for evidence_belief_index in &b.evidence_belief_indices {
+                let evidence_belief_id = entity_belief(*evidence_belief_index);
+                add_ent(
+                    &mut g,
+                    MemoryEntity {
+                        id: evidence_belief_id.clone(),
+                        layer: MemoryLayer::Semantic,
+                        kind: "belief".into(),
+                        label: Some(format!("belief {evidence_belief_index}")),
+                        properties: serde_json::json!({
+                            "placeholder": true,
+                            "belief_index": evidence_belief_index,
+                        }),
+                    },
+                );
+                let fe = format!(
+                    "fact:belief_supported_by_belief:{}:{}",
+                    b.index, evidence_belief_index
+                );
+                g.facts.push(ReifiedFact {
+                    id: fe.clone(),
+                    layer: MemoryLayer::Semantic,
+                    relation: "belief_supported_by_belief".into(),
+                    properties: serde_json::json!({}),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: entity_belief(b.index),
+                    fact_id: fe.clone(),
+                    role: "supported_belief".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: evidence_belief_id,
+                    fact_id: fe,
+                    role: "supporting_belief".into(),
+                });
+            }
+            for (support_index, evidence) in b.supporting_evidence.iter().enumerate() {
+                let evidence_id = entity_supporting_evidence(b.index, support_index);
+                add_ent(
+                    &mut g,
+                    MemoryEntity {
+                        id: evidence_id.clone(),
+                        layer: MemoryLayer::Semantic,
+                        kind: "supporting_evidence".into(),
+                        label: Some(truncate_label(evidence, 80)),
+                        properties: serde_json::json!({
+                            "content": evidence,
+                        }),
+                    },
+                );
+                let fe = format!(
+                    "fact:belief_supporting_evidence:{}:{}",
+                    b.index, support_index
+                );
+                g.facts.push(ReifiedFact {
+                    id: fe.clone(),
+                    layer: MemoryLayer::Semantic,
+                    relation: "belief_supported_by_evidence".into(),
+                    properties: serde_json::json!({}),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: entity_belief(b.index),
+                    fact_id: fe.clone(),
+                    role: "supported_belief".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: evidence_id,
+                    fact_id: fe,
+                    role: "supporting_evidence".into(),
+                });
+            }
+            for (note_index, note) in b.contradicting_evidence.iter().enumerate() {
+                let note_id = entity_contradiction_note(b.index, note_index);
+                add_ent(
+                    &mut g,
+                    MemoryEntity {
+                        id: note_id.clone(),
+                        layer: MemoryLayer::Semantic,
+                        kind: "contradiction_note".into(),
+                        label: Some(truncate_label(note, 80)),
+                        properties: serde_json::json!({
+                            "content": note,
+                        }),
+                    },
+                );
+                let fc = format!("fact:belief_contradicted:{}:{}", b.index, note_index);
+                g.facts.push(ReifiedFact {
+                    id: fc.clone(),
+                    layer: MemoryLayer::Semantic,
+                    relation: "belief_flagged_by_contradiction".into(),
+                    properties: serde_json::json!({}),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: entity_belief(b.index),
+                    fact_id: fc.clone(),
+                    role: "contested_belief".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: note_id,
+                    fact_id: fc,
+                    role: "contradicting_evidence".into(),
+                });
+            }
         }
 
         // ── Session summaries (episodic boundary artifacts) ──
@@ -328,6 +531,23 @@ impl BipartiteMemoryGraph {
                     properties: serde_json::json!({}),
                 },
             );
+            let summary_id = entity_summary(&ss.task_id, ss.session, row);
+            add_ent(
+                &mut g,
+                MemoryEntity {
+                    id: summary_id.clone(),
+                    layer: MemoryLayer::Episodic,
+                    kind: "summary".into(),
+                    label: Some(truncate_label(&ss.summary, 80)),
+                    properties: serde_json::json!({
+                        "summary": ss.summary,
+                        "session": ss.session,
+                        "decision_count": ss.key_decisions.len(),
+                        "keyword_count": ss.keywords.len(),
+                        "index_only": true,
+                    }),
+                },
+            );
             let fid = format!(
                 "fact:session_boundary:{}:{}:{}",
                 ss.task_id, ss.session, row
@@ -347,6 +567,26 @@ impl BipartiteMemoryGraph {
                 entity_id: tid,
                 fact_id: fid,
                 role: "contained_under_task".into(),
+            });
+            let fs = format!(
+                "fact:summary_indexes_session:{}:{}:{}",
+                ss.task_id, ss.session, row
+            );
+            g.facts.push(ReifiedFact {
+                id: fs.clone(),
+                layer: MemoryLayer::Episodic,
+                relation: "summary_indexes_session_slice".into(),
+                properties: serde_json::json!({ "session": ss.session }),
+            });
+            g.incidence.push(Incidence {
+                entity_id: summary_id.clone(),
+                fact_id: fs.clone(),
+                role: "summary".into(),
+            });
+            g.incidence.push(Incidence {
+                entity_id: entity_session(&ss.task_id, ss.session),
+                fact_id: fs,
+                role: "session_slice".into(),
             });
             for kw in &ss.keywords {
                 let kid = entity_keyword(&ss.task_id, kw);
@@ -379,6 +619,63 @@ impl BipartiteMemoryGraph {
                     entity_id: kid,
                     fact_id: fk,
                     role: "keyword".into(),
+                });
+            }
+            for (decision_index, decision) in ss.key_decisions.iter().enumerate() {
+                let decision_id = entity_decision(&ss.task_id, ss.session, row, decision_index);
+                add_ent(
+                    &mut g,
+                    MemoryEntity {
+                        id: decision_id.clone(),
+                        layer: MemoryLayer::Episodic,
+                        kind: "decision".into(),
+                        label: Some(truncate_label(decision, 80)),
+                        properties: serde_json::json!({
+                            "content": decision,
+                            "task_id": ss.task_id,
+                            "session": ss.session,
+                        }),
+                    },
+                );
+                let fd = format!(
+                    "fact:summary_indexes_decision:{}:{}:{}:{}",
+                    ss.task_id, ss.session, row, decision_index
+                );
+                g.facts.push(ReifiedFact {
+                    id: fd.clone(),
+                    layer: MemoryLayer::Episodic,
+                    relation: "summary_indexes_decision".into(),
+                    properties: serde_json::json!({}),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: summary_id.clone(),
+                    fact_id: fd.clone(),
+                    role: "summary".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: decision_id.clone(),
+                    fact_id: fd.clone(),
+                    role: "decision".into(),
+                });
+                let fr = format!(
+                    "fact:decision_recorded_in_session:{}:{}:{}:{}",
+                    ss.task_id, ss.session, row, decision_index
+                );
+                g.facts.push(ReifiedFact {
+                    id: fr.clone(),
+                    layer: MemoryLayer::Episodic,
+                    relation: "decision_recorded_in_session".into(),
+                    properties: serde_json::json!({ "session": ss.session }),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: decision_id,
+                    fact_id: fr.clone(),
+                    role: "decision".into(),
+                });
+                g.incidence.push(Incidence {
+                    entity_id: entity_session(&ss.task_id, ss.session),
+                    fact_id: fr,
+                    role: "session_slice".into(),
                 });
             }
         }
@@ -590,12 +887,26 @@ mod tests {
                 source_turn: 2,
                 created_at: 1,
                 keywords: vec!["jwt".into()],
+                source_excerpt: Some("User specified JWT auth in turn 2".into()),
+                supporting_evidence: vec!["RFC 7519 referenced".into()],
+                contradicting_evidence: vec!["Legacy doc still says cookie sessions".into()],
+                supersedes_belief_index: Some(9),
+                evidence_belief_indices: vec![7],
+                human_committed: true,
+                claims: vec![TypedClaimSnapshot {
+                    subject: "task:se-01".into(),
+                    relation: "auth_method".into(),
+                    object: "jwt".into(),
+                    negated: false,
+                    scope: Some("software_engineering".into()),
+                    temporal_hint: None,
+                }],
             }],
             session_summaries: vec![SessionSummarySnapshot {
                 task_id: "se-01".into(),
                 session: 1,
                 summary: "Designed API".into(),
-                key_decisions: vec![],
+                key_decisions: vec!["Use JWT for auth".into()],
                 keywords: vec![],
             }],
             skills: vec![SkillSnapshot {
@@ -622,6 +933,31 @@ mod tests {
             .iter()
             .any(|f| f.relation == "session_summarized_at_boundary"));
         assert!(g.facts.iter().any(|f| f.relation == "expertise_for_domain"));
+        assert!(g
+            .entities
+            .iter()
+            .any(|e| e.kind == "evidence_turn" && e.id == "ent:eval_turn:se-01:2"));
+        assert!(g
+            .facts
+            .iter()
+            .any(|f| f.relation == "belief_supersedes_belief"));
+        assert!(g
+            .facts
+            .iter()
+            .any(|f| f.relation == "summary_indexes_decision"));
+        assert!(g
+            .incidence
+            .iter()
+            .any(|i| i.role == "source_evidence" && i.entity_id == "ent:eval_turn:se-01:2"));
+        let belief = g
+            .entities
+            .iter()
+            .find(|e| e.id == "ent:belief:0")
+            .expect("belief entity should exist");
+        assert_eq!(
+            belief.properties["claims"][0]["relation"].as_str(),
+            Some("auth_method")
+        );
     }
 
     #[test]

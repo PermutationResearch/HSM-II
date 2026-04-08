@@ -1,5 +1,6 @@
 /** Same values the queue API accepts — keep in sync with `PolicyQueuePanel` filters. */
 export type QueueView =
+  | "human_inbox"
   | "all"
   | "overdue"
   | "atrisk"
@@ -31,6 +32,10 @@ export function friendlyTaskState(state: string): string {
 
 export function queueTabMeta(view: QueueView): { label: string; hint: string } {
   const m: Record<QueueView, { label: string; hint: string }> = {
+    human_inbox: {
+      label: "Inbox",
+      hint: "Only items blocked on you — approvals, policy holds, or agent escalations",
+    },
     all: { label: "All", hint: "Everything in your list" },
     overdue: { label: "Late", hint: "Past when you wanted it done" },
     atrisk: { label: "At risk", hint: "Might become late soon" },

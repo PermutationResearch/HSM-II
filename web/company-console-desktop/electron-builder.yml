@@ -1,0 +1,27 @@
+appId: com.hyperstigmergy.company-console
+productName: HSM Company OS
+copyright: Copyright © contributors
+
+directories:
+  output: dist-installer
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+
+# Unpacked native binary must stay outside asar
+asarUnpack:
+  - "**/*"
+
+mac:
+  category: public.app-category.business
+  target:
+    - dmg
+    - zip
+
+extraResources:
+  - from: staged/hsm_console
+    to: hsm_console
+  - from: staged/ui
+    to: ui

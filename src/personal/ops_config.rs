@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Supported `schema_version` in YAML.
@@ -122,6 +123,24 @@ pub struct Ticket {
     pub updated: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct HeartbeatRuntimeState {
+    #[serde(default)]
+    pub heartbeats: Vec<HeartbeatRuntimeEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeartbeatRuntimeEntry {
+    pub id: String,
+    pub action: String,
+    pub interval_minutes: u64,
+    pub last_run: Option<DateTime<Utc>>,
+    pub next_run: Option<DateTime<Utc>>,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// Resolve path: `HSM_OPERATIONS_YAML` if set, else `<home>/config/operations.yaml`.
 pub fn resolve_ops_config_path(home: &Path) -> PathBuf {
     if let Ok(p) = std::env::var("HSM_OPERATIONS_YAML") {
@@ -140,6 +159,62 @@ pub fn load_ops_config(path: &Path) -> Result<OperationsConfig> {
     let cfg: OperationsConfig =
         serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))?;
     Ok(cfg)
+}
+
+pub fn heartbeat_state_path(home: &Path) -> PathBuf {
+    home.join("memory").join("heartbeat_state.json")
+}
+
+pub fn load_heartbeat_state(path: &Path) -> Result<HeartbeatRuntimeState> {
+    if !path.is_file() {
+        return Ok(HeartbeatRuntimeState::default());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("read heartbeat runtime state {}", path.display()))?;
+    let state: HeartbeatRuntimeState = serde_json::from_str(&raw)
+        .with_context(|| format!("parse heartbeat runtime state {}", path.display()))?;
+    Ok(state)
+}
+
+pub fn save_heartbeat_state(path: &Path, state: &HeartbeatRuntimeState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create heartbeat state dir {}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(state)
+        .with_context(|| format!("serialize heartbeat runtime state {}", path.display()))?;
+    fs::write(path, raw)
+        .with_context(|| format!("write heartbeat runtime state {}", path.display()))
+}
+
+pub fn record_heartbeat_tick(
+    home: &Path,
+    cfg: &OperationsConfig,
+    status: &str,
+    message: Option<String>,
+) -> Result<()> {
+    let path = heartbeat_state_path(home);
+    let mut state = load_heartbeat_state(&path).unwrap_or_default();
+    let now = Utc::now();
+    let mut entries = Vec::new();
+    for hb in &cfg.heartbeats {
+        let next_run = if hb.interval_minutes > 0 {
+            Some(now + Duration::minutes(hb.interval_minutes as i64))
+        } else {
+            None
+        };
+        entries.push(HeartbeatRuntimeEntry {
+            id: hb.id.clone(),
+            action: hb.action.clone(),
+            interval_minutes: hb.interval_minutes,
+            last_run: Some(now),
+            next_run,
+            status: status.to_string(),
+            message: message.clone(),
+        });
+    }
+    state.heartbeats = entries;
+    save_heartbeat_state(&path, &state)
 }
 
 impl OperationsConfig {

@@ -1,6 +1,30 @@
 "use client";
 
-import { Bot, ChevronDown, FolderKanban, Inbox, LayoutDashboard, Loader2, Plus, Sparkles, Trash2 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  BarChart3,
+  BookOpen,
+  Bot,
+  Building2,
+  ChevronDown,
+  Code2,
+  Crown,
+  Eye,
+  Folder,
+  Inbox,
+  LayoutDashboard,
+  LayoutList,
+  Loader2,
+  Lock,
+  Package,
+  Plus,
+  ShieldCheck,
+  Sparkles,
+  Store,
+  Trash2,
+  TrendingUp,
+  UserCog,
+} from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { CompaniesShItem } from "../hooks/useCompaniesShCatalog";
@@ -24,7 +48,9 @@ export type WorkspaceConsoleView =
   | "memory"
   | "graph"
   | "search"
-  | "email";
+  | "email"
+  | "marketplace"
+  | "sops";
 
 export type WorkspaceSidebarProps = {
   workspaceLabel: string;
@@ -36,16 +62,27 @@ export type WorkspaceSidebarProps = {
   onNavigate: (id: WorkspaceConsoleView) => void;
   dashboardLiveCount: number;
   inboxCount: number;
-  projects: { id: string; name: string }[];
+  /** When `view === "company"`, which workspace sub-tab is active (for sidebar highlights). */
+  companyWorkTab?: "inbox" | "tasks" | "packs" | "sops" | "team" | "advanced" | null;
+  /** Open Company OS on the human decision inbox. */
+  onNavigateInbox?: () => void;
+  /** Open Company OS on the full task list. */
+  onNavigateTasks?: () => void;
+  /** Paperclip-style task containers (distinct from strategic goals). */
+  projects?: { id: string; title: string }[];
+  selectedProjectId?: string | null;
+  onSelectProject?: (projectId: string) => void;
+  /** Company OS strategic goal tree (Advanced → Goals & governance). */
+  goals: { id: string; title: string }[];
   /** `id` = persona string (task owner / checkout); `registryAgentId` when this row exists in workforce roster */
   agents: { id: string; name: string; liveCount: number; registryAgentId: string | null }[];
   /** Highlighted agent from sidebar — matches task `owner_persona` / `checked_out_by` */
   selectedAgentPersona?: string | null;
-  /** Opens Inbox & tasks scoped to that persona (tasks + governance) */
+  /** Opens Tasks (and filters) scoped to that persona */
   onSelectAgent?: (persona: string) => void;
   /** DELETE roster row; only shown when `registryAgentId` is set (task-only names have no row to delete) */
   onDeleteRegistryAgent?: (registryAgentId: string, personaId: string) => void;
-  /** Jump to workforce form (e.g. Team & roles tab) */
+  /** Jump to workforce form (Team & setup tab) */
   onAddRegistryAgent?: () => void;
   onNewIssue: () => void;
   onOpenOnboarding?: () => void;
@@ -144,6 +181,27 @@ function SectionTitle({ children }: { children: ReactNode }) {
   );
 }
 
+/** Deterministic dot colors for goal rows — cycle by index */
+const GOAL_ROW_DOT_COLORS = ["#a78bfa", "#60a5fa", "#f97316", "#818cf8", "#34d399", "#fb7185", "#fbbf24", "#38bdf8"];
+
+/** Map agent name keywords → icon component */
+function getAgentIcon(name: string): LucideIcon {
+  const n = name.toLowerCase();
+  if (n.includes("ceo") || n.includes("chief executive")) return Crown;
+  if (n.includes("security") || n.includes("auditor")) return ShieldCheck;
+  if (n.includes("qa") || n.includes("tester") || n.includes("quality")) return Eye;
+  if (n.includes("oracle")) return Eye;
+  if (n.includes("architect")) return Building2;
+  if (n.includes("product") || n.includes("pm ") || n.startsWith("pm")) return Package;
+  if (n.includes("knowledge") || n.includes("broker")) return BookOpen;
+  if (n.includes("risk") || n.includes("analyst")) return BarChart3;
+  if (n.includes("developer") || n.includes("devel") || n.includes("backend") || n.includes("frontend") || n.includes("engineer")) return Code2;
+  if (n.includes("em ") || n.includes("manager") || n.includes("director")) return UserCog;
+  if (n.includes("lp ") || n.includes("contract") || n.includes("defi") || n.includes("bankroll") || n.includes("liquidity")) return Lock;
+  if (n.includes("growth") || n.includes("revenue") || n.includes("sales")) return TrendingUp;
+  return Bot;
+}
+
 export function WorkspaceSidebar({
   workspaceLabel,
   workspaceInitial,
@@ -154,7 +212,13 @@ export function WorkspaceSidebar({
   onNavigate,
   dashboardLiveCount,
   inboxCount,
-  projects,
+  companyWorkTab = null,
+  onNavigateInbox,
+  onNavigateTasks,
+  projects = [],
+  selectedProjectId = null,
+  onSelectProject,
+  goals,
   agents,
   selectedAgentPersona = null,
   onSelectAgent,
@@ -172,7 +236,8 @@ export function WorkspaceSidebar({
   /** `owner/repo/slug` while install + import runs for that pack */
   const [catalogCreatingPath, setCatalogCreatingPath] = useState<string | null>(null);
   const [deletingCompanyId, setDeletingCompanyId] = useState<string | null>(null);
-  const [projOpen, setProjOpen] = useState(true);
+  const [projectsOpen, setProjectsOpen] = useState(true);
+  const [goalsOpen, setGoalsOpen] = useState(true);
   const [agOpen, setAgOpen] = useState(true);
   const [devOpen, setDevOpen] = useState(false);
   /** Directory list: everything on companies.sh vs Paperclip agent-company packs only */
@@ -392,7 +457,7 @@ export function WorkspaceSidebar({
                         <p className="mt-2 rounded-md border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-2.5 py-2 font-mono text-[10px] leading-snug text-[#9ecbff]">
                           <strong className="font-semibold text-[#c8e1ff]">Important:</strong> each template run installs
                           files (when <code className="text-[#79b8ff]">HSM_COMPANY_PACK_INSTALL_ROOT</code> is set) and{" "}
-                          <strong className="text-[#c8e1ff]">imports every agent</strong> into Team &amp; roles and{" "}
+                          <strong className="text-[#c8e1ff]">imports every agent</strong> into Team &amp; setup and{" "}
                           <strong className="text-[#c8e1ff]">indexes pack skills</strong> into company context. Keep the
                           menu open until the row stops spinning.
                         </p>
@@ -534,62 +599,120 @@ export function WorkspaceSidebar({
             badge={dashboardLiveCount > 0 ? dashboardLiveCount : undefined}
             badgeVariant="live"
           />
+          {onNavigateInbox ? (
+            <NavButton
+              active={view === "company" && companyWorkTab === "inbox"}
+              onClick={onNavigateInbox}
+              icon={Inbox}
+              label="Inbox"
+              title="Human decisions only — agents surface work when they need you"
+              badge={inboxCount > 0 ? inboxCount : undefined}
+            />
+          ) : null}
+          {onNavigateTasks ? (
+            <NavButton
+              active={view === "company" && companyWorkTab === "tasks"}
+              onClick={onNavigateTasks}
+              icon={LayoutList}
+              label="Tasks"
+              title="Full task graph — checkout, SLA, filters, backlog"
+            />
+          ) : (
+            <NavButton
+              active={view === "company"}
+              onClick={() => onNavigate("company")}
+              icon={Inbox}
+              label="Company"
+              title="Workspace"
+            />
+          )}
           <NavButton
-            active={view === "company"}
-            onClick={() => onNavigate("company")}
-            icon={Inbox}
-            label="Inbox & tasks"
-            title="Your list, filters, and approvals in plain language"
-            badge={inboxCount > 0 ? inboxCount : undefined}
+            active={view === "marketplace"}
+            onClick={() => onNavigate("marketplace")}
+            icon={Store}
+            label="Marketplace"
+            title="Browse agent-company templates and add workspaces"
           />
-        </div>
-
-        <SectionTitle>Core</SectionTitle>
-        <div className="space-y-0.5">
-          <SubLink
-            active={view === "company"}
-            onClick={() => onNavigate("company")}
-            label="Issues"
-          />
-          <SubLink
-            active={view === "quality"}
-            onClick={() => onNavigate("quality")}
-            label="Routines"
-            suffix={
-              <span className="rounded border border-[#D4A843]/50 px-1 font-mono text-[9px] font-semibold uppercase tracking-wide text-[#D4A843]">
-                Beta
-              </span>
-            }
-          />
-          <SubLink
-            active={view === "company"}
-            onClick={() => onNavigate("company")}
-            label="Goals"
+          <NavButton
+            active={view === "sops"}
+            onClick={() => onNavigate("sops")}
+            icon={BookOpen}
+            label="Playbooks"
+            title="Author SOPs and playbooks, then implement them as tasks"
           />
         </div>
 
         <button
           type="button"
           className="mb-1 mt-4 flex w-full items-center justify-between px-2 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#666666]"
-          onClick={() => setProjOpen((o) => !o)}
+          onClick={() => setProjectsOpen((o) => !o)}
         >
           <span>Projects</span>
-          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", projOpen && "rotate-180")} />
+          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", projectsOpen && "rotate-180")} />
         </button>
-        {projOpen ? (
+        {projectsOpen ? (
           <div className="space-y-0.5">
             {projects.length === 0 ? (
-              <p className="px-2 py-2 font-mono text-xs text-[#666666]">No goals yet. Add in Company OS.</p>
+              <p className="px-2 py-2 font-mono text-[11px] leading-snug text-[#666666]">
+                None yet. Open <span className="text-[#8B949E]">Tasks</span> to add a project, then attach new issues to it.
+              </p>
             ) : (
-              projects.slice(0, 12).map((p) => (
+              projects.slice(0, 16).map((p) => {
+                const active = selectedProjectId === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectProject?.(p.id);
+                      onNavigateTasks?.();
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
+                      active
+                        ? "bg-white text-black"
+                        : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
+                    )}
+                  >
+                    <Folder
+                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-black" : "text-[#666666]")}
+                    />
+                    <span className="truncate">{p.title}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          className="mb-1 mt-4 flex w-full items-center justify-between px-2 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#666666]"
+          onClick={() => setGoalsOpen((o) => !o)}
+        >
+          <span>Goals</span>
+          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", goalsOpen && "rotate-180")} />
+        </button>
+        {goalsOpen ? (
+          <div className="space-y-0.5">
+            {goals.length === 0 ? (
+              <p className="px-2 py-2 font-mono text-[11px] leading-snug text-[#666666]">
+                None for this workspace. Open <span className="text-[#8B949E]">Advanced</span> →{" "}
+                <span className="text-[#8B949E]">Goals &amp; governance log</span> to add one.
+              </p>
+            ) : (
+              goals.slice(0, 12).map((g, i) => (
                 <button
-                  key={p.id}
+                  key={g.id}
                   type="button"
-                  onClick={() => onNavigate("company")}
+                  onClick={() => (onNavigateTasks ? onNavigateTasks() : onNavigate("company"))}
                   className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] text-[#999999] transition-colors duration-200 ease-out hover:bg-[#111111] hover:text-[#E8E8E8]"
                 >
-                  <FolderKanban className="h-3.5 w-3.5 shrink-0 text-[#666666]" strokeWidth={1.5} />
-                  <span className="truncate">{p.name}</span>
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: GOAL_ROW_DOT_COLORS[i % GOAL_ROW_DOT_COLORS.length] }}
+                  />
+                  <span className="truncate">{g.title}</span>
                 </button>
               ))
             )}
@@ -611,7 +734,7 @@ export function WorkspaceSidebar({
           {onAddRegistryAgent ? (
             <button
               type="button"
-              title="Add workforce agent (opens Team & roles)"
+              title="Add workforce agent (opens Team & setup)"
               onClick={(e) => {
                 e.stopPropagation();
                 onAddRegistryAgent();
@@ -628,28 +751,25 @@ export function WorkspaceSidebar({
               <p className="px-2 py-2 font-mono text-xs text-[#666666]">Agents appear from task owners & checkouts.</p>
             ) : (
               <>
-                <p className="mb-1.5 px-2 font-mono text-[10px] font-normal normal-case leading-snug tracking-normal text-[#555555]">
-                  Click a name to filter <span className="text-[#777777]">Inbox &amp; tasks</span>.{" "}
-                  <span className="text-[#484848]">
-                    Trash deletes the workforce roster row; names that only appear on tasks disappear when you reassign
-                    those tasks.
-                  </span>
-                </p>
                 {sortedAgents.map((a) => {
                 const active = selectedAgentPersona === a.id;
+                const AgentIcon = getAgentIcon(a.name);
                 const rowTone = cn(
-                  "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
                   active
                     ? "bg-white text-black"
                     : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
                 );
                 const label = (
                   <>
-                    <span className="min-w-0 truncate font-mono uppercase tracking-[0.04em]">{a.name}</span>
+                    <AgentIcon
+                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-black" : "text-[#666666]")}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[13px]">{a.name}</span>
                     {a.liveCount > 0 ? (
                       <span
                         className={cn(
-                          "shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide",
+                          "shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold",
                           active
                             ? "border-[#333333] bg-[#F0F0F0] text-[#1A1A1A]"
                             : "border-[#4A9E5C]/50 bg-[#4A9E5C]/15 text-[#4A9E5C]"
@@ -665,16 +785,16 @@ export function WorkspaceSidebar({
                     <div
                       key={a.id}
                       className={cn(
-                        "flex w-full items-stretch gap-0.5 overflow-hidden rounded-md",
+                        "flex w-full items-stretch overflow-hidden rounded-md",
                         active ? "bg-white text-black" : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
                       )}
                     >
                       <button
                         type="button"
-                        title={`Filter inbox to tasks where owner or checked-out-by is “${a.id}”`}
+                        title={`View tasks for ${a.name}`}
                         onClick={() => onSelectAgent?.(a.id)}
                         className={cn(
-                          "flex min-w-0 flex-1 items-center justify-between gap-2 py-1.5 pl-3 pr-1 text-left text-[13px]",
+                          "flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 pr-1 text-left text-[13px]",
                           active ? "" : "rounded-l-md"
                         )}
                       >
@@ -682,19 +802,19 @@ export function WorkspaceSidebar({
                       </button>
                       <button
                         type="button"
-                        title="Remove this agent from the workforce roster (tasks are unchanged)"
+                        title="Remove from workforce roster"
                         onClick={(e) => {
                           e.stopPropagation();
                           onDeleteRegistryAgent(a.registryAgentId!, a.id);
                         }}
                         className={cn(
-                          "flex w-8 shrink-0 items-center justify-center rounded-r-md border-l transition-colors",
+                          "flex w-7 shrink-0 items-center justify-center rounded-r-md border-l transition-colors",
                           active
                             ? "border-[#DDDDDD] text-[#333333] hover:bg-[#EAEAEA]"
                             : "border-[#222222] text-[#666666] hover:bg-[#1A1A1A] hover:text-[#D71921]"
                         )}
                       >
-                        <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                        <Trash2 className="h-3 w-3" strokeWidth={1.5} />
                       </button>
                     </div>
                   );
@@ -703,7 +823,7 @@ export function WorkspaceSidebar({
                   <button
                     key={a.id}
                     type="button"
-                    title={`Filter inbox to tasks where owner or checked-out-by is “${a.id}”`}
+                    title={`View tasks for ${a.name}`}
                     onClick={() => onSelectAgent?.(a.id)}
                     className={rowTone}
                   >
@@ -715,6 +835,23 @@ export function WorkspaceSidebar({
             )}
           </div>
         ) : null}
+
+        <SectionTitle>Work</SectionTitle>
+        <div className="space-y-0.5">
+          {!onNavigateInbox && !onNavigateTasks ? (
+            <SubLink active={view === "company"} onClick={() => onNavigate("company")} label="Company" />
+          ) : null}
+          <SubLink
+            active={view === "quality"}
+            onClick={() => onNavigate("quality")}
+            label="Routines"
+            suffix={
+              <span className="rounded border border-[#D4A843]/50 px-1 font-mono text-[9px] font-semibold uppercase tracking-wide text-[#D4A843]">
+                Beta
+              </span>
+            }
+          />
+        </div>
 
         <div className="mt-8 border-t border-[#222222] pt-3">
           <button

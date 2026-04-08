@@ -15,12 +15,16 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use hyper_stigmergy::architecture_blueprint::{
-    blueprint_markdown, blueprint_markdown_with_runtime, embedded_blueprint, load_blueprint_from_path,
+    blueprint_markdown, blueprint_markdown_with_runtime, embedded_blueprint,
+    load_blueprint_from_path,
 };
 use hyper_stigmergy::HyperStigmergicMorphogenesis;
 
 #[derive(Parser)]
-#[command(name = "hsm_archviz", about = "HSM-II architecture blueprint → Markdown / JSON")]
+#[command(
+    name = "hsm_archviz",
+    about = "HSM-II architecture blueprint → Markdown / JSON"
+)]
 struct Cli {
     /// Use this `.ron` file instead of the embedded blueprint
     #[arg(short = 'f', long = "file")]
@@ -58,7 +62,9 @@ fn main() -> Result<()> {
                         print!("{}", blueprint_markdown_with_runtime(&bp, &rt));
                     }
                     Err(e) => {
-                        eprintln!("hsm_archviz: --live: no world loaded ({e}); printing blueprint only.");
+                        eprintln!(
+                            "hsm_archviz: --live: no world loaded ({e}); printing blueprint only."
+                        );
                         print!("{}", blueprint_markdown(&bp));
                     }
                 }

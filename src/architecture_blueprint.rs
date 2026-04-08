@@ -143,7 +143,10 @@ fn mermaid_system_overview() -> String {
 }
 
 /// Same as [`blueprint_markdown`] plus a **Live World Model Stats** section (from a mounted or loaded world).
-pub fn blueprint_markdown_with_runtime(bp: &ArchitectureBlueprint, runtime: &WorldArchitectureRuntime) -> String {
+pub fn blueprint_markdown_with_runtime(
+    bp: &ArchitectureBlueprint,
+    runtime: &WorldArchitectureRuntime,
+) -> String {
     let mut o = blueprint_markdown(bp);
     o.push_str("\n## Live World Model Stats (from instance)\n\n");
     o.push_str(&format!(

@@ -5,10 +5,12 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
 use hyper_stigmergy::api::{ApiState, HonchoApiState, SharedState};
+use hyper_stigmergy::console::{console_router, ConsoleState};
 use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent};
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use hyper_stigmergy::{ApprovalOutcome, ApprovalService};
@@ -156,10 +158,42 @@ enum MemoryAction {
     },
 }
 
+/// Load repo-root `.env` then cwd `.env` (same as `hsm_console`) so `HSM_COMPANY_OS_DATABASE_URL`
+/// and friends resolve even when the binary is started from e.g. `web/company-console`.
+fn load_repo_dotenv() {
+    let repo_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if repo_env.is_file() {
+        if let Err(e) = dotenvy::from_path(&repo_env) {
+            warn!(
+                path = %repo_env.display(),
+                error = %e,
+                "failed to parse repo-root .env"
+            );
+        }
+    }
+    let _ = dotenvy::dotenv();
+}
+
+/// When true (default), `personal_agent start` binds `HSM_CONSOLE_PORT` (default 3847) with the same
+/// `/api/company/*` + `/api/console/*` stack as `hsm_console`, sharing the in-process Paperclip layer.
+fn embed_company_console_api_enabled() -> bool {
+    match std::env::var("HSM_EMBED_CONSOLE_API")
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "0" | "false" | "no" | "off" => false,
+        _ => true,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
+
+    load_repo_dotenv();
+    hyper_stigmergy::telemetry::init_from_env();
 
     let cli = Cli::parse();
 
@@ -224,7 +258,10 @@ async fn main() -> Result<()> {
 ///
 /// Everything runs in one process:
 ///  - the personal agent (kept in memory in an Arc<Mutex<>>)
-///  - the Axum REST API server (in-process tokio task)
+///  - the Axum REST API server (in-process tokio task, `HSM_API_PORT` / default 3000)
+///  - optional embedded **company console API** (`HSM_CONSOLE_PORT` / default 3847): same routes as
+///    `hsm_console` (`/api/company/*`, `/api/console/*`), sharing this process’s Paperclip layer.
+///    Disable with `HSM_EMBED_CONSOLE_API=0` if you run `hsm_console` separately.
 ///  - the Paperclip **Intelligence Layer** (goals, DRI registry, capability tracking) — **runtime state**, not a company pack
 ///  - the DKS evolution heartbeat (in-process tokio task)
 ///  - gateway message processing (Discord / Telegram)
@@ -261,20 +298,27 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
     println!("   Coherence: {:.3}", agent.world.global_coherence());
     println!(
         "   Council: {}",
-        if agent.config.enable_council { "✓ enabled" } else { "✗ disabled" }
+        if agent.config.enable_council {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
     );
     println!(
         "   CASS: {}",
-        if agent.config.enable_cass { "✓ enabled" } else { "✗ disabled" }
+        if agent.config.enable_cass {
+            "✓ enabled"
+        } else {
+            "✗ disabled"
+        }
     );
     println!("   LadybugDB: ✓ active");
     println!("   Memory journal: ✓ enabled");
     println!("   Honcho inference: ✓ enabled\n");
 
     // ── 2. Build shared API state seeded from the live world ────────────────
-    let shared_inner: Arc<RwLock<SharedState>> = Arc::new(RwLock::new(
-        SharedState::with_world(agent.world.clone()),
-    ));
+    let shared_inner: Arc<RwLock<SharedState>> =
+        Arc::new(RwLock::new(SharedState::with_world(agent.world.clone())));
 
     let honcho_api_state = HonchoApiState {
         honcho_home: agent.base_path.join("honcho"),
@@ -289,8 +333,11 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         match hyper_stigmergy::paperclip::template::CompanyTemplate::load(&template_path) {
             Ok(tpl) => {
                 tpl.apply_to(&mut intelligence);
-                info!("Loaded Paperclip template: {} capabilities, {} DRIs",
-                    intelligence.capabilities.len(), intelligence.dri_registry.len());
+                info!(
+                    "Loaded Paperclip template: {} capabilities, {} DRIs",
+                    intelligence.capabilities.len(),
+                    intelligence.dri_registry.len()
+                );
             }
             Err(e) => warn!("Failed to load Paperclip template: {e}"),
         }
@@ -329,7 +376,56 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
     });
 
     println!("   REST API: http://127.0.0.1:{api_port}");
-    println!("   Web UI:   http://127.0.0.1:3001 (run `cd web && npm run dev`)\n");
+    println!("   Web UI:   http://127.0.0.1:3001 (run `cd web && npm run dev`)");
+
+    // ── 3b. Embedded company console API (parity with `hsm_console`) ───────
+    if embed_company_console_api_enabled() {
+        let console_port: u16 = std::env::var("HSM_CONSOLE_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3847);
+        let console_addr: SocketAddr = format!("127.0.0.1:{console_port}").parse()?;
+
+        let company_db = match hyper_stigmergy::company_os::connect_optional().await {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Company OS: PostgreSQL unavailable — embedded console will serve /api/console/* only (set HSM_COMPANY_OS_DATABASE_URL)"
+                );
+                None
+            }
+        };
+        if let Some(ref pool) = company_db {
+            hyper_stigmergy::company_os::start_automation_worker(pool.clone());
+            info!("Company OS automation worker started (embedded console)");
+        }
+
+        let console_state =
+            ConsoleState::with_paperclip_layer(home.clone(), company_db, Arc::clone(&intelligence));
+        let console_app = console_router(console_state)
+            .layer(tower_http::cors::CorsLayer::permissive())
+            .layer(tower_http::trace::TraceLayer::new_for_http());
+
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(console_addr).await {
+                Ok(listener) => {
+                    info!("HSM company console API (embedded) listening on {console_addr}");
+                    if let Err(e) = axum::serve(listener, console_app).await {
+                        warn!("Embedded company console API error: {e}");
+                    }
+                }
+                Err(e) => warn!(
+                    "Embedded company console bind failed ({console_addr}): {e} — set HSM_EMBED_CONSOLE_API=0 or free the port (e.g. stop `hsm_console`)"
+                ),
+            }
+        });
+
+        println!("   Company console API: http://127.0.0.1:{console_port}  (set NEXT_PUBLIC_API_BASE for web/company-console)");
+    } else {
+        println!("   Company console API: off (HSM_EMBED_CONSOLE_API=0) — run `hsm_console` for /api/company");
+    }
+    println!();
 
     // ── 4. Helper: sync agent world into the shared API state ───────────────
     let sync_world = {
@@ -391,8 +487,7 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
             let intelligence_clone = Arc::clone(&intelligence);
             let sync = sync_world.clone();
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(60));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
                     let mut ag = agent_clone.lock().await;
@@ -425,11 +520,52 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
             });
         }
 
+        // KAIROS-style idle maintenance: autoDream + HEARTBEAT.md without inbound messages
+        if hyper_stigmergy::personal::kairos::kairos_enabled() {
+            let kairos_secs = hyper_stigmergy::personal::kairos::tick_interval_secs();
+            let agent_k = Arc::clone(&agent);
+            let sync_k = sync_world.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(kairos_secs));
+                loop {
+                    interval.tick().await;
+                    let mut ag = agent_k.lock().await;
+                    hyper_stigmergy::personal::kairos::run_idle_maintenance(&mut *ag).await;
+                    sync_k(ag.world.clone());
+                    let _ = ag.save().await;
+                }
+            });
+        }
+
+        if hyper_stigmergy::personal::hsm_cron::cron_file_configured() {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    hyper_stigmergy::personal::hsm_cron::tick_daemon_jobs().await;
+                }
+            });
+        }
+
         println!("✓ Agent is running in daemon mode");
-        if telegram { println!("  Telegram bot: active"); }
-        if discord  { println!("  Discord bot: active"); }
+        if telegram {
+            println!("  Telegram bot: active");
+        }
+        if discord {
+            println!("  Discord bot: active");
+        }
         println!("  DKS evolution: every 60s");
         println!("  Intelligence Layer: every 60s");
+        if hyper_stigmergy::personal::kairos::kairos_enabled() {
+            println!(
+                "  KAIROS idle maintenance: every {}s (autoDream + HEARTBEAT.md when due)",
+                hyper_stigmergy::personal::kairos::tick_interval_secs()
+            );
+        }
+        if hyper_stigmergy::personal::hsm_cron::cron_file_configured() {
+            println!("  File cron: every 30s (config/hsm_cron.json or HSM_CRON_CONFIG)");
+        }
         println!("  Auto-save: enabled\n");
         println!("Press Ctrl+C to stop.");
 

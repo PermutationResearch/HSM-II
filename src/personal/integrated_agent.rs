@@ -5,7 +5,6 @@
 //! - Email Agent (IMAP inbox when configured) + **`/email answer`** to paste an email and get an LLM draft (no IMAP required)
 //! - Coder Assistant (dedicated code editing mode)
 //! - Prolog Logic (symbolic reasoning engine)
-//! - GPU Compute (optional acceleration)
 //! - Ouroboros Compatibility (blockchain integration)
 //! - Pi AI Compatibility (external AI system bridges)
 //! - Hermes Agent Bridge (external tool ecosystem)
@@ -32,9 +31,6 @@ use crate::email::{EmailAgent, EmailConfig};
 use crate::federation::{FederationClient, FederationConfig};
 use crate::pi_ai_compat::Context;
 use crate::prolog_engine::{Atom, PrologEngine, Term};
-
-#[cfg(feature = "gpu")]
-use crate::gpu::GpuAccelerator;
 
 /// Result of a subsystem route: either the shared core already finished the turn, or we still need `finalize_integration_turn`.
 enum IntegrationRoute {
@@ -63,9 +59,6 @@ pub struct IntegratedAgentConfig {
     pub enable_ouroboros: bool,
     /// Enable Hermes bridge (external tool ecosystem)
     pub enable_hermes: bool,
-    /// Enable GPU acceleration
-    #[cfg(feature = "gpu")]
-    pub enable_gpu: bool,
 
     // Component-specific configs
     pub email_config: Option<EmailConfig>,
@@ -91,8 +84,6 @@ impl Default for IntegratedAgentConfig {
             enable_pi_ai: true,
             enable_ouroboros: false,
             enable_hermes: true, // Hermes bridge enabled by default for external tool ecosystem
-            #[cfg(feature = "gpu")]
-            enable_gpu: false,
             email_config: None,
             federation_config: None,
             enable_gardening: true,
@@ -114,13 +105,6 @@ pub struct AgentComponents {
     pub prolog: RwLock<PrologEngine>,
     /// Pi AI compatibility context
     pub pi_ai_context: RwLock<Context>,
-
-    #[cfg(feature = "gpu")]
-    /// GPU accelerator for compute-intensive operations
-    pub gpu: Option<RwLock<GpuAccelerator>>,
-
-    #[cfg(not(feature = "gpu"))]
-    _gpu_placeholder: (),
 }
 
 /// Fully integrated personal agent: **one** HSM-II core plus optional subsystems.
@@ -142,8 +126,6 @@ pub struct ComponentStatus {
     pub prolog: bool,
     pub pi_ai: bool,
     pub ouroboros: bool,
-    #[cfg(feature = "gpu")]
-    pub gpu: bool,
     pub hermes: bool,
 }
 
@@ -247,35 +229,12 @@ impl IntegratedPersonalAgent {
             "You are HSM-II, a multi-agent AI assistant with symbolic reasoning capabilities.",
         ));
 
-        #[cfg(feature = "gpu")]
-        let gpu = if config.enable_gpu {
-            match GpuAccelerator::new().await {
-                Ok(acc) => {
-                    info!("GPU accelerator initialized");
-                    Some(RwLock::new(acc))
-                }
-                Err(e) => {
-                    warn!("GPU acceleration not available: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "gpu"))]
-        let _gpu_placeholder = ();
-
         Ok(AgentComponents {
             email,
             federation,
             coder_sessions,
             prolog,
             pi_ai_context,
-            #[cfg(feature = "gpu")]
-            gpu,
-            #[cfg(not(feature = "gpu"))]
-            _gpu_placeholder,
         })
     }
 
@@ -303,10 +262,6 @@ impl IntegratedPersonalAgent {
         if config.enable_hermes {
             active.push("hermes");
         }
-        #[cfg(feature = "gpu")]
-        if config.enable_gpu {
-            active.push("gpu");
-        }
 
         if active.is_empty() {
             "none (base only)".to_string()
@@ -332,6 +287,10 @@ impl IntegratedPersonalAgent {
             council_used: false,
             skills_accessed: Vec::new(),
             tool_steps: Vec::new(),
+            tool_prompt_tokens: 0,
+            skill_prompt_tokens: 0,
+            tool_prompt_exposed_count: 0,
+            tool_prompt_hidden_count: 0,
             start_time,
             joulework_contributions: HashMap::new(),
         };
@@ -855,8 +814,6 @@ impl IntegratedPersonalAgent {
             prolog: self.config.enable_prolog,
             pi_ai: self.config.enable_pi_ai,
             ouroboros: self.config.enable_ouroboros,
-            #[cfg(feature = "gpu")]
-            gpu: self.components.gpu.is_some(),
             hermes: self.config.enable_hermes,
         }
     }

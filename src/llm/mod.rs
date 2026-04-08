@@ -9,6 +9,8 @@ pub mod cache;
 pub mod client;
 pub mod engine;
 pub mod model;
+pub mod policy;
+pub mod streaming;
 pub mod tokenizer;
 
 pub use cache::{CacheManager, KvCache};
@@ -17,6 +19,8 @@ pub use client::{
 };
 pub use engine::{GenerationParams, InferenceConfig, LlmEngine};
 pub use model::{ModelLoader, ModelType, Quantization};
+pub use policy::{http_timeout, http_timeout_secs, retry_config_from_env};
+pub use streaming::LlmStreamEvent;
 pub use tokenizer::{EncodingOptions, TokenEncoder};
 
 /// FrankenTorch-style hybrid inference engine

@@ -17,6 +17,7 @@ tokio = { version = "1.36", features = ["full", "rt-multi-thread"] }
 tokio-stream = "0.1"
 futures = "0.3"
 futures-util = "0.3"
+async-stream = "0.3"
 
 # Database & Persistence
 mysql_async = "0.34"
@@ -52,6 +53,7 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # Utilities
 anyhow = "1.0"
+dotenvy = "0.15"
 async-trait = "0.1"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -68,7 +70,7 @@ wasmtime = { version = "41.0.3", default-features = false, features = ["cranelif
 petgraph = { version = "0.6", features = ["serde-1"] }
 
 # Federation HTTP server
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 tokio-tungstenite = "0.23"
@@ -100,26 +102,23 @@ mailparse = "0.16"
 imap = "2.4"
 native-tls = "0.2"
 
-# GPU acceleration (optional)
-wgpu = { version = "0.19", optional = true }
-bytemuck = { version = "1.14", optional = true }
-pollster = { version = "0.3", optional = true }
 reedline = "0.10"
 
 # Directories
 dirs = "5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 lbug = { version = "0.15.2", optional = true }
 
 [features]
-default = ["gpu"]
-gpu = ["wgpu", "bytemuck", "pollster"]
 # Native Ladybug graph (`lbug` crate): bundled build needs several GB free disk and CMake.
 # Alternatively set LBUG_LIBRARY_DIR + LBUG_INCLUDE_DIR (and LBUG_SHARED=1 for dynamic link); see docs on docs.rs/crate/lbug.
 lbug = ["dep:lbug"]
 
 [dev-dependencies]
+axum = { version = "0.7", features = ["json"] }
 tempfile = "3.27.0"
 tokio-test = "0.4"
+tower = { version = "0.4", features = ["util"] }
 wat = "1"
 
 [[bin]]
@@ -218,3 +217,19 @@ required-features = ["lbug"]
 [[bin]]
 name = "hsm_archviz"
 path = "src/bin/hsm_archviz.rs"
+
+[[bin]]
+name = "hsm_skills"
+path = "src/bin/hsm_skills.rs"
+
+[[bin]]
+name = "hsm_diagnostic"
+path = "src/bin/hsm_diagnostic.rs"
+
+[[bin]]
+name = "hsm-longmemeval"
+path = "src/bin/hsm_longmemeval.rs"
+
+[[bin]]
+name = "hsm-native-eval"
+path = "src/bin/hsm_native_eval.rs"

@@ -247,11 +247,16 @@ impl Tool for DiskUsageTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let path = path.to_string_lossy().to_string();
 
         // Try df for filesystem info
         let output = tokio::process::Command::new("df")
-            .args(&["-h", path])
+            .args(&["-h", &path])
             .output()
             .await;
 
@@ -263,7 +268,7 @@ impl Tool for DiskUsageTool {
             _ => {
                 // Fallback: try du
                 let output = tokio::process::Command::new("du")
-                    .args(&["-sh", path])
+                    .args(&["-sh", &path])
                     .output()
                     .await;
 
@@ -312,15 +317,18 @@ impl Tool for FileInfoTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-        if path.is_empty() {
+        if path_raw.is_empty() {
             return ToolOutput::error("path is required");
         }
 
-        let path_obj = std::path::Path::new(path);
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
 
-        match tokio::fs::metadata(path).await {
+        match tokio::fs::metadata(&path).await {
             Ok(metadata) => {
                 let permissions = {
                     let mode = metadata.permissions().mode();
@@ -347,16 +355,16 @@ impl Tool for FileInfoTool {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
                     "permissions": permissions,
-                    "extension": path_obj.extension()
+                    "extension": path.extension()
                         .and_then(|e| e.to_str()),
                 });
 
                 let summary = if metadata.is_dir() {
-                    format!("Directory: {} ({} bytes)", path, metadata.len())
+                    format!("Directory: {} ({} bytes)", path.display(), metadata.len())
                 } else {
                     format!(
                         "File: {} ({})",
-                        path,
+                        path.display(),
                         Self::human_readable_size(metadata.len())
                     )
                 };
@@ -421,7 +429,11 @@ impl Tool for ListDirectoryTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
         let pattern = params.get("pattern").and_then(|v| v.as_str());
         let recursive = params
             .get("recursive")
@@ -432,12 +444,13 @@ impl Tool for ListDirectoryTool {
             .and_then(|v| v.as_str())
             .unwrap_or("name");
 
-        let path_obj = std::path::PathBuf::from(path);
+        let path_obj = path.clone();
+        let path_disp = path.to_string_lossy().to_string();
 
         if recursive {
             // Use glob for recursive listing
             let pattern_str = pattern.unwrap_or("*");
-            let full_pattern = format!("{}/**/{}", path, pattern_str);
+            let full_pattern = format!("{}/**/{}", path_disp, pattern_str);
 
             let mut entries = Vec::new();
 
@@ -573,15 +586,20 @@ impl Tool for ReadFileEnhancedTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
 
-        if path.is_empty() {
+        if path_raw.is_empty() {
             return ToolOutput::error("path is required");
         }
 
-        match tokio::fs::read_to_string(path).await {
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = offset.min(lines.len());
@@ -656,7 +674,12 @@ impl Tool for SearchFilesTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let path_disp = path.to_string_lossy().to_string();
         let name_pattern = params.get("name_pattern").and_then(|v| v.as_str());
         let content_pattern = params.get("content_pattern").and_then(|v| v.as_str());
         let case_sensitive = params
@@ -671,7 +694,7 @@ impl Tool for SearchFilesTool {
         let mut results = Vec::new();
 
         // Find files
-        let pattern = format!("{}/{}", path, name_pattern.unwrap_or("*"));
+        let pattern = format!("{}/{}", path_disp, name_pattern.unwrap_or("*"));
 
         match glob::glob(&pattern) {
             Ok(paths) => {
@@ -783,20 +806,29 @@ impl Tool for ArchiveExtractTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let archive = params.get("archive").and_then(|v| v.as_str()).unwrap_or("");
-        let destination = params
+        let archive_raw = params.get("archive").and_then(|v| v.as_str()).unwrap_or("");
+        let dest_raw = params
             .get("destination")
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
-        if archive.is_empty() {
+        if archive_raw.is_empty() {
             return ToolOutput::error("archive path is required");
         }
 
-        let archive_path = std::path::Path::new(archive);
+        let archive = match crate::harness::resolve_tool_fs_path(archive_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let destination = match crate::harness::resolve_tool_fs_path(dest_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+
+        let archive_path = archive.as_path();
 
         if !archive_path.exists() {
-            return ToolOutput::error(format!("Archive not found: {}", archive));
+            return ToolOutput::error(format!("Archive not found: {}", archive.display()));
         }
 
         let extension = archive_path
@@ -805,28 +837,31 @@ impl Tool for ArchiveExtractTool {
             .unwrap_or("")
             .to_lowercase();
 
+        let arch_s = archive.to_string_lossy();
+        let dest_s = destination.to_string_lossy();
+
         let result = match extension.as_str() {
             "zip" => {
                 tokio::process::Command::new("unzip")
-                    .args(&["-o", archive, "-d", destination])
+                    .args(["-o", arch_s.as_ref(), "-d", dest_s.as_ref()])
                     .output()
                     .await
             }
-            "gz" if archive.ends_with(".tar.gz") || archive.ends_with(".tgz") => {
+            "gz" if arch_s.ends_with(".tar.gz") || arch_s.ends_with(".tgz") => {
                 tokio::process::Command::new("tar")
-                    .args(&["-xzf", archive, "-C", destination])
+                    .args(["-xzf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
             }
             "tar" => {
                 tokio::process::Command::new("tar")
-                    .args(&["-xf", archive, "-C", destination])
+                    .args(["-xf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
             }
             "bz2" => {
                 tokio::process::Command::new("tar")
-                    .args(&["-xjf", archive, "-C", destination])
+                    .args(["-xjf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
             }
@@ -836,9 +871,11 @@ impl Tool for ArchiveExtractTool {
         };
 
         match result {
-            Ok(output) if output.status.success() => {
-                ToolOutput::success(format!("Extracted '{}' to '{}'", archive, destination))
-            }
+            Ok(output) if output.status.success() => ToolOutput::success(format!(
+                "Extracted '{}' to '{}'",
+                archive.display(),
+                destination.display()
+            )),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 ToolOutput::error(format!("Extraction failed: {}", stderr))

@@ -196,14 +196,12 @@ fn run_command_with_timeout(
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stdout = String::from_utf8_lossy(
-                        &th_out.join().unwrap_or_else(|_| Vec::new()),
-                    )
-                    .into_owned();
-                    let stderr = String::from_utf8_lossy(
-                        &th_err.join().unwrap_or_else(|_| Vec::new()),
-                    )
-                    .into_owned();
+                    let stdout =
+                        String::from_utf8_lossy(&th_out.join().unwrap_or_else(|_| Vec::new()))
+                            .into_owned();
+                    let stderr =
+                        String::from_utf8_lossy(&th_err.join().unwrap_or_else(|_| Vec::new()))
+                            .into_owned();
                     return Ok(CommandRun {
                         stdout,
                         stderr,
@@ -218,12 +216,7 @@ fn run_command_with_timeout(
     }
 }
 
-fn append_phase_output(
-    aggregate: &mut String,
-    phase: &str,
-    command: &[String],
-    output: &str,
-) {
+fn append_phase_output(aggregate: &mut String, phase: &str, command: &[String], output: &str) {
     if output.trim().is_empty() {
         return;
     }
@@ -266,7 +259,7 @@ pub fn run_external_sync(spec: &ExternalBenchmarkSpec) -> std::io::Result<Extern
             ));
         }
         setup_commands_run += 1;
-    };
+    }
 
     let run = run_command_with_timeout(&spec.command, spec.cwd.as_ref(), &spec.env, timeout)?;
     append_phase_output(&mut stdout, "main", &spec.command, &run.stdout);

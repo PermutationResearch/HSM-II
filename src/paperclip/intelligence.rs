@@ -15,9 +15,7 @@ use tracing::{debug, info, warn};
 
 use super::capability::CapabilityRegistry;
 use super::dri::DriRegistry;
-use super::goal::{
-    EscalationAction, Goal, GoalAssignee, GoalId, GoalPriority, GoalStatus,
-};
+use super::goal::{EscalationAction, Goal, GoalAssignee, GoalId, GoalPriority, GoalStatus};
 use super::org::OrgBlueprint;
 
 // ── Signal ───────────────────────────────────────────────────────────────────
@@ -42,7 +40,10 @@ pub enum SignalKind {
     /// A goal has been stale for too long.
     GoalStale { goal_id: GoalId },
     /// Budget overrun detected.
-    BudgetOverrun { agent_ref: String, overage_cents: i64 },
+    BudgetOverrun {
+        agent_ref: String,
+        overage_cents: i64,
+    },
     /// A composition attempt failed.
     CompositionFailed { goal_id: GoalId, reason: String },
     /// Missing capability — no agent can handle a required primitive.
@@ -146,11 +147,7 @@ impl IntelligenceLayer {
     /// Scan the world state and generate signals for anomalies.
     ///
     /// Called by the unified runtime's heartbeat loop with the current world state.
-    pub fn scan_world(
-        &mut self,
-        coherence: f64,
-        _tick: u64,
-    ) {
+    pub fn scan_world(&mut self, coherence: f64, _tick: u64) {
         // 1. Coherence drop
         if coherence < self.config.coherence_alert_threshold {
             self.emit_signal(Signal {
@@ -174,7 +171,9 @@ impl IntelligenceLayer {
         let stale_ids: Vec<GoalId> = self
             .goals
             .values()
-            .filter(|g| g.status.is_actionable() && g.is_stale(self.config.goal_stale_threshold_secs))
+            .filter(|g| {
+                g.status.is_actionable() && g.is_stale(self.config.goal_stale_threshold_secs)
+            })
             .map(|g| g.id.clone())
             .collect();
 
@@ -252,9 +251,7 @@ impl IntelligenceLayer {
             SignalKind::CompositionFailed { goal_id, reason } => {
                 self.handle_composition_failure(signal, goal_id, reason)
             }
-            SignalKind::GoalStale { goal_id } => {
-                self.handle_stale_goal(signal, goal_id)
-            }
+            SignalKind::GoalStale { goal_id } => self.handle_stale_goal(signal, goal_id),
             SignalKind::MissingCapability { capability_id } => {
                 self.handle_missing_capability(signal, capability_id)
             }
@@ -264,9 +261,10 @@ impl IntelligenceLayer {
             SignalKind::CoherenceDrop { current, threshold } => {
                 self.handle_coherence_drop(signal, *current, *threshold)
             }
-            SignalKind::BudgetOverrun { agent_ref, overage_cents } => {
-                self.handle_budget_overrun(signal, agent_ref, *overage_cents)
-            }
+            SignalKind::BudgetOverrun {
+                agent_ref,
+                overage_cents,
+            } => self.handle_budget_overrun(signal, agent_ref, *overage_cents),
             _ => {
                 // For external/custom/anomaly signals: create a goal and route to DRI
                 self.create_goal_from_signal(signal)
@@ -291,7 +289,12 @@ impl IntelligenceLayer {
             }
 
             goal.status = GoalStatus::CompositionFailed;
-            info!(goal_id, reason, attempts = goal.composition_attempts, "composition failed, will retry");
+            info!(
+                goal_id,
+                reason,
+                attempts = goal.composition_attempts,
+                "composition failed, will retry"
+            );
         }
 
         CompositionResult {
@@ -359,16 +362,19 @@ impl IntelligenceLayer {
 
         let dri_ref = dri.map(|d| d.agent_ref.clone());
 
-        let goal = Goal::new(uuid_v4(), format!("Develop missing capability: {capability_id}"))
-            .with_description(signal.description.clone())
-            .with_priority(GoalPriority::High)
-            .with_assignee(match &dri_ref {
-                Some(ref r) => GoalAssignee::Dri {
-                    agent_ref: r.clone(),
-                    domain: "capability_development".into(),
-                },
-                None => GoalAssignee::Unassigned,
-            });
+        let goal = Goal::new(
+            uuid_v4(),
+            format!("Develop missing capability: {capability_id}"),
+        )
+        .with_description(signal.description.clone())
+        .with_priority(GoalPriority::High)
+        .with_assignee(match &dri_ref {
+            Some(ref r) => GoalAssignee::Dri {
+                agent_ref: r.clone(),
+                domain: "capability_development".into(),
+            },
+            None => GoalAssignee::Unassigned,
+        });
 
         let goal_id = goal.id.clone();
         self.goals.insert(goal_id.clone(), goal);
@@ -487,23 +493,20 @@ impl IntelligenceLayer {
 
         let dri_ref = dri.map(|d| d.agent_ref.clone());
 
-        let goal = Goal::new(
-            uuid_v4(),
-            format!("Resolve budget overrun: {agent_ref}"),
-        )
-        .with_description(format!(
-            "Agent {} is ${:.2} over budget",
-            agent_ref,
-            overage_cents as f64 / 100.0
-        ))
-        .with_priority(GoalPriority::High)
-        .with_assignee(match &dri_ref {
-            Some(ref r) => GoalAssignee::Dri {
-                agent_ref: r.clone(),
-                domain: "cost_optimization".into(),
-            },
-            None => GoalAssignee::Unassigned,
-        });
+        let goal = Goal::new(uuid_v4(), format!("Resolve budget overrun: {agent_ref}"))
+            .with_description(format!(
+                "Agent {} is ${:.2} over budget",
+                agent_ref,
+                overage_cents as f64 / 100.0
+            ))
+            .with_priority(GoalPriority::High)
+            .with_assignee(match &dri_ref {
+                Some(ref r) => GoalAssignee::Dri {
+                    agent_ref: r.clone(),
+                    domain: "cost_optimization".into(),
+                },
+                None => GoalAssignee::Unassigned,
+            });
 
         let goal_id = goal.id.clone();
         self.goals.insert(goal_id.clone(), goal);
@@ -563,7 +566,8 @@ impl IntelligenceLayer {
         self.stats.escalations += 1;
 
         let escalation_level = if let Some(goal) = self.goals.get_mut(goal_id) {
-            goal.escalate().map(|l| (l.assignee.clone(), l.action.clone()))
+            goal.escalate()
+                .map(|l| (l.assignee.clone(), l.action.clone()))
         } else {
             None
         };
@@ -629,7 +633,9 @@ impl IntelligenceLayer {
                 assigned_to: None,
                 capabilities_used: Vec::new(),
                 escalated_to: None,
-                message: format!("Goal {goal_id}: escalation chain exhausted, blocked for human review"),
+                message: format!(
+                    "Goal {goal_id}: escalation chain exhausted, blocked for human review"
+                ),
             }
         }
     }
@@ -663,7 +669,10 @@ impl IntelligenceLayer {
     }
 
     pub fn actionable_goals(&self) -> Vec<&Goal> {
-        self.goals.values().filter(|g| g.status.is_actionable()).collect()
+        self.goals
+            .values()
+            .filter(|g| g.status.is_actionable())
+            .collect()
     }
 
     /// Summary for API / dashboard.

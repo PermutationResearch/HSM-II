@@ -135,7 +135,11 @@ impl UserRepresentation {
             let mut goals = self.goals.clone();
             goals.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
             for g in goals.iter().take(5) {
-                buf.push_str(&format!("- {} _(conf {:.0}%)_\n", g.description, g.confidence * 100.0));
+                buf.push_str(&format!(
+                    "- {} _(conf {:.0}%)_\n",
+                    g.description,
+                    g.confidence * 100.0
+                ));
             }
             buf.push('\n');
         }
@@ -179,7 +183,9 @@ impl UserRepresentation {
     /// confidence are updated from the patch if the patch confidence is higher.
     pub fn merge_patch(&mut self, patch: UserRepresentationPatch) {
         // Communication style: keep the higher-confidence version
-        if patch.communication_style_confidence > self.confidence || self.communication_style.is_empty() {
+        if patch.communication_style_confidence > self.confidence
+            || self.communication_style.is_empty()
+        {
             self.communication_style = patch.communication_style;
         }
 
@@ -238,7 +244,9 @@ impl UserRepresentation {
 
         // Recompute aggregate confidence
         let all: Vec<f64> = self
-            .goals.iter().map(|g| g.confidence)
+            .goals
+            .iter()
+            .map(|g| g.confidence)
             .chain(self.frustrations.iter().map(|f| f.confidence))
             .chain(self.preferences.iter().map(|p| p.confidence))
             .chain(self.traits.iter().map(|t| t.confidence))
@@ -312,6 +320,12 @@ fn goals_similar(a: &str, b: &str) -> bool {
 
 fn sanitize_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

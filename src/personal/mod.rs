@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::ollama_client::{OllamaClient, OllamaConfig};
+use crate::tools::scored_tool_router::rank_tools_for_prompt;
 use crate::tools::ToolRegistry;
 use tokio::sync::{mpsc, oneshot};
 
@@ -19,13 +20,16 @@ pub mod business_pack;
 pub mod enhanced_agent;
 pub mod gateway;
 pub mod heartbeat;
+pub mod hsm_cron;
 pub mod hypergraph_client;
 pub mod integrated_agent;
+pub mod kairos;
 pub mod memory;
 pub mod ops_config;
 pub mod outbound;
 pub mod path_attachments;
 pub mod persona;
+pub mod prompt_assembly;
 pub mod prompt_defaults;
 pub mod task_trail;
 
@@ -103,8 +107,9 @@ impl PersonalAgent {
 
         tracing::info!("PersonalAgent initialized: {}", persona.name);
 
-        // Initialize tool registry with default tools
-        let tool_registry = ToolRegistry::with_default_tools();
+        // Full HSM-II tool surface (web, browser, git, API, …) — same as enhanced agent
+        let mut tool_registry = ToolRegistry::new();
+        crate::tools::register_all_tools(&mut tool_registry);
         tracing::info!("Loaded {} tools", tool_registry.list_tools().len());
 
         Ok(Self {
@@ -143,8 +148,8 @@ impl PersonalAgent {
 
         tracing::info!("New PersonalAgent created: {}", persona.name);
 
-        // Initialize tool registry with default tools
-        let tool_registry = ToolRegistry::with_default_tools();
+        let mut tool_registry = ToolRegistry::new();
+        crate::tools::register_all_tools(&mut tool_registry);
 
         Ok(Self {
             base_path,
@@ -310,13 +315,38 @@ impl PersonalAgent {
         tracing::info!("Executing task with tools: {}", task);
 
         // Build system prompt with available tools
-        let tools_description = self
-            .tool_registry
-            .list_tools()
+        let rank_cap = std::env::var("HSM_TOOL_PROMPT_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(24usize);
+        let ranked_tools = rank_tools_for_prompt(&self.tool_registry, task, rank_cap);
+        let tool_catalog = self.tool_registry.list_tools();
+        let tool_descs: std::collections::HashMap<&str, &str> =
+            tool_catalog.iter().copied().collect();
+        let mut tool_lines = ranked_tools
             .iter()
-            .map(|(name, desc)| format!("- {}: {}", name, desc))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .filter_map(|t| {
+                tool_descs
+                    .get(t.name.as_str())
+                    .map(|desc| format!("- {}: {} [score={:.1}]", t.name, desc, t.score))
+            })
+            .collect::<Vec<_>>();
+        if tool_lines.is_empty() {
+            tool_lines = tool_catalog
+                .iter()
+                .take(rank_cap)
+                .map(|(name, desc)| format!("- {}: {}", name, desc))
+                .collect();
+        }
+        let hidden_count = tool_catalog.len().saturating_sub(tool_lines.len());
+        if hidden_count > 0 {
+            tool_lines.push(format!(
+                "- ... {} additional tools hidden by prompt budget cap",
+                hidden_count
+            ));
+        }
+        let tools_description = tool_lines.join("\n");
 
         let _system_prompt = format!(
             "You are an AI assistant that can use tools to complete tasks.\n\n\
@@ -342,6 +372,8 @@ impl PersonalAgent {
                         name: tool_name.to_string(),
                         parameters: params.clone(),
                         call_id: uuid::Uuid::new_v4().to_string(),
+                        harness_run: None,
+                        idempotency_key: None,
                     };
 
                     tracing::info!("Executing tool: {} with params: {:?}", tool_name, params);

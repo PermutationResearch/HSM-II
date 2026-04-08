@@ -12,6 +12,7 @@
 //! - Tool Execution (60+ tools: files, shell, browser automation, HTTP, web search, etc. — see `crate::tools`)
 //! - AutoContext: persisted playbooks/hints under `<home>/autocontext/` (session-to-session learning)
 //! - Hermes-style **MEMORY.md** / **USER.md** / **AGENTS.md** / **prompt.template.md** excerpts injected when present
+//! - On-disk **SKILL.md** skills under `<home>/skills` and `HSM_SKILL_EXTERNAL_DIRS` (index in prompt; `skills_list` / `skill_md_read`; `/skills`, `/skill <slug>`)
 //! - **MCP tools** on the personal path: same plugin manifests as the coder assistant (`tools/call`, optional `tools/list` via `HSM_PERSONAL_MCP_DISCOVER`)
 //! - **autoDream** consolidation (`HSM_AUTODREAM=1`): scheduled rollups under `memory/consolidated/`
 //! - Optional **BusinessPack** (`business/pack.yaml`) for domain packs (e.g. building management)
@@ -19,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -32,6 +34,7 @@ use hermes_bridge::HermesClient;
 
 use super::business_pack::BusinessPack;
 use crate::hyper_stigmergy::{Belief, BeliefSource, Experience, ExperienceOutcome, HyperEdge};
+use crate::skill_markdown::SkillMdCatalog;
 use crate::{
     autocontext::{AutoContextLoop, AutoContextStore, LoopConfig},
     cass::{embedding::EmbeddingEngine, ContextSnapshot},
@@ -46,20 +49,51 @@ use crate::{
     },
     rlm::LivingPrompt,
     social_memory::DataSensitivity,
+    tools::scored_tool_router::rank_tools_for_prompt,
     tools::{RlmProcessTool, Tool, ToolCall as ToolCallEntry, ToolRegistry},
     trace2skill::{self, ToolStepRecord, TrajectoryRecord},
     AgentId, CouncilMember, DKSConfig, DKSSystem, DKSTickResult, EmbeddedGraphStore,
     HyperStigmergicMorphogenesis, Proposal, RalphConfig, RalphCouncil, Role, CASS,
 };
 
-/// Max bytes of `MEMORY.md` injected per turn (keeps room for business pack + tools).
-const MAX_MEMORY_MD_INJECT_BYTES: usize = 12 * 1024;
 /// Max bytes of `USER.md` injected per turn.
 const MAX_USER_MD_INJECT_BYTES: usize = 8 * 1024;
-/// Max bytes of `AGENTS.md` (Hermes-style repo/agent instructions).
-const MAX_AGENTS_MD_INJECT_BYTES: usize = 10 * 1024;
 /// Max bytes of `prompt.template.md` (optional system template).
 const MAX_PROMPT_TEMPLATE_MD_INJECT_BYTES: usize = 10 * 1024;
+
+fn max_memory_md_inject_bytes() -> usize {
+    std::env::var("HSM_MEMORY_MD_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 512_000)
+        .unwrap_or(2560)
+}
+
+fn max_agents_md_inject_bytes() -> usize {
+    std::env::var("HSM_AGENTS_MD_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 512_000)
+        .unwrap_or(24 * 1024)
+}
+
+/// Max markdown SKILL.md entries listed by slug in the system prompt (blurbs only).
+const MAX_SKILL_MD_PROMPT_ENTRIES: usize = 40;
+/// Max characters per skill blurb line in that index.
+const MAX_SKILL_MD_LINE_CHARS: usize = 120;
+const DEFAULT_TOOL_PROMPT_CAP: usize = 24;
+
+fn approx_tokens_from_chars(chars: usize) -> usize {
+    chars.div_ceil(4)
+}
+
+fn tool_prompt_cap_from_env() -> usize {
+    std::env::var("HSM_TOOL_PROMPT_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_TOOL_PROMPT_CAP)
+}
 
 /// Configuration for the enhanced agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +169,10 @@ pub struct MessageContext {
     pub skills_accessed: Vec<String>,
     /// Tool steps for Trace2Skill export (skills path and similar).
     pub tool_steps: Vec<ToolStepRecord>,
+    pub tool_prompt_tokens: usize,
+    pub skill_prompt_tokens: usize,
+    pub tool_prompt_exposed_count: usize,
+    pub tool_prompt_hidden_count: usize,
     pub start_time: Instant,
     pub joulework_contributions: HashMap<AgentId, f64>,
 }
@@ -207,6 +245,9 @@ pub struct EnhancedPersonalAgent {
     /// Pre-rendered peer context block injected into the system prompt.
     /// Refreshed at session start and after each inference pass.
     pub honcho_peer_repr: Option<String>,
+    /// On-disk SKILL.md catalog (`<home>/skills`, `HSM_SKILL_EXTERNAL_DIRS`); tools `skills_list` / `skill_md_read`.
+    pub skill_md_catalog: Arc<RwLock<SkillMdCatalog>>,
+    last_skill_md_reload: Instant,
 }
 
 /// Tracks agent contributions for JouleWork compensation
@@ -316,8 +357,12 @@ impl EnhancedPersonalAgent {
         crate::tools::register_all_tools(&mut tool_registry);
         crate::tools::mcp_bridge::register_personal_mcp_tools(&mut tool_registry).await;
         crate::tools::register_personal_ops_tools(&mut tool_registry, &base_path);
+        let skill_md_catalog = Arc::new(RwLock::new(SkillMdCatalog::refresh_from_env_home(
+            &base_path,
+        )));
+        crate::tools::register_skill_md_tools(&mut tool_registry, skill_md_catalog.clone());
         info!(
-            "Loaded {} tools (native + MCP + operations)",
+            "Loaded {} tools (native + MCP + operations + skill md)",
             tool_registry.list_tools().len()
         );
 
@@ -365,12 +410,12 @@ impl EnhancedPersonalAgent {
         };
 
         let memory_md_excerpt =
-            Self::load_markdown_excerpt(&base_path.join("MEMORY.md"), MAX_MEMORY_MD_INJECT_BYTES)
+            Self::load_markdown_excerpt(&base_path.join("MEMORY.md"), max_memory_md_inject_bytes())
                 .await;
         let user_md_excerpt =
             Self::load_markdown_excerpt(&base_path.join("USER.md"), MAX_USER_MD_INJECT_BYTES).await;
         let agents_md_excerpt =
-            Self::load_markdown_excerpt(&base_path.join("AGENTS.md"), MAX_AGENTS_MD_INJECT_BYTES)
+            Self::load_markdown_excerpt(&base_path.join("AGENTS.md"), max_agents_md_inject_bytes())
                 .await;
         let prompt_template_excerpt = Self::load_markdown_excerpt(
             &base_path.join("prompt.template.md"),
@@ -402,13 +447,19 @@ impl EnhancedPersonalAgent {
             .clone()
             .or_else(|| std::env::var("HSM_HERMES_ENDPOINT").ok());
         let hermes_client = if let Some(ref ep) = hermes_endpoint {
-            match hermes_bridge::HermesClientBuilder::new().endpoint(ep).build() {
+            match hermes_bridge::HermesClientBuilder::new()
+                .endpoint(ep)
+                .build()
+            {
                 Ok(client) => {
                     info!("Hermes server client ready (endpoint: {})", ep);
                     Some(client)
                 }
                 Err(e) => {
-                    warn!("Hermes server client init failed: {} — will use native tool loop", e);
+                    warn!(
+                        "Hermes server client init failed: {} — will use native tool loop",
+                        e
+                    );
                     None
                 }
             }
@@ -467,6 +518,8 @@ impl EnhancedPersonalAgent {
             honcho_memory,
             honcho_turn_count: 0,
             honcho_peer_repr: None,
+            skill_md_catalog,
+            last_skill_md_reload: Instant::now(),
         })
     }
 
@@ -494,7 +547,7 @@ impl EnhancedPersonalAgent {
     pub async fn reload_instruction_excerpts(&mut self) {
         self.memory_md_excerpt = Self::load_markdown_excerpt(
             &self.base_path.join("MEMORY.md"),
-            MAX_MEMORY_MD_INJECT_BYTES,
+            max_memory_md_inject_bytes(),
         )
         .await;
         self.user_md_excerpt =
@@ -502,7 +555,7 @@ impl EnhancedPersonalAgent {
                 .await;
         self.agents_md_excerpt = Self::load_markdown_excerpt(
             &self.base_path.join("AGENTS.md"),
-            MAX_AGENTS_MD_INJECT_BYTES,
+            max_agents_md_inject_bytes(),
         )
         .await;
         self.prompt_template_excerpt = Self::load_markdown_excerpt(
@@ -510,6 +563,7 @@ impl EnhancedPersonalAgent {
             MAX_PROMPT_TEMPLATE_MD_INJECT_BYTES,
         )
         .await;
+        self.refresh_skill_md_catalog_blocking();
     }
 
     /// Scheduled autoDream consolidation (`memory/consolidated/`) when `HSM_AUTODREAM=1`.
@@ -540,6 +594,10 @@ impl EnhancedPersonalAgent {
         match crate::personal::heartbeat::Heartbeat::load(&self.base_path).await {
             Ok(mut hb) => match hb.tick(&self.base_path).await {
                 Ok(results) => {
+                    self.record_ops_heartbeat_state(
+                        "ok",
+                        Some(format!("{} heartbeat actions", results.len())),
+                    );
                     if !results.is_empty() {
                         info!(
                             target: "hsm_heartbeat",
@@ -548,10 +606,32 @@ impl EnhancedPersonalAgent {
                         );
                     }
                 }
-                Err(e) => warn!(target: "hsm_heartbeat", "heartbeat tick failed: {e}"),
+                Err(e) => {
+                    self.record_ops_heartbeat_state("error", Some(e.to_string()));
+                    warn!(target: "hsm_heartbeat", "heartbeat tick failed: {e}");
+                }
             },
-            Err(e) => warn!(target: "hsm_heartbeat", "heartbeat load failed: {e}"),
+            Err(e) => {
+                self.record_ops_heartbeat_state("error", Some(e.to_string()));
+                warn!(target: "hsm_heartbeat", "heartbeat load failed: {e}");
+            }
         }
+    }
+
+    fn record_ops_heartbeat_state(&self, status: &str, message: Option<String>) {
+        let path = crate::personal::resolve_ops_config_path(&self.base_path);
+        let Ok(cfg) = crate::personal::load_ops_config(&path).and_then(|cfg| {
+            cfg.validate()?;
+            Ok(cfg)
+        }) else {
+            return;
+        };
+        let _ = crate::personal::ops_config::record_heartbeat_tick(
+            &self.base_path,
+            &cfg,
+            status,
+            message,
+        );
     }
 
     fn memory_journal_enabled(&self) -> bool {
@@ -625,12 +705,15 @@ impl EnhancedPersonalAgent {
         Some(out)
     }
 
-    /// Markdown from `MEMORY.md` / `USER.md` at agent home (human-editable, survives restarts).
+    /// Markdown from `AGENTS.md` / `USER.md` / `MEMORY.md` at agent home (human-editable, survives restarts).
+    ///
+    /// Order: **AGENTS** first (stable repo rules), then user profile and Honcho, then a **small** MEMORY excerpt
+    /// so long-running notes do not drown out instructions.
     fn persistent_memory_addon(&self) -> String {
         let mut out = String::new();
-        if let Some(ref m) = self.memory_md_excerpt {
-            out.push_str("\n\n## Persistent memory (MEMORY.md)\n\n");
-            out.push_str(m);
+        if let Some(ref a) = self.agents_md_excerpt {
+            out.push_str("\n\n## Agent instructions (AGENTS.md)\n\n");
+            out.push_str(a);
             out.push('\n');
         }
         if let Some(ref u) = self.user_md_excerpt {
@@ -646,9 +729,9 @@ impl EnhancedPersonalAgent {
                 out.push('\n');
             }
         }
-        if let Some(ref a) = self.agents_md_excerpt {
-            out.push_str("\n\n## Agent instructions (AGENTS.md)\n\n");
-            out.push_str(a);
+        if let Some(ref m) = self.memory_md_excerpt {
+            out.push_str("\n\n## Persistent memory (MEMORY.md)\n\n");
+            out.push_str(m);
             out.push('\n');
         }
         if let Some(ref p) = self.prompt_template_excerpt {
@@ -819,8 +902,18 @@ impl EnhancedPersonalAgent {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
                             call_id: uuid::Uuid::new_v4().to_string(),
+                            harness_run: None,
+                            idempotency_key: None,
                         };
                         let result = self.tool_registry.execute(call).await;
+                        if result.output.success {
+                            crate::tools::web_ingest::ingest_web_tool_success(
+                                &mut self.world,
+                                tool_name,
+                                params,
+                                &result.output,
+                            );
+                        }
                         let tool_out = if result.output.success {
                             result.output.result.clone()
                         } else {
@@ -990,6 +1083,44 @@ impl EnhancedPersonalAgent {
         }
     }
 
+    /// Rescan `SKILL.md` trees under `<home>/skills` and `HSM_SKILL_EXTERNAL_DIRS`.
+    fn refresh_skill_md_catalog_blocking(&mut self) {
+        let roots = crate::skill_markdown::collect_skill_roots(&self.base_path);
+        if let Ok(mut w) = self.skill_md_catalog.write() {
+            *w = SkillMdCatalog::from_roots(&roots);
+        }
+        self.last_skill_md_reload = Instant::now();
+    }
+
+    /// Periodic rescan when `HSM_SKILL_MD_RELOAD_SECS` is set (seconds, 0 = disabled).
+    fn maybe_reload_skill_md_catalog(&mut self) {
+        let interval = std::env::var("HSM_SKILL_MD_RELOAD_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        if interval == 0 {
+            return;
+        }
+        let period = std::time::Duration::from_secs(interval);
+        if self.last_skill_md_reload.elapsed() < period {
+            return;
+        }
+        let roots = crate::skill_markdown::collect_skill_roots(&self.base_path);
+        if let Ok(mut w) = self.skill_md_catalog.write() {
+            *w = SkillMdCatalog::from_roots(&roots);
+            let n = w.len();
+            if n > 0 {
+                info!(
+                    target: "hsm_skill_md",
+                    count = n,
+                    "markdown skills catalog reloaded (HSM_SKILL_MD_RELOAD_SECS={})",
+                    interval
+                );
+            }
+        }
+        self.last_skill_md_reload = Instant::now();
+    }
+
     async fn initialize_services(world: &HyperStigmergicMorphogenesis) -> Result<RuntimeServices> {
         // Initialize DKS
         let dks = DKSSystem::new(DKSConfig::default());
@@ -1012,6 +1143,7 @@ impl EnhancedPersonalAgent {
     /// Process incoming message with full HSM-II pipeline
     pub async fn handle_message(&mut self, msg: Message) -> Result<String> {
         self.maybe_reload_skill_bank_from_disk().await;
+        self.maybe_reload_skill_md_catalog();
         self.maybe_run_heartbeat_tick().await;
         self.maybe_run_autodream_tick().await;
         if std::env::var("HSM_INSTR_HOT_RELOAD")
@@ -1024,8 +1156,65 @@ impl EnhancedPersonalAgent {
             self.reload_instruction_excerpts().await;
         }
 
+        let trimmed_msg = msg.content.trim_start();
+        if trimmed_msg == "/skills" || trimmed_msg.starts_with("/skills ") {
+            let limit = trimmed_msg
+                .strip_prefix("/skills")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<usize>().ok());
+            let content = match self.skill_md_catalog.read() {
+                Ok(cat) => cat.format_list_markdown(limit),
+                Err(_) => "Skills catalog is temporarily unavailable.".to_string(),
+            };
+            return Ok(content);
+        }
+        if trimmed_msg == "/skill" || trimmed_msg.starts_with("/skill ") {
+            let slug = trimmed_msg
+                .strip_prefix("/skill")
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if slug.is_empty() {
+                return Ok(
+                    "Usage: `/skill <slug>` — load the full SKILL.md body. Use `/skills` to list slugs."
+                        .to_string(),
+                );
+            }
+            const MAX: usize = 96 * 1024;
+            let content = match self.skill_md_catalog.read() {
+                Ok(cat) => match cat.read_body(&slug, MAX) {
+                    Ok(body) => format!("# Skill `{slug}`\n\n{body}"),
+                    Err(e) => format!("Could not load skill `{slug}`: {e}"),
+                },
+                Err(_) => "Skills catalog is temporarily unavailable.".to_string(),
+            };
+            return Ok(content);
+        }
+
         let start_time = Instant::now();
         let message_id = msg.id.clone();
+        let mut harness_env = crate::harness::HarnessRunEnvelope::lead_thread(message_id.clone());
+        let no_auto_corr = std::env::var("HSM_HARNESS_NO_AUTO_CORRELATION")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false);
+        if !no_auto_corr {
+            harness_env.run.correlation_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        if let Ok(c) = std::env::var("HSM_HARNESS_CORRELATION_ID") {
+            let t = c.trim();
+            if !t.is_empty() {
+                harness_env.run.correlation_id = Some(t.to_string());
+            }
+        }
+        self.tool_registry.set_harness_context(Some(harness_env));
+        let _harness_turn = crate::harness::HarnessTurnCleanup::new(&mut self.tool_registry);
+        if let Err(e) = crate::harness::activate_thread_workspace(&message_id) {
+            tracing::warn!(target: "hsm.harness.workspace", "{}", e);
+        }
 
         // Create message context
         let mut context = MessageContext {
@@ -1037,6 +1226,10 @@ impl EnhancedPersonalAgent {
             council_used: false,
             skills_accessed: Vec::new(),
             tool_steps: Vec::new(),
+            tool_prompt_tokens: 0,
+            skill_prompt_tokens: 0,
+            tool_prompt_exposed_count: 0,
+            tool_prompt_hidden_count: 0,
             start_time,
             joulework_contributions: HashMap::new(),
         };
@@ -1142,7 +1335,8 @@ impl EnhancedPersonalAgent {
         } else if self.should_use_hermes(&msg.content) && self.hermes_enabled {
             // Auto-detected real-world task (web, terminal, files) — route to Hermes
             let content = msg.content.clone();
-            self.process_with_hermes(&msg, &mut context, &content).await?
+            self.process_with_hermes(&msg, &mut context, &content)
+                .await?
         } else {
             // Simple query - use single agent with CASS skills
             self.process_with_skills(&msg, &mut context).await?
@@ -1169,6 +1363,10 @@ impl EnhancedPersonalAgent {
                 &response.skills_used,
                 response.council_used,
                 context.tool_steps.len(),
+                context.tool_prompt_tokens,
+                context.skill_prompt_tokens,
+                context.tool_prompt_exposed_count,
+                context.tool_prompt_hidden_count,
                 self.world.edges.len(),
                 self.world.beliefs.len(),
             )
@@ -1644,9 +1842,15 @@ impl EnhancedPersonalAgent {
             context.skills_accessed.push("hermes_server".to_string());
             match hermes.execute(task).await {
                 Ok(output) => {
-                    info!("Hermes server completed task in {:.1}s", start.elapsed().as_secs_f64());
+                    info!(
+                        "Hermes server completed task in {:.1}s",
+                        start.elapsed().as_secs_f64()
+                    );
                     return Ok(AgentResponse {
-                        content: format!("{output}\n\n---\n*Hermes server, {:.1}s*", start.elapsed().as_secs_f64()),
+                        content: format!(
+                            "{output}\n\n---\n*Hermes server, {:.1}s*",
+                            start.elapsed().as_secs_f64()
+                        ),
                         primary_agent: 0,
                         council_used: false,
                         confidence: 0.9,
@@ -1656,7 +1860,10 @@ impl EnhancedPersonalAgent {
                     });
                 }
                 Err(e) => {
-                    warn!("Hermes server failed ({}), falling back to native tool loop", e);
+                    warn!(
+                        "Hermes server failed ({}), falling back to native tool loop",
+                        e
+                    );
                 }
             }
         }
@@ -1671,13 +1878,52 @@ impl EnhancedPersonalAgent {
         context.skills_accessed.push("hermes_agentic".to_string());
 
         // Build tool schema list for the system prompt
-        let tools_description = self
-            .tool_registry
-            .list_tools()
+        let rank_cap = tool_prompt_cap_from_env();
+        let ranked_tools = rank_tools_for_prompt(&self.tool_registry, task, rank_cap);
+        let tool_catalog = self.tool_registry.list_tools();
+        let tool_descs: std::collections::HashMap<&str, &str> =
+            tool_catalog.iter().copied().collect();
+        let mut visible_tool_count = 0usize;
+        let mut tool_lines = ranked_tools
             .iter()
-            .map(|(name, desc)| format!("- {}: {}", name, desc))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .filter_map(|t| {
+                tool_descs.get(t.name.as_str()).map(|desc| {
+                    visible_tool_count += 1;
+                    format!("- {}: {} [score={:.1}]", t.name, desc, t.score)
+                })
+            })
+            .collect::<Vec<_>>();
+        if tool_lines.is_empty() {
+            tool_lines = tool_catalog
+                .iter()
+                .take(rank_cap)
+                .map(|(name, desc)| format!("- {}: {}", name, desc))
+                .collect();
+            visible_tool_count = tool_lines.len();
+        }
+        let hidden_count = tool_catalog.len().saturating_sub(visible_tool_count);
+        if hidden_count > 0 {
+            tool_lines.push(format!(
+                "- ... {} additional tools hidden by prompt budget cap",
+                hidden_count
+            ));
+        }
+        let tools_description = tool_lines.join("\n");
+        context.tool_prompt_tokens = approx_tokens_from_chars(tools_description.len());
+        context.skill_prompt_tokens = approx_tokens_from_chars(
+            context
+                .skills_accessed
+                .iter()
+                .map(|s| s.len() + 1)
+                .sum::<usize>(),
+        );
+        info!(
+            "tool prompt budget: exposed={} hidden={} approx_tool_tokens={} approx_skill_tokens={}",
+            visible_tool_count,
+            hidden_count,
+            context.tool_prompt_tokens,
+            context.skill_prompt_tokens
+        );
 
         let system_prompt = format!(
             "You are an autonomous agent with access to real tools. Complete the user's task by calling tools as needed.\n\n\
@@ -1705,10 +1951,7 @@ impl EnhancedPersonalAgent {
 
             if llm_result.timed_out || llm_result.text.is_empty() {
                 if turn == 0 {
-                    final_content = format!(
-                        "LLM unavailable for agentic execution of: '{}'",
-                        task
-                    );
+                    final_content = format!("LLM unavailable for agentic execution of: '{}'", task);
                 }
                 break;
             }
@@ -1728,15 +1971,25 @@ impl EnhancedPersonalAgent {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
                             call_id: uuid::Uuid::new_v4().to_string(),
+                            harness_run: None,
+                            idempotency_key: None,
                         };
 
                         let result = self.tool_registry.execute(call).await;
+                        if result.output.success {
+                            crate::tools::web_ingest::ingest_web_tool_success(
+                                &mut self.world,
+                                tool_name,
+                                params,
+                                &result.output,
+                            );
+                        }
                         tools_executed.push(tool_name.to_string());
 
                         // Record for trace2skill
-                        let args_redacted = serde_json::to_string(
-                            &trace2skill::redact_params(&result.call.parameters),
-                        )
+                        let args_redacted = serde_json::to_string(&trace2skill::redact_params(
+                            &result.call.parameters,
+                        ))
                         .unwrap_or_else(|_| "{}".to_string());
                         let result_summary = trace2skill::summarize_tool_output(
                             result.output.success,
@@ -1755,7 +2008,11 @@ impl EnhancedPersonalAgent {
                         } else {
                             format!(
                                 "ERROR: {}",
-                                result.output.error.as_deref().unwrap_or("Tool execution failed")
+                                result
+                                    .output
+                                    .error
+                                    .as_deref()
+                                    .unwrap_or("Tool execution failed")
                             )
                         };
 
@@ -1784,7 +2041,8 @@ impl EnhancedPersonalAgent {
         }
 
         if final_content.is_empty() {
-            final_content = "Hermes agentic loop ended without a final answer (max turns reached).".to_string();
+            final_content =
+                "Hermes agentic loop ended without a final answer (max turns reached).".to_string();
         }
 
         let suffix = if !tools_executed.is_empty() {
@@ -2335,13 +2593,47 @@ impl EnhancedPersonalAgent {
         // Build enriched system prompt with RLM LivingPrompt + tool schemas
         let enriched_prompt = self.living_prompt.render();
         let mem = self.persistent_memory_addon();
-        let tools_description = self
-            .tool_registry
-            .list_tools()
+        let rank_cap = tool_prompt_cap_from_env();
+        let ranked_tools = rank_tools_for_prompt(&self.tool_registry, &msg.content, rank_cap);
+        let tool_catalog = self.tool_registry.list_tools();
+        let tool_descs: std::collections::HashMap<&str, &str> =
+            tool_catalog.iter().copied().collect();
+        let mut visible_tool_count = 0usize;
+        let mut tool_lines = ranked_tools
             .iter()
-            .map(|(name, desc)| format!("- {}: {}", name, desc))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .filter_map(|t| {
+                tool_descs.get(t.name.as_str()).map(|desc| {
+                    visible_tool_count += 1;
+                    format!("- {}: {} [score={:.1}]", t.name, desc, t.score)
+                })
+            })
+            .collect::<Vec<_>>();
+        if tool_lines.is_empty() {
+            tool_lines = tool_catalog
+                .iter()
+                .take(rank_cap)
+                .map(|(name, desc)| format!("- {}: {}", name, desc))
+                .collect();
+            visible_tool_count = tool_lines.len();
+        }
+        let hidden_count = tool_catalog.len().saturating_sub(visible_tool_count);
+        if hidden_count > 0 {
+            tool_lines.push(format!(
+                "- ... {} additional tools hidden by prompt budget cap",
+                hidden_count
+            ));
+        }
+        let tools_description = tool_lines.join("\n");
+        context.tool_prompt_tokens = approx_tokens_from_chars(tools_description.len());
+        context.skill_prompt_tokens = approx_tokens_from_chars(
+            context
+                .skills_accessed
+                .iter()
+                .map(|s| s.len() + 1)
+                .sum::<usize>(),
+        );
+        context.tool_prompt_exposed_count = visible_tool_count;
+        context.tool_prompt_hidden_count = hidden_count;
 
         let belief_context = if !beliefs.is_empty() {
             let belief_strs: Vec<String> = beliefs
@@ -2420,7 +2712,7 @@ impl EnhancedPersonalAgent {
             let n = std::env::var("HSM_MEMORY_PREFETCH_N")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(5)
+                .unwrap_or(1)
                 .clamp(1, 12);
             match super::agent_memory_pipeline::prefetch_memory_context(
                 &self.llm,
@@ -2435,23 +2727,63 @@ impl EnhancedPersonalAgent {
             }
         }
 
-        let system_prompt = format!(
-            "{enriched_prompt}{mem}{route_hit}{biz}{prefetch}{belief_context}{skill_context}{autocontext_section}\n\n\
-             ## Available Tools\n{tools_description}\n\n\
+        let md_skills_section = match self.skill_md_catalog.read() {
+            Ok(cat) if !cat.is_empty() => format!(
+                "\n\n{}",
+                cat.format_prompt_index(MAX_SKILL_MD_PROMPT_ENTRIES, MAX_SKILL_MD_LINE_CHARS)
+            ),
+            _ => String::new(),
+        };
+
+        let tail = format!(
+            "\n\n## Available Tools\n{tools_description}\n\n\
              ## Tool Usage\n\
              When the user asks you to perform an action (search, read files, run commands, calculate, etc.), \
              respond with a JSON tool call:\n\
              {{\"tool\": \"tool_name\", \"parameters\": {{\"param\": \"value\"}}}}\n\n\
              If no tool is needed, respond normally with helpful text.",
-            route_hit = route_hit.system_block,
-            prefetch = prefetch_block,
         );
+        let policy = super::prompt_assembly::PromptAssemblyPolicy::from_env();
+        let section_pairs: Vec<(String, String)> = vec![
+            ("living".into(), enriched_prompt),
+            ("memory".into(), mem),
+            ("route".into(), route_hit.system_block.clone()),
+            ("business".into(), biz),
+            ("prefetch".into(), prefetch_block),
+            ("belief".into(), belief_context),
+            ("skill".into(), skill_context),
+            ("autocontext".into(), autocontext_section),
+            ("md_skills".into(), md_skills_section),
+            ("tail".into(), tail),
+        ];
+        crate::policy_config::ensure_loaded();
+        let loaded = crate::policy_config::get();
+        let (system_prompt, context_manifest) =
+            super::prompt_assembly::assemble_prompt_sections_with_manifest(
+                &section_pairs,
+                &policy,
+                |k| loaded.tier_for_section(k),
+            );
+        tracing::info!(
+            target: "hsm.context_manifest",
+            summary = %context_manifest.summary_line(),
+            "assembled personal agent system prompt"
+        );
+        if std::env::var("HSM_LOG_CONTEXT_MANIFEST")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            if let Ok(json) = serde_json::to_string(&context_manifest) {
+                tracing::debug!(target: "hsm.context_manifest", %json, "full context manifest");
+            }
+        }
 
         // Generate response with tool-aware prompt
         let start = Instant::now();
+        let tier_chat = crate::harness::TierPolicy::from_env().clip_chat_pairs(&self.chat_history);
         let llm_result = self
             .llm
-            .chat(&system_prompt, &msg.content, &self.chat_history)
+            .chat(&system_prompt, &msg.content, &tier_chat)
             .await;
 
         let mut final_content = if llm_result.timed_out || llm_result.text.is_empty() {
@@ -2480,9 +2812,19 @@ impl EnhancedPersonalAgent {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
                             call_id: uuid::Uuid::new_v4().to_string(),
+                            harness_run: None,
+                            idempotency_key: None,
                         };
 
                         let result = self.tool_registry.execute(call).await;
+                        if result.output.success {
+                            crate::tools::web_ingest::ingest_web_tool_success(
+                                &mut self.world,
+                                tool_name,
+                                params,
+                                &result.output,
+                            );
+                        }
                         tool_used = true;
 
                         let args_redacted = serde_json::to_string(&trace2skill::redact_params(
@@ -2524,7 +2866,7 @@ impl EnhancedPersonalAgent {
                         );
                         let synthesis = self
                             .llm
-                            .chat(&system_prompt, &synthesis_prompt, &self.chat_history)
+                            .chat(&system_prompt, &synthesis_prompt, &tier_chat)
                             .await;
                         final_content = if synthesis.timed_out || synthesis.text.is_empty() {
                             // Fallback: return raw tool output
@@ -2820,6 +3162,10 @@ impl EnhancedPersonalAgent {
                 &response.skills_used,
                 response.council_used,
                 context.tool_steps.len(),
+                context.tool_prompt_tokens,
+                context.skill_prompt_tokens,
+                context.tool_prompt_exposed_count,
+                context.tool_prompt_hidden_count,
                 self.world.edges.len(),
                 self.world.beliefs.len(),
             )
@@ -2920,6 +3266,7 @@ impl EnhancedPersonalAgent {
         tokio::fs::create_dir_all(base_path.join("memory")).await?;
         tokio::fs::create_dir_all(base_path.join("business")).await?;
         tokio::fs::create_dir_all(base_path.join("metrics")).await?;
+        tokio::fs::create_dir_all(base_path.join("skills")).await?;
         Ok(())
     }
 

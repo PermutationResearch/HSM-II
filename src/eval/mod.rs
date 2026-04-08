@@ -48,10 +48,28 @@
 //!          └─────────────────┘
 //! ```
 
+/// Model id for eval binaries when no env is set.
+///
+/// Resolution order: **`DEFAULT_LLM_MODEL`** (e.g. `openrouter/...` / `openai/...`) → **`OLLAMA_MODEL`**
+/// → fallback **`llama3.2`** (run `ollama pull llama3.2` if you only use local Ollama).
+pub fn eval_llm_model_from_env() -> String {
+    let raw = std::env::var("DEFAULT_LLM_MODEL")
+        .or_else(|_| std::env::var("OLLAMA_MODEL"))
+        .unwrap_or_else(|_| "llama3.2".to_string());
+    // OpenRouter (and OpenAI-compatible) expect `openai/gpt-5.4`, not `openrouter/openai/gpt-5.4`.
+    raw.strip_prefix("openrouter/")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or(raw)
+}
+
 pub mod artifacts;
 pub mod autoreason;
 pub mod calibration;
 pub mod external;
+pub mod hsm_native_metrics;
+pub mod hsm_native_tasks;
 pub mod judges;
 pub mod memory_graph;
 pub mod memory_graph_sqlite;
@@ -78,13 +96,19 @@ pub use external::{
     run_external_batch_sync, run_external_sync, ExternalBenchmarkBatch,
     ExternalBenchmarkBatchResult, ExternalBenchmarkResult, ExternalBenchmarkSpec,
 };
+pub use hsm_native_metrics::{
+    score_task, summarize_results, HsmNativeReport, HsmNativeSuiteSummary, HsmNativeTaskResult,
+};
+pub use hsm_native_tasks::{
+    built_in_hsm_native_tasks, HsmNativeGold, HsmNativeSession, HsmNativeTask, HsmNativeTurn,
+};
 pub use judges::{
     evaluate_turn_rubric, grounding_metrics, injected_text_for_grounding_overlap,
     llm_judge_enabled, llm_judge_turn, parse_tool_json, tool_metrics, RubricExtras,
 };
 pub use memory_graph::{
     BeliefSnapshot, BipartiteMemoryGraph, HsmMemorySnapshot, Incidence, MemoryEntity, MemoryLayer,
-    ReifiedFact, SessionSummarySnapshot, SkillSnapshot,
+    ReifiedFact, SessionSummarySnapshot, SkillSnapshot, TypedClaimSnapshot,
 };
 pub use memory_graph_sqlite::{
     delete_all_graph_rows, ingest_json_file, init_schema as init_memory_graph_sqlite_schema,

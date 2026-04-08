@@ -179,12 +179,28 @@ impl CapabilityRegistry {
     pub fn with_defaults() -> Self {
         let mut reg = Self::new();
         let defaults = vec![
-            ("code_engineering", "Code & Engineering", &["engineering"][..]),
+            (
+                "code_engineering",
+                "Code & Engineering",
+                &["engineering"][..],
+            ),
             ("research_data", "Research & Data", &["research", "data"]),
             ("customer_sales", "Customer & Sales", &["customer", "sales"]),
-            ("finance_ops", "Finance & Operations", &["finance", "operations"]),
-            ("content_marketing", "Content & Marketing", &["marketing", "content"]),
-            ("quality_compliance", "Quality & Compliance", &["quality", "compliance"]),
+            (
+                "finance_ops",
+                "Finance & Operations",
+                &["finance", "operations"],
+            ),
+            (
+                "content_marketing",
+                "Content & Marketing",
+                &["marketing", "content"],
+            ),
+            (
+                "quality_compliance",
+                "Quality & Compliance",
+                &["quality", "compliance"],
+            ),
         ];
         for (id, name, domains) in defaults {
             reg.register(
@@ -241,7 +257,11 @@ impl CapabilityRegistry {
         if self.capabilities.is_empty() {
             return 1.0;
         }
-        let meeting = self.capabilities.values().filter(|c| c.meets_target()).count();
+        let meeting = self
+            .capabilities
+            .values()
+            .filter(|c| c.meets_target())
+            .count();
         meeting as f64 / self.capabilities.len() as f64
     }
 

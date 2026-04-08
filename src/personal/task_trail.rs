@@ -24,6 +24,10 @@ struct TurnEvent {
     skills_used: Vec<String>,
     council_used: bool,
     tool_step_count: usize,
+    tool_prompt_tokens: usize,
+    skill_prompt_tokens: usize,
+    tool_prompt_exposed_count: usize,
+    tool_prompt_hidden_count: usize,
     world_edges: usize,
     world_beliefs: usize,
 }
@@ -88,6 +92,10 @@ impl TaskTrail {
         skills_used: &[String],
         council_used: bool,
         tool_step_count: usize,
+        tool_prompt_tokens: usize,
+        skill_prompt_tokens: usize,
+        tool_prompt_exposed_count: usize,
+        tool_prompt_hidden_count: usize,
         world_edges: usize,
         world_beliefs: usize,
     ) -> Result<()> {
@@ -102,6 +110,10 @@ impl TaskTrail {
             skills_used: skills_used.to_vec(),
             council_used,
             tool_step_count,
+            tool_prompt_tokens,
+            skill_prompt_tokens,
+            tool_prompt_exposed_count,
+            tool_prompt_hidden_count,
             world_edges,
             world_beliefs,
         })

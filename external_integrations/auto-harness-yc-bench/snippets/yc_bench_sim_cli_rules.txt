@@ -1,0 +1,13 @@
+## MECHANICAL RULES — YC-BENCH CLI (YC_BENCH_SIM_CLI_V1)
+Violating these produces Usage errors, exit 2, or ok:false. The tool runs ONE Typer command per invocation — not a shell.
+
+- NEVER chain with `&&`, `;`, `|`, pipes, `2>&1`, `head`, `tail`, or `grep` in a single command string. Run one `yc-bench ...` line, inspect JSON output, then issue the next command on a later step if needed.
+- List people: `yc-bench employee list`. There is NO `yc-bench team` command.
+- Browse market: `yc-bench market browse` with optional `--limit N` / `--offset M` / `--domain ...` / `--reward-min-cents N`. Do NOT pipe output to `head`.
+- Accept: `yc-bench task accept --task-id Task-42` (always `--task-id=…`, never a bare positional task id).
+- Assign staff: `yc-bench task assign --task-id Task-42 --employees Emp_1,Emp_2,Emp_3` (both flags required; employees comma-separated, no spaces).
+- Dispatch: `yc-bench task dispatch --task-id Task-42` only when assign and sim state allow it (see error JSON if ok:false).
+- Cancel: `yc-bench task cancel --task-id Task-42 --reason "short explanation"` — `--reason` is REQUIRED.
+- Advance time: `yc-bench sim resume` only when the sim says you have an active task path; if error says accept→dispatch→resume, follow that order.
+
+When ok:false, read the `error` / stderr text and correct the next command (wrong state vs wrong syntax).

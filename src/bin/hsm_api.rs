@@ -7,6 +7,7 @@
 //!   cargo run --bin hsm-api -- [--port 3000] [--host 0.0.0.0]
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -42,6 +43,13 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    let repo_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if repo_env.is_file() {
+        let _ = dotenvy::from_path(&repo_env);
+    }
+    let _ = dotenvy::dotenv();
+    hyper_stigmergy::telemetry::init_from_env();
 
     let args = Args::parse();
 

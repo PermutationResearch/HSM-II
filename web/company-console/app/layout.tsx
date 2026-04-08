@@ -1,21 +1,6 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, Space_Mono } from "next/font/google";
 import { Providers } from "./providers";
 import "./globals.css";
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "700"],
-  variable: "--font-space-grotesk",
-  display: "swap",
-});
-
-const spaceMono = Space_Mono({
-  subsets: ["latin"],
-  weight: ["400", "700"],
-  variable: "--font-space-mono",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "HSM Agent Console",
@@ -23,13 +8,15 @@ export const metadata: Metadata = {
 };
 
 /**
- * Nothing-style dark shell: Space Grotesk (UI) + Space Mono (labels / data).
- * Fonts: https://fonts.google.com — Space Grotesk, Space Mono
- * Company OS + console API: same-origin `/api/company` & `/api/console` → App Router proxies to `HSM_CONSOLE_URL` (see `app/api/company/[[...path]]/route.ts` and `app/api/console/[[...path]]/route.ts`).
+ * Nothing-inspired typography (see `.cursor/skills/nothing-design/`):
+ * - **Space Grotesk / close local fallback** — body, UI, headings via CSS var.
+ * - **Space Mono / close local fallback** — ALL CAPS labels, data, IDs via CSS var.
+ * Optional display: Doto only for rare hero moments (not loaded by default).
+ * Company OS + console: `/api/company` & `/api/console` → proxies to `HSM_CONSOLE_URL`.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${spaceGrotesk.variable} ${spaceMono.variable}`}>
+    <html lang="en">
       <body className="min-h-screen font-sans antialiased">
         <Providers>{children}</Providers>
       </body>

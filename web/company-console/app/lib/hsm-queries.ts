@@ -1,20 +1,39 @@
 import { useQuery } from "@tanstack/react-query";
 import { getConsoleApiBase } from "./console-api-base";
-import type { HsmCompanyAgentRow, HsmCompanyRow, HsmSpendSummaryRow, HsmTaskRow } from "./hsm-api-types";
+import { companyOsUrl } from "./company-api-url";
+import type {
+  HsmAgentInventory,
+  HsmCompanyAgentRow,
+  HsmCompanyRow,
+  HsmGoalRow,
+  HsmIntelligenceSummary,
+  HsmSpendSummaryRow,
+  HsmTaskRow,
+} from "./hsm-api-types";
 
 export function getApiBase(): string {
   return getConsoleApiBase();
 }
 
+export type HsmCompanyHealth = {
+  postgres_configured?: boolean;
+  postgres_ok?: boolean;
+};
+
 export function useCompanyHealth(apiBase: string) {
+  const url =
+    apiBase.length > 0
+      ? `${apiBase}/api/company/health`
+      : "/api/company/health";
   return useQuery({
     queryKey: ["hsm", "health", apiBase],
     queryFn: async () => {
-      const r = await fetch(`${apiBase}/api/company/health`);
-      return (await r.json()) as {
-        postgres_configured?: boolean;
-        postgres_ok?: boolean;
-      };
+      const r = await fetch(url);
+      const body = (await r.json().catch(() => ({}))) as HsmCompanyHealth;
+      if (!r.ok) {
+        throw new Error(`health ${r.status}`);
+      }
+      return body;
     },
   });
 }
@@ -69,6 +88,40 @@ export function useCompanyAgents(apiBase: string, companyId: string | null) {
   });
 }
 
+export function useAgentInventory(apiBase: string, companyId: string | null, agentId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "agent-inventory", apiBase, companyId, agentId],
+    queryFn: async () => {
+      if (!companyId || !agentId) throw new Error("missing company or agent");
+      const url = companyOsUrl(
+        apiBase,
+        `/api/company/companies/${companyId}/agents/${agentId}/inventory`,
+      );
+      const r = await fetch(url);
+      const text = await r.text();
+      type InvErr = { error?: string };
+      let j: (HsmAgentInventory & InvErr) | InvErr = {};
+      try {
+        j = text ? (JSON.parse(text) as (HsmAgentInventory & InvErr) | InvErr) : {};
+      } catch {
+        j = {};
+      }
+      if (!r.ok) {
+        const errBody = typeof j.error === "string" ? j.error.trim() : "";
+        if (r.status === 404 && !errBody) {
+          throw new Error(
+            "Inventory API missing on this server (empty 404). Rebuild and restart hsm_console from the repo: `cargo run -p hyper-stigmergy --bin hsm_console -- --port 3847` so GET …/agents/:agentId/inventory exists. Ensure HSM_CONSOLE_URL (Next proxy) and NEXT_PUBLIC_API_BASE point at that process.",
+          );
+        }
+        if (errBody) throw new Error(errBody);
+        throw new Error(`inventory ${r.status}`);
+      }
+      return j as HsmAgentInventory;
+    },
+    enabled: !!companyId && !!agentId,
+  });
+}
+
 export function useCompanySpendSummary(apiBase: string, companyId: string | null) {
   return useQuery({
     queryKey: ["hsm", "spend", apiBase, companyId],
@@ -81,5 +134,36 @@ export function useCompanySpendSummary(apiBase: string, companyId: string | null
       return j;
     },
     enabled: !!companyId,
+  });
+}
+
+export function useCompanyGoals(apiBase: string, companyId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "goals", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/goals`);
+      const j = (await r.json().catch(() => ({}))) as { goals?: HsmGoalRow[]; error?: string };
+      if (!r.ok) {
+        throw new Error(j.error ?? `goals ${r.status}`);
+      }
+      return j.goals ?? [];
+    },
+    enabled: !!companyId,
+  });
+}
+
+export function useCompanyIntelligenceSummary(apiBase: string, companyId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "intelligence", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/intelligence/summary`);
+      const j = (await r.json().catch(() => ({}))) as HsmIntelligenceSummary;
+      if (!r.ok) {
+        throw new Error(j.error ?? `intelligence ${r.status}`);
+      }
+      return j;
+    },
+    enabled: !!companyId,
+    refetchInterval: 15_000,
   });
 }

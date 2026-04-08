@@ -26,7 +26,7 @@ pub use goal::{
     ArtifactOutput, EscalationChain, EscalationLevel, Goal, GoalAssignee, GoalId, GoalPriority,
     GoalStatus,
 };
-pub use intelligence::{IntelligenceLayer, Signal, SignalKind, CompositionResult};
+pub use intelligence::{CompositionResult, IntelligenceLayer, Signal, SignalKind};
 pub use org::{
     OrgBlueprint, TemplateEscalationLevel, TemplateGoal, TemplateRole, TemplateRoleType,
 };

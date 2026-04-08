@@ -105,7 +105,7 @@ export function ActiveAgentsPanel({
   /** Keys: agent id / persona name → title & role from workforce registry. */
   agentRegistry?: Record<string, { title?: string; role?: string }>;
   issueKeyPrefix?: string | null;
-  /** Opens inbox focused on this task (spec / SLA / checkout). */
+  /** Opens Tasks view focused on this task (spec / SLA / checkout). */
   onTaskClick?: (taskId: string) => void;
   /** Max cards: live first, then recent finished / telemetry (default 8). */
   maxFeedItems?: number;

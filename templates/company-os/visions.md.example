@@ -1,0 +1,25 @@
+# Vision — (company or workspace name)
+
+Short-lived **direction** doc. Playbooks and tasks should align with this; procedures live in **projects** and SOPs, not here.
+
+## Outcomes we want
+
+- …
+
+## Principles (non-negotiables)
+
+- …
+
+## Non-goals / deprioritized
+
+- …
+
+## Horizon
+
+- **This quarter:** …
+- **Explicitly not chasing:** …
+
+## Links
+
+- **`AGENTS.md`** — roles, tools, feedback paths, project layout.
+- **Projects** — Paperclip-style containers; playbooks that ship work are **by project**.

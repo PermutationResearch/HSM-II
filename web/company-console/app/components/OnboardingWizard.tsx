@@ -258,7 +258,7 @@ export function OnboardingWizard(props: Props) {
           <div className="flex gap-2">
             <button
               type="button"
-              className="rounded bg-accent/20 px-3 py-1 text-sm text-accent"
+              className="rounded bg-[#388bfd] px-3 py-1 text-sm font-semibold text-white transition-colors hover:bg-[#4493ff]"
               disabled={obLoading}
               onClick={async () => {
                 const msg = obInput.trim();
@@ -391,7 +391,7 @@ export function OnboardingWizard(props: Props) {
           </div>
           <button
             type="button"
-            className="rounded bg-accent/20 px-3 py-1 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded bg-[#10b981] px-3 py-1 text-sm font-semibold text-white transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:opacity-40"
             disabled={
               obApplyLoading ||
               (obDraft.missing_critical_items?.length ?? 0) > 0 ||

@@ -30,14 +30,56 @@ pub struct GoalExport {
     pub sort_order: i32,
 }
 
+/// Work container (Paperclip-style project); tasks may reference `project_id`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectExport {
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub sort_order: i32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskExport {
     pub title: String,
     pub specification: Option<String>,
     pub primary_goal_old_id: Option<Uuid>,
+    #[serde(default)]
+    pub project_old_id: Option<Uuid>,
+    #[serde(default)]
+    pub workspace_attachment_paths: Vec<String>,
+    /// JSON array of `{ "kind", "ref" }` (optional on older bundles).
+    #[serde(default)]
+    pub capability_refs: Vec<Value>,
     pub state: String,
     pub owner_persona: Option<String>,
     pub priority: i32,
+}
+
+/// Company shared / agent-scoped memory pool entry.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MemoryExport {
+    pub scope: String,
+    #[serde(default)]
+    pub company_agent_old_id: Option<Uuid>,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub summary_l0: Option<String>,
+    #[serde(default)]
+    pub summary_l1: Option<String>,
+    #[serde(default = "default_memory_kind")]
+    pub kind: String,
+}
+
+fn default_memory_kind() -> String {
+    "general".to_string()
 }
 
 /// Workforce agent (Paperclip-style); `reports_to_id` is the UUID from the export bundle.
@@ -62,6 +104,10 @@ pub struct CompanyBundle {
     pub schema_version: u32,
     pub company: CompanyExport,
     pub goals: Vec<GoalExport>,
+    #[serde(default)]
+    pub projects: Vec<ProjectExport>,
+    #[serde(default)]
+    pub memories: Vec<MemoryExport>,
     pub agents: Vec<AgentExport>,
     pub tasks: Vec<TaskExport>,
 }
@@ -73,6 +119,10 @@ pub struct ImportRequest {
     pub slug_suffix_if_exists: bool,
     pub company: CompanyExport,
     pub goals: Vec<GoalExport>,
+    #[serde(default)]
+    pub projects: Vec<ProjectExport>,
+    #[serde(default)]
+    pub memories: Vec<MemoryExport>,
     #[serde(default)]
     pub agents: Vec<AgentExport>,
     pub tasks: Vec<TaskExport>,
@@ -95,16 +145,45 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
     .fetch_all(pool)
     .await?;
 
+    let projects: Vec<(Uuid, String, Option<String>, String, i32)> = sqlx::query_as(
+        r#"SELECT id, title, description, status, sort_order
+           FROM projects WHERE company_id = $1 ORDER BY sort_order, created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await?;
+
     let tasks: Vec<(
         String,
         Option<String>,
         Option<Uuid>,
+        Option<Uuid>,
+        SqlxJson<Value>,
+        SqlxJson<Value>,
         String,
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT title, specification, primary_goal_id, state, owner_persona, priority
+        r#"SELECT title, specification, primary_goal_id, project_id, workspace_attachment_paths, capability_refs, state, owner_persona, priority
                FROM tasks WHERE company_id = $1 ORDER BY created_at"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await?;
+
+    let memory_rows: Vec<(
+        String,
+        Option<Uuid>,
+        String,
+        String,
+        Vec<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
+        r#"SELECT scope, company_agent_id, title, body, tags, source, summary_l0, summary_l1, kind
+           FROM company_memory_entries WHERE company_id = $1 ORDER BY created_at"#,
     )
     .bind(company_id)
     .fetch_all(pool)
@@ -165,7 +244,32 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
         )
         .collect();
 
-    let schema_version = if agents.is_empty() { 1u32 } else { 2u32 };
+    let any_caps = tasks.iter().any(|t| !match &(t.5).0 {
+        Value::Array(a) => a.is_empty(),
+        _ => true,
+    });
+    let schema_version = if any_caps {
+        5u32
+    } else if !memory_rows.is_empty() {
+        4u32
+    } else if !projects.is_empty() {
+        3u32
+    } else if agents.is_empty() {
+        1u32
+    } else {
+        2u32
+    };
+
+    fn paths_from_json(v: &Value) -> Vec<String> {
+        match v {
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => vec![],
+        }
+    }
 
     Ok(CompanyBundle {
         schema_version,
@@ -190,19 +294,71 @@ pub async fn export_bundle(pool: &PgPool, company_id: Uuid) -> Result<CompanyBun
                 },
             )
             .collect(),
+        projects: projects
+            .into_iter()
+            .map(
+                |(id, title, description, status, sort_order)| ProjectExport {
+                    id,
+                    title,
+                    description,
+                    status,
+                    sort_order,
+                },
+            )
+            .collect(),
+        memories: memory_rows
+            .into_iter()
+            .map(
+                |(
+                    scope,
+                    company_agent_id,
+                    title,
+                    body,
+                    tags,
+                    source,
+                    summary_l0,
+                    summary_l1,
+                    kind,
+                )| MemoryExport {
+                    scope,
+                    company_agent_old_id: company_agent_id,
+                    title,
+                    body,
+                    tags,
+                    source,
+                    summary_l0,
+                    summary_l1,
+                    kind,
+                },
+            )
+            .collect(),
         agents,
         tasks: tasks
             .into_iter()
             .map(
-                |(title, specification, primary_goal_id, state, owner_persona, priority)| {
-                    TaskExport {
-                        title,
-                        specification,
-                        primary_goal_old_id: primary_goal_id,
-                        state,
-                        owner_persona,
-                        priority,
-                    }
+                |(
+                    title,
+                    specification,
+                    primary_goal_id,
+                    project_id,
+                    workspace_attachment_paths,
+                    capability_refs,
+                    state,
+                    owner_persona,
+                    priority,
+                )| TaskExport {
+                    title,
+                    specification,
+                    primary_goal_old_id: primary_goal_id,
+                    project_old_id: project_id,
+                    workspace_attachment_paths: paths_from_json(&workspace_attachment_paths.0),
+                    capability_refs: match capability_refs.0 {
+                        Value::Array(a) => a,
+                        _ => vec![],
+                    },
+                    state,
+                    owner_persona,
+                    priority,
                 },
             )
             .collect(),
@@ -293,6 +449,28 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         pending = next_round;
     }
 
+    let mut project_id_map: std::collections::HashMap<Uuid, Uuid> =
+        std::collections::HashMap::with_capacity(req.projects.len());
+    for p in &req.projects {
+        let new_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO projects (company_id, title, description, status, sort_order)
+               VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
+        )
+        .bind(company_id)
+        .bind(p.title.trim())
+        .bind(&p.description)
+        .bind(if p.status.trim().is_empty() {
+            "active"
+        } else {
+            p.status.trim()
+        })
+        .bind(p.sort_order)
+        .fetch_one(&mut *tx)
+        .await
+        .context("insert project")?;
+        project_id_map.insert(p.id, new_id);
+    }
+
     let mut agent_id_map: std::collections::HashMap<Uuid, Uuid> =
         std::collections::HashMap::with_capacity(req.agents.len());
 
@@ -351,10 +529,56 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         pending_agents = next_agents;
     }
 
+    for m in &req.memories {
+        let agent_uuid = m
+            .company_agent_old_id
+            .and_then(|old| agent_id_map.get(&old).copied());
+        if m.scope.trim().eq_ignore_ascii_case("agent") && agent_uuid.is_none() {
+            continue;
+        }
+        let scope = if m.scope.trim().eq_ignore_ascii_case("agent") {
+            "agent"
+        } else {
+            "shared"
+        };
+        let src = m.source.trim();
+        let source = if src.is_empty() { "import" } else { src };
+        let kind = m.kind.trim();
+        let kind = if kind.eq_ignore_ascii_case("broadcast") {
+            "broadcast"
+        } else {
+            "general"
+        };
+        if scope == "agent" && kind == "broadcast" {
+            continue;
+        }
+        sqlx::query(
+            r#"INSERT INTO company_memory_entries
+               (company_id, scope, company_agent_id, title, body, tags, source, summary_l0, summary_l1, kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+        )
+        .bind(company_id)
+        .bind(scope)
+        .bind(agent_uuid)
+        .bind(m.title.trim())
+        .bind(m.body.trim())
+        .bind(&m.tags)
+        .bind(source)
+        .bind(m.summary_l0.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .bind(m.summary_l1.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .bind(kind)
+        .execute(&mut *tx)
+        .await
+        .context("insert company_memory_entries")?;
+    }
+
     for t in &req.tasks {
         let goal_uuid = t
             .primary_goal_old_id
             .and_then(|old| id_map.get(&old).copied());
+        let project_uuid = t
+            .project_old_id
+            .and_then(|old| project_id_map.get(&old).copied());
         let ancestry: Value = if let Some(gid) = goal_uuid {
             super::compute_goal_ancestry_tx(&mut tx, company_id, gid)
                 .await
@@ -366,15 +590,24 @@ pub async fn import_bundle(pool: &PgPool, req: ImportRequest) -> Result<Uuid> {
         let display_n = super::next_task_display_number_tx(&mut tx, company_id)
             .await
             .context("next task display number")?;
+        let ws: Value = serde_json::to_value(&t.workspace_attachment_paths).unwrap_or(json!([]));
+        let caps: Value = if t.capability_refs.is_empty() {
+            json!([])
+        } else {
+            Value::Array(t.capability_refs.clone())
+        };
         sqlx::query(
-            r#"INSERT INTO tasks (company_id, primary_goal_id, goal_ancestry, title, specification, state, owner_persona, priority, display_number)
-               VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)"#,
+            r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona, priority, display_number)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12)"#,
         )
         .bind(company_id)
         .bind(goal_uuid)
+        .bind(project_uuid)
         .bind(ancestry.to_string())
         .bind(&t.title)
         .bind(&t.specification)
+        .bind(SqlxJson(ws))
+        .bind(SqlxJson(caps))
         .bind(&t.state)
         .bind(&t.owner_persona)
         .bind(t.priority)

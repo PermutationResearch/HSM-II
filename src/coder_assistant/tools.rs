@@ -1738,6 +1738,77 @@ mod tests {
     use axum::{extract::Json, routing::post, Router};
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    /// `HSM_APPROVAL_*` is process-global; serialize tests that rewrite it.
+    static APPROVAL_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn approval_env_lock() -> &'static Mutex<()> {
+        APPROVAL_ENV_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Restores a previous env value (or unsets) on drop.
+    struct EnvSet {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl EnvSet {
+        fn new(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for EnvSet {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+
+    /// `ApprovalService` defaults to interactive approvals; unit tests need explicit allow rules.
+    struct ApprovalAllowGuard {
+        _dir: tempfile::TempDir,
+        _store_path: EnvSet,
+        _interactive: EnvSet,
+    }
+
+    fn approval_allow_keys(keys: &[&str]) -> ApprovalAllowGuard {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("approvals.json");
+        let rules: Vec<serde_json::Value> = keys
+            .iter()
+            .map(|k| {
+                json!({
+                    "key": k,
+                    "outcome": "allow",
+                    "scope": "test",
+                    "actor": "unit",
+                    "updated_unix": 0
+                })
+            })
+            .collect();
+        let doc = json!({ "rules": rules, "pending": [] });
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&doc).expect("serialize approvals"),
+        )
+        .expect("write approvals");
+        let store_path = path.to_str().expect("utf8 path").to_string();
+        ApprovalAllowGuard {
+            _dir: dir,
+            _store_path: EnvSet::new("HSM_APPROVAL_STORE", &store_path),
+            _interactive: EnvSet::new("HSM_APPROVAL_INTERACTIVE", "0"),
+        }
+    }
 
     #[tokio::test]
     async fn blocks_secret_echo_and_records_audit() {
@@ -1789,6 +1860,8 @@ mod tests {
 
     #[tokio::test]
     async fn bash_receives_only_injected_environment_variables() {
+        let _env = approval_env_lock().lock().await;
+        let _appr = approval_allow_keys(&["tool:bash@builtin"]);
         let mut context = ToolContext::default();
         context
             .execution_policy
@@ -1828,6 +1901,8 @@ mod tests {
 
     #[tokio::test]
     async fn executes_mcp_provider_tools_over_http() {
+        let _env = approval_env_lock().lock().await;
+        let _appr = approval_allow_keys(&["tool:mail_search@mailbox-mcp"]);
         let app = Router::new().route(
             "/mcp",
             post(|Json(payload): Json<serde_json::Value>| async move {
@@ -1893,6 +1968,8 @@ mod tests {
 
     #[tokio::test]
     async fn executes_wasm_provider_tools_in_capability_wasm_mode() {
+        let _env = approval_env_lock().lock().await;
+        let _appr = approval_allow_keys(&["tool:wasm_transform@wasm-plugin"]);
         let workspace = std::env::temp_dir().join(format!("hsm-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).expect("create workspace");
         let wasm_path = workspace.join("fixture.wasm");

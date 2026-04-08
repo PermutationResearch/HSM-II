@@ -1,12 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import {
+  BookOpen,
   Bot,
   BrainCircuit,
   CircleDollarSign,
+  ClipboardList,
   Command as CommandIcon,
   FolderKanban,
   LayoutDashboard,
@@ -15,6 +17,7 @@ import {
   PanelRight,
   PanelRightClose,
   ShieldCheck,
+  Store,
 } from "lucide-react";
 import {
   Breadcrumb,
@@ -44,6 +47,8 @@ import {
 import { Separator } from "@/app/components/ui/separator";
 import { cn } from "@/app/lib/utils";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
+import { WorkspaceRightRail } from "@/app/components/console/WorkspaceRightRail";
+import { WorkspaceHubLinks } from "@/app/components/workspace/WorkspaceHubLinks";
 
 const nav = [
   { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -54,13 +59,42 @@ const nav = [
   { href: "/workspace/graph", label: "Graph", icon: Network },
   { href: "/workspace/architecture", label: "Architecture", icon: Layers },
   { href: "/workspace/intelligence", label: "Intelligence", icon: BrainCircuit },
+  { href: "/workspace/marketplace", label: "Marketplace", icon: Store },
+  { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen },
+  { href: "/workspace/my-work", label: "My Work", icon: ClipboardList },
 ] as const;
 
 type Crumb = { label: string; href: string | null };
 
+const AGENT_TAB_LABELS: Record<string, string> = {
+  workspace: "Workspace",
+  memory: "Memory",
+  instructions: "Instructions",
+  dashboard: "Dashboard",
+  chat: "Chat",
+  configuration: "Configuration",
+  runs: "Runs",
+};
+
+function humanizePackName(name: string): string {
+  return name
+    .replace(/_/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
 function breadcrumbsForPath(pathname: string): Crumb[] {
   const root: Crumb = { label: "Workspace", href: "/workspace/dashboard" };
   if (pathname.startsWith("/workspace/dashboard")) return [root, { label: "Dashboard", href: null }];
+  if (/^\/workspace\/agents\/[0-9a-fA-F-]{36}\/?$/.test(pathname)) {
+    return [
+      root,
+      { label: "Agents", href: "/workspace/agents" },
+      { label: "Agent", href: null },
+    ];
+  }
   if (pathname.startsWith("/workspace/agents")) return [root, { label: "Agents", href: null }];
   if (pathname.startsWith("/workspace/issues")) return [root, { label: "Issues", href: null }];
   if (pathname.startsWith("/workspace/approvals")) return [root, { label: "Approvals", href: null }];
@@ -68,7 +102,85 @@ function breadcrumbsForPath(pathname: string): Crumb[] {
   if (pathname.startsWith("/workspace/graph")) return [root, { label: "Graph", href: null }];
   if (pathname.startsWith("/workspace/architecture")) return [root, { label: "Architecture", href: null }];
   if (pathname.startsWith("/workspace/intelligence")) return [root, { label: "Intelligence", href: null }];
+  if (pathname.startsWith("/workspace/marketplace")) return [root, { label: "Marketplace", href: null }];
+  if (pathname.startsWith("/workspace/playbooks")) return [root, { label: "Playbooks", href: null }];
+  if (pathname.startsWith("/workspace/my-work")) return [root, { label: "My Work", href: null }];
   return [root];
+}
+
+function BreadcrumbTrail({ crumbs }: { crumbs: Crumb[] }) {
+  return (
+    <BreadcrumbList className="flex-nowrap font-mono text-[11px] uppercase tracking-[0.06em] text-[#999999]">
+      {crumbs.map((c, i) => (
+        <span key={`${c.label}-${i}`} className="contents">
+          {i > 0 ? <BreadcrumbSeparator /> : null}
+          <BreadcrumbItem>
+            {c.href ? (
+              <BreadcrumbLink asChild>
+                <Link href={c.href} className="text-[#999999] hover:text-[#e8e8e8]">
+                  {c.label}
+                </Link>
+              </BreadcrumbLink>
+            ) : (
+              <BreadcrumbPage className="font-medium text-[#e8e8e8]">{c.label}</BreadcrumbPage>
+            )}
+          </BreadcrumbItem>
+        </span>
+      ))}
+    </BreadcrumbList>
+  );
+}
+
+/**
+ * Syncs `?tab=` into parent state after mount. Kept in a nested Suspense so the shell never
+ * SSR/hydrates different breadcrumb text than the first client paint (useSearchParams alone
+ * can diverge from the Suspense fallback and trigger hydration warnings).
+ */
+function AgentTabLabelSync({ setTabLabel }: { setTabLabel: Dispatch<SetStateAction<string>> }) {
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const tab = searchParams.get("tab") ?? "workspace";
+    setTabLabel(AGENT_TAB_LABELS[tab] ?? AGENT_TAB_LABELS.workspace);
+  }, [searchParams, setTabLabel]);
+  return null;
+}
+
+function AgentDetailBreadcrumbs() {
+  const pathname = usePathname() ?? "";
+  const { propertiesSelection } = useWorkspace();
+  /** Stable first paint: matches server and avoids hydration mismatch; AgentTabLabelSync updates from the URL. */
+  const [tabLabel, setTabLabel] = useState("Workspace");
+
+  const crumbs = useMemo((): Crumb[] => {
+    const root: Crumb = { label: "Workspace", href: "/workspace/dashboard" };
+    const agentMatch = pathname.match(/^\/workspace\/agents\/([0-9a-fA-F-]{36})\/?$/i);
+    if (!agentMatch) {
+      return breadcrumbsForPath(pathname);
+    }
+    const id = agentMatch[1];
+    const rawName =
+      propertiesSelection?.kind === "agent" && propertiesSelection.id === id
+        ? propertiesSelection.name ?? ""
+        : "";
+    const displayName = rawName ? humanizePackName(rawName) : "Agent";
+    return [
+      root,
+      { label: "Agents", href: "/workspace/agents" },
+      { label: displayName, href: null },
+      { label: tabLabel, href: null },
+    ];
+  }, [pathname, propertiesSelection, tabLabel]);
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center">
+      <Suspense fallback={null}>
+        <AgentTabLabelSync setTabLabel={setTabLabel} />
+      </Suspense>
+      <Breadcrumb className="min-w-0 flex-1">
+        <BreadcrumbTrail crumbs={crumbs} />
+      </Breadcrumb>
+    </div>
+  );
 }
 
 export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
@@ -81,8 +193,9 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
     companies,
     companiesLoading,
     postgresOk,
+    apiHealthError,
+    postgresConfigured,
     propertiesSelection,
-    setPropertiesSelection,
   } = useWorkspace();
 
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -103,7 +216,8 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
     if (propertiesSelection) setPropsOpen(true);
   }, [propertiesSelection]);
 
-  const crumbs = breadcrumbsForPath(pathname ?? "");
+  const defaultCrumbs = breadcrumbsForPath(pathname ?? "");
+  const onAgentDetail = /^\/workspace\/agents\/[0-9a-fA-F-]{36}\/?$/i.test(pathname ?? "");
 
   const runCommand = useCallback(
     (fn: () => void) => {
@@ -114,65 +228,65 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <div className="flex min-h-screen bg-admin-bg text-foreground">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-admin-border bg-admin-panel">
-        <div className="border-b border-admin-border px-3 py-3">
-          <Link href="/workspace/dashboard" className="pc-sidebar-brand">
-            Company console
+    <div
+      className="flex h-[100dvh] max-h-[100dvh] min-h-0 w-full flex-row overflow-hidden bg-black text-foreground"
+      suppressHydrationWarning
+    >
+      <aside className="flex h-full min-h-0 w-[15.5rem] shrink-0 flex-col overflow-hidden border-r border-[#222222] bg-[#111111]">
+        <div className="shrink-0 border-b border-[#222222] px-3 py-4">
+          <Link href="/workspace/dashboard" className="block outline-none ring-offset-black focus-visible:ring-2 focus-visible:ring-[#333333]">
+            <span className="pc-sidebar-brand">Company console</span>
+            <span className="pc-sidebar-eyebrow">Workspace</span>
           </Link>
-          <p className="mt-1 text-[10px] leading-snug text-admin-muted">Paperclip-class workspace</p>
         </div>
-        <nav className="flex flex-1 flex-col gap-0.5 p-2">
+        <nav className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain p-2">
           {nav.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || (href !== "/workspace/dashboard" && pathname?.startsWith(href));
             return (
               <Link
                 key={href}
                 href={href}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors",
-                  active ? "bg-primary/15 text-primary" : "text-admin-muted hover:bg-white/5 hover:text-foreground",
-                )}
+                className={cn("nd-ws-nav-link", active ? "nd-ws-nav-link--active" : "nd-ws-nav-link--idle")}
               >
-                <Icon className="size-4 shrink-0 opacity-80" strokeWidth={1.5} />
+                <Icon className="size-4 shrink-0 opacity-90" strokeWidth={1.5} aria-hidden />
                 {label}
               </Link>
             );
           })}
-          <Separator className="my-2 bg-admin-border" />
+          <Separator className="my-2 bg-[#222222]" />
           <Link
             href="/"
-            className="rounded-md px-2 py-2 text-sm text-admin-muted hover:bg-white/5 hover:text-foreground"
+            className="nd-ws-nav-link nd-ws-nav-link--idle rounded-sm px-2 py-2 font-mono text-[11px] uppercase tracking-[0.06em]"
           >
-            Legacy full console →
+            Legacy console →
           </Link>
         </nav>
-        <div className="border-t border-admin-border p-2 text-[10px] text-admin-muted">
-          API: <span className="font-mono text-[9px] text-muted-foreground">{apiBase}</span>
-          {!postgresOk ? <span className="mt-1 block text-warn">Postgres not ready</span> : null}
+        <div className="shrink-0 border-t border-[#222222] p-2 font-mono text-[10px] uppercase tracking-[0.06em] text-[#666666]">
+          API
+          <div className="mt-0.5 break-all font-mono text-[9px] normal-case tracking-normal text-[#999999]">{apiBase || "(same origin /api/*)"}</div>
+          {apiHealthError ? (
+            <span className="mt-1 block normal-case text-[#D4A843]" title={apiHealthError}>
+              API health failed — check API is up and CORS
+            </span>
+          ) : !postgresOk ? (
+            <span className="mt-1 block normal-case text-[#D4A843]">
+              {!postgresConfigured
+                ? "Postgres off — add HSM_COMPANY_OS_DATABASE_URL to repo .env, restart hsm_console"
+                : "Postgres not responding — check DB is running"}
+            </span>
+          ) : null}
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-admin-border bg-admin-bg px-4">
-          <Breadcrumb className="min-w-0 flex-1">
-            <BreadcrumbList className="flex-nowrap">
-              {crumbs.map((c, i) => (
-                <span key={`${c.label}-${i}`} className="contents">
-                  {i > 0 ? <BreadcrumbSeparator /> : null}
-                  <BreadcrumbItem>
-                    {c.href ? (
-                      <BreadcrumbLink asChild>
-                        <Link href={c.href}>{c.label}</Link>
-                      </BreadcrumbLink>
-                    ) : (
-                      <BreadcrumbPage>{c.label}</BreadcrumbPage>
-                    )}
-                  </BreadcrumbItem>
-                </span>
-              ))}
-            </BreadcrumbList>
-          </Breadcrumb>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[#222222] bg-black px-4">
+          {onAgentDetail ? (
+            <AgentDetailBreadcrumbs />
+          ) : (
+            <Breadcrumb className="min-w-0 flex-1">
+              <BreadcrumbTrail crumbs={defaultCrumbs} />
+            </Breadcrumb>
+          )}
 
           <div className="flex w-[min(100%,220px)] shrink-0 items-center gap-2">
             <span className="sr-only">Company</span>
@@ -181,10 +295,10 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
               onValueChange={(v) => setCompanyId(v || null)}
               disabled={companiesLoading || companies.length === 0}
             >
-              <SelectTrigger className="h-9 border-admin-border bg-admin-panel font-mono text-xs">
-                <SelectValue placeholder="Company…" />
+              <SelectTrigger className="h-9 border-[#333333] bg-[#111111] font-mono text-xs text-[#e8e8e8]">
+                <SelectValue placeholder={companiesLoading ? "[LOADING…]" : "Company…"} />
               </SelectTrigger>
-              <SelectContent className="border-admin-border bg-admin-panel">
+              <SelectContent className="border-[#333333] bg-[#111111]">
                 {companies.map((c) => (
                   <SelectItem key={c.id} value={c.id} className="font-mono text-xs">
                     {c.display_name}
@@ -198,10 +312,10 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             type="button"
             variant="outline"
             size="sm"
-            className="hidden border-admin-border bg-admin-panel font-mono text-xs sm:inline-flex"
+            className="hidden border-[#333333] bg-[#111111] font-mono text-[11px] uppercase tracking-wide text-[#e8e8e8] hover:bg-white/[0.06] sm:inline-flex"
             onClick={() => setCmdOpen(true)}
           >
-            <CommandIcon className="size-3.5" />
+            <CommandIcon className="size-3.5" strokeWidth={1.5} />
             <span className="ml-1">⌘K</span>
           </Button>
 
@@ -209,55 +323,30 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="border border-transparent text-admin-muted hover:bg-white/5"
-            title={propsOpen ? "Hide properties" : "Show properties"}
+            className="border border-transparent text-[#999999] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+            title={propsOpen ? "Hide agents rail" : "Show agents rail"}
             onClick={() => setPropsOpen((o) => !o)}
           >
             {propsOpen ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
           </Button>
         </header>
 
-        <div className="flex min-h-0 flex-1">
-          <main className="pc-workspace-canvas nd-dashboard-shell p-4 md:p-6">{children}</main>
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <main className="pc-workspace-canvas nd-ws-main min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 md:p-6 md:pl-8 md:pr-8">
+            <WorkspaceHubLinks />
+            {children}
+          </main>
 
           {propsOpen ? (
-            <aside className="hidden w-72 shrink-0 border-l border-admin-border bg-admin-panel/80 lg:block">
-              <div className="border-b border-admin-border px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wide text-admin-muted">
-                Properties
-              </div>
-              <div className="p-3 text-sm text-muted-foreground">
-                {!propertiesSelection ? (
-                  <p className="text-xs leading-relaxed">
-                    Select a task or agent on Issues/Agents to pin details here. Command palette:{" "}
-                    <kbd className="rounded border border-admin-border px-1 font-mono text-[10px]">⌘K</kbd>
-                  </p>
-                ) : propertiesSelection.kind === "task" ? (
-                  <div className="space-y-2">
-                    <p className="font-mono text-[10px] uppercase text-admin-muted">Task</p>
-                    <p className="font-medium text-foreground">{propertiesSelection.title ?? propertiesSelection.id}</p>
-                    <p className="break-all font-mono text-xs text-muted-foreground">{propertiesSelection.id}</p>
-                    <Button variant="outline" size="xs" className="mt-2" onClick={() => setPropertiesSelection(null)}>
-                      Clear
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="font-mono text-[10px] uppercase text-admin-muted">Agent</p>
-                    <p className="font-medium text-foreground">{propertiesSelection.name ?? propertiesSelection.id}</p>
-                    <p className="break-all font-mono text-xs text-muted-foreground">{propertiesSelection.id}</p>
-                    <Button variant="outline" size="xs" className="mt-2" onClick={() => setPropertiesSelection(null)}>
-                      Clear
-                    </Button>
-                  </div>
-                )}
-              </div>
+            <aside className="hidden h-full min-h-0 w-[22rem] shrink-0 flex-col overflow-hidden border-l border-[#222222] bg-[#111111] lg:flex">
+              <WorkspaceRightRail />
             </aside>
           ) : null}
         </div>
       </div>
 
       <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen} title="Command palette" description="Navigate workspace">
-        <CommandInput placeholder="Search pages and actions…" />
+        <CommandInput placeholder="Search…" className="font-mono text-sm" />
         <CommandList>
           <CommandEmpty>No results.</CommandEmpty>
           <CommandGroup heading="Navigate">
@@ -269,6 +358,9 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/graph"))}>Graph</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/architecture"))}>Architecture</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/intelligence"))}>Intelligence</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/marketplace"))}>Marketplace</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/playbooks"))}>Playbooks</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/my-work"))}>My Work</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/"))}>Legacy console</CommandItem>
           </CommandGroup>
           <CommandSeparator />

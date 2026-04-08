@@ -75,10 +75,7 @@ pub enum GoalAssignee {
         capability_id: String,
     },
     /// Directly Responsible Individual — cross-cutting authority.
-    Dri {
-        agent_ref: AgentRef,
-        domain: String,
-    },
+    Dri { agent_ref: AgentRef, domain: String },
     /// Player-Coach — builds + mentors.
     PlayerCoach {
         agent_ref: AgentRef,

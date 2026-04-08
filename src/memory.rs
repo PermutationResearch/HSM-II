@@ -18,8 +18,9 @@ const EMBEDDING_DIM: usize = 768;
 ///   - Keyword (BM25-style term frequency matching)
 ///   - Graph (entity/relationship traversal)
 ///   - Temporal (recency-weighted filtering)
+///   - **Typed claims** — [`MemoryRetrievalIntent`] × [`MemoryNetwork`] × entity overlap ([`recall_claim_typed`])
 ///
-/// Results fused via Reciprocal Rank Fusion (RRF)
+/// Results fused via Reciprocal Rank Fusion (RRF). Claim channel weight: `HSM_TYPED_CLAIM_RRF_WEIGHT` (default 0.65).
 
 // ── Memory Entry ──────────────────────────────────────────────────────
 
@@ -27,6 +28,38 @@ const EMBEDDING_DIM: usize = 768;
 ///   L0 (abstract_l0): ~50 token summary for quick relevance filtering
 ///   L1 (overview_l1): ~500 token overview for navigation/reranking
 ///   L2 (content):      full entry text for detailed processing
+/// API-facing slice of [`MemoryEntry`] without embeddings.
+#[derive(Clone, Debug, Serialize)]
+pub struct MemoryEntryPreview {
+    pub id: usize,
+    pub content: String,
+    pub abstract_l0: Option<String>,
+    pub overview_l1: Option<String>,
+    pub network: MemoryNetwork,
+    pub entities: Vec<String>,
+    pub tags: Vec<String>,
+    pub timestamp: u64,
+    pub tick: u64,
+    pub importance: f64,
+}
+
+impl MemoryEntryPreview {
+    fn from_entry(e: &MemoryEntry) -> Self {
+        Self {
+            id: e.id,
+            content: e.content.clone(),
+            abstract_l0: e.abstract_l0.clone(),
+            overview_l1: e.overview_l1.clone(),
+            network: e.network.clone(),
+            entities: e.entities.clone(),
+            tags: e.tags.clone(),
+            timestamp: e.timestamp,
+            tick: e.tick,
+            importance: e.importance,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: usize,
@@ -71,7 +104,162 @@ pub struct StrategyScores {
     pub keyword: f64,
     pub graph: f64,
     pub temporal: f64,
+    /// Typed claim / [`MemoryNetwork`] alignment with [`classify_query_intent`] (channel raw score).
+    pub claim_typed: f64,
     pub fused: f64,
+}
+
+// ── Typed claim retrieval (query intent × memory network) ─────────────
+
+/// Lightweight query intent for memory ranking — no LLM. Drives which [`MemoryNetwork`] kinds are preferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryRetrievalIntent {
+    /// Belief updates, contradictions, opinions
+    BeliefRevision,
+    /// Time-relative questions
+    Temporal,
+    /// Who/what/entity-centric lookups
+    EntityCentric,
+    /// Events, sessions, what happened
+    Experiential,
+    /// No strong signal
+    General,
+}
+
+/// Classify query intent from cheap keyword / pattern heuristics (English-oriented).
+pub fn classify_query_intent(query: &str) -> MemoryRetrievalIntent {
+    let q = query.to_lowercase();
+    if q.split_whitespace().count() < 2 && !q.contains('?') {
+        return MemoryRetrievalIntent::General;
+    }
+    if matches_belief_revision(&q) {
+        return MemoryRetrievalIntent::BeliefRevision;
+    }
+    if matches_temporal(&q) {
+        return MemoryRetrievalIntent::Temporal;
+    }
+    if matches_entity_centric(&q) {
+        return MemoryRetrievalIntent::EntityCentric;
+    }
+    if matches_experiential(&q) {
+        return MemoryRetrievalIntent::Experiential;
+    }
+    MemoryRetrievalIntent::General
+}
+
+fn matches_belief_revision(q: &str) -> bool {
+    const K: &[&str] = &[
+        "believe",
+        "belief",
+        "opinion",
+        "think that",
+        "suppose",
+        "revised",
+        "revision",
+        "updated view",
+        "supersede",
+        "supersed",
+        "contradict",
+        "contradiction",
+        "no longer believe",
+        "changed my mind",
+        "corrected",
+        "obsolete",
+    ];
+    K.iter().any(|k| q.contains(k))
+}
+
+fn matches_temporal(q: &str) -> bool {
+    const K: &[&str] = &[
+        "when ",
+        "when did",
+        "before ",
+        "after ",
+        "during ",
+        "last week",
+        "yesterday",
+        "timeline",
+        "chronolog",
+        "at what time",
+        "what date",
+    ];
+    K.iter().any(|k| q.contains(k))
+}
+
+fn matches_entity_centric(q: &str) -> bool {
+    q.starts_with("who ")
+        || q.starts_with("what is ")
+        || q.starts_with("what are ")
+        || q.contains("define ")
+        || q.contains("definition of")
+}
+
+fn matches_experiential(q: &str) -> bool {
+    const K: &[&str] = &[
+        "happened",
+        "we did",
+        "i did",
+        "session",
+        "meeting",
+        "event",
+        "experience",
+        "recall when",
+        "remember when",
+    ];
+    K.iter().any(|k| q.contains(k))
+}
+
+/// Base relevance in [0, 1] of a [`MemoryNetwork`] row given intent.
+pub fn network_claim_match(intent: MemoryRetrievalIntent, network: &MemoryNetwork) -> f64 {
+    match intent {
+        MemoryRetrievalIntent::BeliefRevision => match network {
+            MemoryNetwork::Belief => 1.0,
+            MemoryNetwork::WorldFact => 0.48,
+            MemoryNetwork::EntitySummary => 0.42,
+            MemoryNetwork::Experience => 0.35,
+        },
+        MemoryRetrievalIntent::Temporal => match network {
+            MemoryNetwork::Experience => 1.0,
+            MemoryNetwork::Belief => 0.72,
+            MemoryNetwork::WorldFact => 0.62,
+            MemoryNetwork::EntitySummary => 0.48,
+        },
+        MemoryRetrievalIntent::EntityCentric => match network {
+            MemoryNetwork::EntitySummary => 1.0,
+            MemoryNetwork::WorldFact => 0.88,
+            MemoryNetwork::Belief => 0.55,
+            MemoryNetwork::Experience => 0.4,
+        },
+        MemoryRetrievalIntent::Experiential => match network {
+            MemoryNetwork::Experience => 1.0,
+            MemoryNetwork::EntitySummary => 0.52,
+            MemoryNetwork::WorldFact => 0.48,
+            MemoryNetwork::Belief => 0.38,
+        },
+        MemoryRetrievalIntent::General => match network {
+            MemoryNetwork::Belief => 0.78,
+            MemoryNetwork::WorldFact => 0.76,
+            MemoryNetwork::EntitySummary => 0.7,
+            MemoryNetwork::Experience => 0.68,
+        },
+    }
+}
+
+fn entity_overlap_factor(query_entities: &[String], entry: &MemoryEntry) -> f64 {
+    if query_entities.is_empty() {
+        return 1.0;
+    }
+    let mut hits = 0_usize;
+    for qe in query_entities {
+        let ql = qe.to_lowercase();
+        if entry.entities.iter().any(|e| {
+            let el = e.to_lowercase();
+            el == ql || el.contains(&ql) || ql.contains(&el)
+        }) {
+            hits += 1;
+        }
+    }
+    0.65 + 0.35 * (hits as f64 / query_entities.len().max(1) as f64)
 }
 
 // ── OpenViking-inspired Progressive Recall ───────────────────────────
@@ -299,6 +487,60 @@ impl HybridMemory {
         id
     }
 
+    /// Remove one entry by id (rebuilds secondary indexes). Returns false if missing.
+    pub fn remove_entry_by_id(&mut self, id: usize) -> bool {
+        let Some(pos) = self.entries.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        let entry = self.entries.remove(pos);
+        self.vector_index.remove(id);
+
+        for ent in &entry.entities {
+            if let Some(ids) = self.entity_graph.get_mut(ent) {
+                ids.retain(|&x| x != id);
+                if ids.is_empty() {
+                    self.entity_graph.remove(ent);
+                }
+            }
+        }
+        for tag in &entry.tags {
+            if let Some(ids) = self.tag_index.get_mut(tag) {
+                ids.retain(|&x| x != id);
+                if ids.is_empty() {
+                    self.tag_index.remove(tag);
+                }
+            }
+        }
+
+        match entry.network {
+            MemoryNetwork::WorldFact => {
+                self.stats.world_facts = self.stats.world_facts.saturating_sub(1);
+            }
+            MemoryNetwork::Experience => {
+                self.stats.experiences = self.stats.experiences.saturating_sub(1);
+            }
+            MemoryNetwork::EntitySummary => {
+                self.stats.entity_summaries = self.stats.entity_summaries.saturating_sub(1);
+            }
+            MemoryNetwork::Belief => {
+                self.stats.beliefs = self.stats.beliefs.saturating_sub(1);
+            }
+        }
+        self.stats.total_entries = self.stats.total_entries.saturating_sub(1);
+        true
+    }
+
+    /// Lightweight listing for HTTP review UIs (newest last; capped).
+    pub fn list_entries_preview(&self, limit: usize) -> Vec<MemoryEntryPreview> {
+        let n = self.entries.len();
+        let skip = n.saturating_sub(limit);
+        self.entries
+            .iter()
+            .skip(skip)
+            .map(MemoryEntryPreview::from_entry)
+            .collect()
+    }
+
     fn calculate_importance(content: &str, network: &MemoryNetwork) -> f64 {
         let base = match network {
             MemoryNetwork::WorldFact => 0.6,
@@ -339,12 +581,16 @@ impl HybridMemory {
         // Strategy 4: Temporal (recency-weighted)
         let temporal_results = self.recall_temporal(current_tick, k * 3);
 
+        // Strategy 5: Typed claims — intent × MemoryNetwork + entity overlap (not raw TF-IDF alone)
+        let claim_results = self.recall_claim_typed(query, k * 3);
+
         // Reciprocal Rank Fusion
         let fused = self.reciprocal_rank_fusion(
             &semantic_results,
             &keyword_results,
             &graph_results,
             &temporal_results,
+            &claim_results,
             k,
         );
 
@@ -613,6 +859,24 @@ impl HybridMemory {
         scored.into_iter().take(k).collect()
     }
 
+    /// Rank entries by typed claim fit: [`MemoryRetrievalIntent`] × [`MemoryNetwork`] × entity overlap.
+    fn recall_claim_typed(&self, query: &str, k: usize) -> Vec<(usize, f64)> {
+        let intent = classify_query_intent(query);
+        let q_entities = extract_entities(query);
+        let mut scored: Vec<(usize, f64)> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let base = network_claim_match(intent, &entry.network);
+                let overlap = entity_overlap_factor(&q_entities, entry);
+                let s = (base * overlap).min(1.0);
+                (entry.id, s)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored.into_iter().take(k).collect()
+    }
+
     /// Reciprocal Rank Fusion: score = Σ 1/(k + rank_i) across strategies
     fn reciprocal_rank_fusion(
         &self,
@@ -620,39 +884,61 @@ impl HybridMemory {
         keyword: &[(usize, f64)],
         graph: &[(usize, f64)],
         temporal: &[(usize, f64)],
+        claim_typed: &[(usize, f64)],
         k: usize,
     ) -> Vec<RecallResult> {
         let rrf_k = 60.0; // standard RRF constant
 
-        let mut fused_scores: HashMap<usize, (f64, f64, f64, f64, f64)> = HashMap::new();
+        let claim_w = std::env::var("HSM_TYPED_CLAIM_RRF_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&w| w >= 0.0 && w <= 2.0)
+            .unwrap_or(0.65_f64);
 
-        // Weight each strategy
-        let weights = [1.0, 0.7, 0.8, 0.5]; // semantic, keyword, graph, temporal
+        // semantic, keyword, graph, temporal, claim_typed
+        let weights = [1.0_f64, 0.7, 0.8, 0.5, claim_w];
+
+        let mut fused_scores: HashMap<usize, (f64, f64, f64, f64, f64, f64)> = HashMap::new();
 
         for (rank, (id, score)) in semantic.iter().enumerate() {
-            let entry = fused_scores.entry(*id).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
+            let entry = fused_scores
+                .entry(*id)
+                .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
             entry.0 = *score;
-            entry.4 += weights[0] / (rrf_k + rank as f64 + 1.0);
+            entry.5 += weights[0] / (rrf_k + rank as f64 + 1.0);
         }
         for (rank, (id, score)) in keyword.iter().enumerate() {
-            let entry = fused_scores.entry(*id).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
+            let entry = fused_scores
+                .entry(*id)
+                .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
             entry.1 = *score;
-            entry.4 += weights[1] / (rrf_k + rank as f64 + 1.0);
+            entry.5 += weights[1] / (rrf_k + rank as f64 + 1.0);
         }
         for (rank, (id, score)) in graph.iter().enumerate() {
-            let entry = fused_scores.entry(*id).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
+            let entry = fused_scores
+                .entry(*id)
+                .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
             entry.2 = *score;
-            entry.4 += weights[2] / (rrf_k + rank as f64 + 1.0);
+            entry.5 += weights[2] / (rrf_k + rank as f64 + 1.0);
         }
         for (rank, (id, score)) in temporal.iter().enumerate() {
-            let entry = fused_scores.entry(*id).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
+            let entry = fused_scores
+                .entry(*id)
+                .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
             entry.3 = *score;
-            entry.4 += weights[3] / (rrf_k + rank as f64 + 1.0);
+            entry.5 += weights[3] / (rrf_k + rank as f64 + 1.0);
+        }
+        for (rank, (id, score)) in claim_typed.iter().enumerate() {
+            let entry = fused_scores
+                .entry(*id)
+                .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+            entry.4 = *score;
+            entry.5 += weights[4] / (rrf_k + rank as f64 + 1.0);
         }
 
         let mut results: Vec<RecallResult> = fused_scores
             .into_iter()
-            .filter_map(|(id, (sem, kw, gr, temp, fused))| {
+            .filter_map(|(id, (sem, kw, gr, temp, claim, fused))| {
                 self.entries
                     .iter()
                     .find(|e| e.id == id)
@@ -664,6 +950,7 @@ impl HybridMemory {
                             keyword: kw,
                             graph: gr,
                             temporal: temp,
+                            claim_typed: claim,
                             fused,
                         },
                     })
@@ -948,4 +1235,39 @@ pub fn default_tool_registry() -> ToolRegistry {
     }
 
     registry
+}
+
+#[cfg(test)]
+mod typed_claim_tests {
+    use super::*;
+
+    #[test]
+    fn classify_belief_revision() {
+        assert_eq!(
+            classify_query_intent("We revised our belief that the API was stable"),
+            MemoryRetrievalIntent::BeliefRevision
+        );
+    }
+
+    #[test]
+    fn classify_temporal() {
+        assert_eq!(
+            classify_query_intent("What happened last week before the deploy?"),
+            MemoryRetrievalIntent::Temporal
+        );
+    }
+
+    #[test]
+    fn network_match_prefers_belief_under_revision_intent() {
+        let i = MemoryRetrievalIntent::BeliefRevision;
+        assert!(network_claim_match(i, &MemoryNetwork::Belief)
+            > network_claim_match(i, &MemoryNetwork::Experience));
+    }
+
+    #[test]
+    fn network_match_prefers_experience_under_experiential() {
+        let i = MemoryRetrievalIntent::Experiential;
+        assert!(network_claim_match(i, &MemoryNetwork::Experience)
+            > network_claim_match(i, &MemoryNetwork::WorldFact));
+    }
 }

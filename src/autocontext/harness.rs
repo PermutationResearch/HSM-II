@@ -142,6 +142,8 @@ impl PlaybookHarness {
                 name: tool_name.clone(),
                 parameters: params,
                 call_id: format!("harness_step_{}", step.index),
+                harness_run: None,
+                idempotency_key: None,
             };
 
             let result = tool_registry.execute(call).await;

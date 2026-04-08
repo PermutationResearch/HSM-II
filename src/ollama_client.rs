@@ -552,6 +552,12 @@ impl OllamaClient {
         user_message: &str,
         history: &[(String, String)],
     ) -> LlmResult {
+        tracing::info!(
+            target: "hsm.harness.llm.chat",
+            llm_model_hint = %self.config.model,
+            history_pairs = history.len(),
+            "llm chat"
+        );
         let start = Instant::now();
 
         // Local Ollama first (model may be installed, e.g. qwen3-coder:480b-cloud)

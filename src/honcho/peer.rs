@@ -77,7 +77,11 @@ impl Peer {
     }
 
     /// Create a new agent peer with `now` timestamps.
-    pub fn new_agent(id: impl Into<String>, handle: impl Into<String>, role: impl Into<String>) -> Self {
+    pub fn new_agent(
+        id: impl Into<String>,
+        handle: impl Into<String>,
+        role: impl Into<String>,
+    ) -> Self {
         let now = now_secs();
         let id = id.into();
         let handle = handle.into();

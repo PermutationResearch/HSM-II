@@ -76,14 +76,15 @@ pub enum DriTenure {
     /// Permanent DRI — owns this domain indefinitely.
     Persistent,
     /// Time-boxed (e.g., sprint, incident response).
-    TimeBound {
-        start: u64,
-        end: u64,
-    },
+    TimeBound { start: u64, end: u64 },
 }
 
 impl DriEntry {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, agent_ref: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        agent_ref: impl Into<String>,
+    ) -> Self {
         let now = now_secs();
         Self {
             id: id.into(),

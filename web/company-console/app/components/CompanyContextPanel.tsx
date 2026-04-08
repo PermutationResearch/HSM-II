@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 type Props = {
@@ -39,24 +40,33 @@ export function CompanyContextPanel({ api, companyId, contextMarkdown, setCoErr,
   }, [api, companyId, draft, onSaved, setCoErr]);
 
   return (
-    <details className="mb-6 rounded-lg border border-line bg-panel" open>
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
-        <span className="text-gray-400">▸</span> Company context{" "}
-        <span className="font-normal text-gray-500">
-          (feeds every task&apos;s <code className="text-xs text-accent">GET …/llm-context</code>)
-        </span>
+    <details className="group mb-6 rounded-xl border border-[#30363D] bg-[#0d1117]" open>
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="mt-0.5 h-4 w-4 shrink-0 text-[#8B949E] transition-transform duration-200 group-open:rotate-90"
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-white">Shared context</span>
+            <span className="rounded border border-[#58a6ff]/35 bg-[#388bfd]/10 px-2 py-px font-mono text-[10px] font-semibold uppercase tracking-wide text-[#79b8ff]">
+              All agents
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+            Prepended to <code className="text-[11px] text-[#79b8ff]">GET …/llm-context</code> for every task — not a
+            substitute for per-agent briefings below.
+          </p>
+        </div>
       </summary>
-      <div className="space-y-3 border-t border-line px-4 py-4">
-        <p className="text-sm leading-relaxed text-gray-500">
-          Paste <strong className="font-medium text-gray-400">Markdown</strong> the workspace should always see:
-          declaration excerpts, règlement summaries, fee tables, contacts, and internal rules. This is stored on the
-          company row and <strong className="font-medium text-gray-400">prepended</strong> to the workforce agent
-          profile when integrators call{" "}
-          <code className="rounded bg-white/5 px-1 font-mono text-[11px]">/api/company/tasks/&lt;id&gt;/llm-context</code>
-          . It does not replace per-agent briefings.
+      <div className="space-y-3 border-t border-[#30363D] px-4 py-4">
+        <p className="text-sm leading-relaxed text-[#8B949E]">
+          Paste <strong className="font-medium text-[#c9d1d9]">Markdown</strong> the whole workspace should always know:
+          policies, fee tables, contacts, product truths. Keep it stable; put fast-changing detail in tasks or agent
+          briefings.
         </p>
         <textarea
-          className="min-h-[200px] w-full rounded-lg border border-line bg-ink px-3 py-2 font-mono text-sm text-gray-200"
+          className="min-h-[220px] w-full rounded-lg border border-[#30363D] bg-[#010409] px-3 py-2 font-mono text-sm text-[#E8E8E8] outline-none focus:border-[#58a6ff]"
           placeholder="# Syndicate context&#10;…"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

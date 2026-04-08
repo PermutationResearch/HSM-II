@@ -2,6 +2,7 @@
 //!
 //! Bash execution, grep search, and file finding.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use anyhow::Result;
@@ -30,17 +31,103 @@ impl BashTool {
         Self
     }
 
-    fn execute_bash(
-        &self,
-        command: &str,
-        working_dir: Option<&str>,
-    ) -> Result<(String, String, i32), String> {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(command);
-
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
+    fn argv_allowlist() -> Option<HashSet<String>> {
+        let raw = std::env::var("HSM_BASH_ARGV_ALLOWLIST").unwrap_or_default();
+        let set: HashSet<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if set.is_empty() {
+            None
+        } else {
+            Some(set)
         }
+    }
+
+    fn bash_argv_only_from_env() -> bool {
+        std::env::var("HSM_BASH_ARGV_ONLY")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false)
+    }
+
+    fn execute_argv_blocking(
+        argv: Vec<String>,
+        working_dir: Option<String>,
+    ) -> Result<(String, String, i32), String> {
+        if argv.is_empty() || argv[0].is_empty() {
+            return Err("argv must be a non-empty array with a program path or name first".into());
+        }
+        let prog_path = std::path::Path::new(&argv[0]);
+        let base = prog_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(argv[0].as_str());
+        if let Some(set) = Self::argv_allowlist() {
+            if !set.contains(base) {
+                return Err(format!(
+                    "program `{base}` not allowed by HSM_BASH_ARGV_ALLOWLIST"
+                ));
+            }
+        }
+        let cwd = working_dir.as_deref().map(std::path::Path::new);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        if let Some(c) = cwd {
+            cmd.current_dir(c);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to execute argv command: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let code = output.status.code().unwrap_or(-1);
+        Ok((stdout, stderr, code))
+    }
+
+    fn format_bash_triple(stdout: String, stderr: String, code: i32) -> ToolOutput {
+        let stdout_len = stdout.len();
+        let stderr_len = stderr.len();
+
+        let truncated_stdout = if stdout.len() > MAX_OUTPUT_SIZE {
+            format!(
+                "{}...\n[Output truncated, total: {} bytes]",
+                &stdout[..MAX_OUTPUT_SIZE],
+                stdout.len()
+            )
+        } else {
+            stdout
+        };
+
+        let result_text = if code == 0 {
+            if truncated_stdout.is_empty() && !stderr.is_empty() {
+                format!("Command completed (exit code 0)\n\nstderr:\n{}", stderr)
+            } else {
+                truncated_stdout
+            }
+        } else {
+            format!(
+                "Command failed (exit code {})\n\nstdout:\n{}\n\nstderr:\n{}",
+                code, truncated_stdout, stderr
+            )
+        };
+
+        ToolOutput::success(result_text).with_metadata(serde_json::json!({
+            "exit_code": code,
+            "stdout_bytes": stdout_len,
+            "stderr_bytes": stderr_len,
+        }))
+    }
+
+    fn execute_bash_blocking(
+        command: String,
+        working_dir: Option<String>,
+    ) -> Result<(String, String, i32), String> {
+        let cwd = working_dir.as_deref().map(std::path::Path::new);
+        let mut cmd = crate::harness::host_bash_command(&command, cwd);
 
         let output = cmd
             .output()
@@ -61,12 +148,21 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Use with caution. Has 30 second timeout."
+        "Execute a bash command or (preferred) argv-only: pass `argv` as [\"prog\", \"arg1\", ...]. Use with caution. 30s timeout. HSM_BASH_POLICY=strict, HSM_BASH_ARGV_ONLY=1, HSM_BASH_ARGV_ALLOWLIST=ls,git. Isolation: HSM_BASH_ISOLATE / HSM_DOCKER_BASH (docker does not support argv mode)."
     }
 
     fn parameters_schema(&self) -> Value {
         object_schema(vec![
-            ("command", "The bash command to execute", true),
+            (
+                "command",
+                "Shell command (ignored when `argv` is set; required unless argv-only mode)",
+                false,
+            ),
+            (
+                "argv",
+                "Optional: execute without shell — JSON array of strings, e.g. [\"ls\", \"-la\"]",
+                false,
+            ),
             (
                 "working_dir",
                 "Working directory for the command (optional)",
@@ -76,55 +172,101 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let argv_param: Option<Vec<String>> = params
+            .get("argv")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
 
-        if command.is_empty() {
-            return ToolOutput::error("Command parameter is required");
+        if Self::bash_argv_only_from_env() && argv_param.is_none() {
+            return ToolOutput::error(
+                "HSM_BASH_ARGV_ONLY is set: provide `argv` as a JSON array of strings (no shell).",
+            );
         }
 
-        let working_dir = params.get("working_dir").and_then(|v| v.as_str());
+        let cwd: Option<String> = match params.get("working_dir").and_then(|v| v.as_str()) {
+            Some(w) => match crate::harness::resolve_tool_fs_path(w) {
+                Ok(p) => Some(p.to_string_lossy().into_owned()),
+                Err(e) => return ToolOutput::error(e),
+            },
+            None => {
+                if crate::harness::current_root().is_some() {
+                    match crate::harness::resolve_tool_fs_path(".") {
+                        Ok(p) => Some(p.to_string_lossy().into_owned()),
+                        Err(e) => return ToolOutput::error(e),
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(argv) = argv_param {
+            if crate::harness::docker_bash_enabled() {
+                return ToolOutput::error(
+                    "argv execution is not supported with HSM_DOCKER_BASH; disable docker or use `command` string.",
+                );
+            }
+            debug!("Executing argv: {:?}", argv);
+            let timeout = tokio::time::Duration::from_secs(CMD_TIMEOUT_SECS);
+            let argv_clone = argv.clone();
+            let wd = cwd.clone();
+            let result = tokio::time::timeout(
+                timeout,
+                tokio::task::spawn_blocking(move || Self::execute_argv_blocking(argv_clone, wd)),
+            )
+            .await;
+            return match result {
+                Err(_) => ToolOutput::error(format!(
+                    "argv command timed out after {} seconds",
+                    CMD_TIMEOUT_SECS
+                )),
+                Ok(Err(e)) => ToolOutput::error(format!("argv task failed: {e}")),
+                Ok(Ok(Err(e))) => ToolOutput::error(e),
+                Ok(Ok(Ok((stdout, stderr, code)))) => {
+                    Self::format_bash_triple(stdout, stderr, code)
+                }
+            };
+        }
+
+        let command = params
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if command.is_empty() {
+            return ToolOutput::error("Command parameter is required (or pass argv array)");
+        }
+
+        let bash_policy = crate::tools::bash_policy::bash_policy_from_env();
+        if let Err(e) = crate::tools::bash_policy::validate_bash_command(&command, bash_policy) {
+            return ToolOutput::error(e);
+        }
 
         debug!("Executing bash: {}", command);
 
-        // Execute with timeout
         let timeout = tokio::time::Duration::from_secs(CMD_TIMEOUT_SECS);
-        let result =
-            tokio::time::timeout(timeout, async { self.execute_bash(command, working_dir) }).await;
+        let cmd_for_docker = command.clone();
+        let result = tokio::time::timeout(timeout, async move {
+            if crate::harness::docker_bash_enabled() {
+                crate::harness::run_in_docker(&cmd_for_docker, cwd.as_deref()).await
+            } else {
+                let cmd_inner = command;
+                let wd = cwd;
+                tokio::task::spawn_blocking(move || Self::execute_bash_blocking(cmd_inner, wd))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("bash task failed: {e}")))
+            }
+        })
+        .await;
 
         match result {
-            Ok(Ok((stdout, stderr, code))) => {
-                let stdout_len = stdout.len();
-                let stderr_len = stderr.len();
-
-                let truncated_stdout = if stdout.len() > MAX_OUTPUT_SIZE {
-                    format!(
-                        "{}...\n[Output truncated, total: {} bytes]",
-                        &stdout[..MAX_OUTPUT_SIZE],
-                        stdout.len()
-                    )
-                } else {
-                    stdout
-                };
-
-                let result_text = if code == 0 {
-                    if truncated_stdout.is_empty() && !stderr.is_empty() {
-                        format!("Command completed (exit code 0)\n\nstderr:\n{}", stderr)
-                    } else {
-                        truncated_stdout
-                    }
-                } else {
-                    format!(
-                        "Command failed (exit code {})\n\nstdout:\n{}\n\nstderr:\n{}",
-                        code, truncated_stdout, stderr
-                    )
-                };
-
-                ToolOutput::success(result_text).with_metadata(serde_json::json!({
-                    "exit_code": code,
-                    "stdout_bytes": stdout_len,
-                    "stderr_bytes": stderr_len,
-                }))
-            }
+            Ok(Ok((stdout, stderr, code))) => Self::format_bash_triple(stdout, stderr, code),
             Ok(Err(e)) => ToolOutput::error(e),
             Err(_) => ToolOutput::error(format!(
                 "Command timed out after {} seconds",
@@ -230,13 +372,18 @@ impl Tool for GrepTool {
             return ToolOutput::error("Pattern parameter is required");
         }
 
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let path_s = path.to_string_lossy().to_string();
 
         let include = params.get("include").and_then(|v| v.as_str());
 
-        debug!("Grep: {} in {} (include: {:?})", pattern, path, include);
+        debug!("Grep: {} in {} (include: {:?})", pattern, path_s, include);
 
-        match self.grep_internal(pattern, path, include) {
+        match self.grep_internal(pattern, &path_s, include) {
             Ok(result) => ToolOutput::success(result),
             Err(e) => ToolOutput::error(e),
         }
@@ -338,7 +485,12 @@ impl Tool for FindTool {
     }
 
     async fn execute(&self, params: Value) -> ToolOutput {
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_raw = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path = match crate::harness::resolve_tool_fs_path(path_raw) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let path_s = path.to_string_lossy().to_string();
 
         let name = params.get("name").and_then(|v| v.as_str());
 
@@ -346,10 +498,10 @@ impl Tool for FindTool {
 
         debug!(
             "Find: in {} (name: {:?}, type: {:?})",
-            path, name, file_type
+            path_s, name, file_type
         );
 
-        match self.find_internal(path, name, file_type) {
+        match self.find_internal(&path_s, name, file_type) {
             Ok(result) => ToolOutput::success(result),
             Err(e) => ToolOutput::error(e),
         }

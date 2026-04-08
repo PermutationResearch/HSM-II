@@ -4,6 +4,7 @@ import Link from "next/link";
 import {
   Building2,
   Download,
+  Inbox,
   LayoutDashboard,
   LayoutList,
   Loader2,
@@ -32,32 +33,40 @@ import { AntiSycophancyPanel } from "./components/AntiSycophancyPanel";
 import { CouncilSocraticPanel } from "./components/CouncilSocraticPanel";
 import { SopComposerPanel } from "./components/SopComposerPanel";
 import { PackMarketplacePanel } from "./components/PackMarketplacePanel";
+import { CompanySharedMemoryPanel } from "./components/CompanySharedMemoryPanel";
 import { SopReferenceExamples } from "./components/SopReferenceExamples";
 import { sopReferenceExamples } from "./lib/sop-examples";
 import type { SopExampleDocument } from "./lib/sop-examples-types";
 import { loadCustomSops } from "./lib/sop-storage";
 import { TrailGraphView, type GraphLink, type GraphNode, type TrailGraphPayload } from "./components/TrailGraphView";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
-import {
-  useCompaniesShCatalog,
-  type CompaniesShItem,
-  slugBaseFromCatalogItem,
-  findExistingCompanyForCatalogPack,
-  findCompanyByPackFolder,
-  isPaperclipPack,
-} from "../ui/src/hooks/useCompaniesShCatalog";
+import { useCompaniesShCatalog, type CompaniesShItem } from "../ui/src/hooks/useCompaniesShCatalog";
 import { WorkspaceSidebar, type WorkspaceConsoleView } from "../ui/src/components/WorkspaceSidebar";
-import { Dashboard, type DashboardDrillDown } from "../ui/src/pages/Dashboard";
+import { Dashboard, type DashboardDrillDown, type DashboardDrillQueueView } from "../ui/src/pages/Dashboard";
 import { getConsoleApiBase } from "./lib/console-api-base";
+import { createFromCatalogItem } from "./lib/create-from-catalog";
 import { cn } from "./lib/utils";
 
+type CoWorkspaceTab = "inbox" | "tasks" | "packs" | "sops" | "team" | "advanced";
+
 const CO_WORKSPACE_TAB_ICONS = {
-  work: LayoutList,
+  inbox: Inbox,
+  tasks: LayoutList,
   packs: Store,
   sops: Paperclip,
   team: Users,
   advanced: Settings2,
 } as const;
+
+function companyTabForDashboardDrill(d: DashboardDrillDown): CoWorkspaceTab {
+  if (d.type === "spend") return "advanced";
+  if (d.type === "inbox") return "inbox";
+  if (d.type === "queue") {
+    const v = d.view as DashboardDrillQueueView;
+    if (v === "waiting_admin" || v === "pending_approvals" || v === "blocked") return "inbox";
+  }
+  return "tasks";
+}
 
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -102,7 +111,9 @@ type NavId =
   | "memory"
   | "graph"
   | "search"
-  | "email";
+  | "email"
+  | "marketplace"
+  | "sops";
 
 type CompanyRow = {
   id: string;
@@ -119,6 +130,7 @@ type TaskRow = {
   title: string;
   state: string;
   specification?: string | null;
+  project_id?: string | null;
   goal_ancestry?: unknown;
   checked_out_by?: string | null;
   checked_out_until?: string | null;
@@ -129,8 +141,19 @@ type TaskRow = {
   status_reason?: string | null;
   priority?: number;
   decision_mode?: "auto" | "admin_required" | "blocked" | string;
+  /** Agent or workflow set — surfaces in human inbox without forcing waiting_admin state */
+  requires_human?: boolean;
   parent_task_id?: string | null;
   spawned_by_rule_id?: string | null;
+  /** Relative to company `hsmii_home` — injected into task LLM context */
+  workspace_attachment_paths?: unknown;
+  run?: {
+    status: string;
+    tool_calls: number;
+    log_tail: string;
+    finished_at?: string | null;
+    updated_at?: string;
+  } | null;
 };
 type GoalRowUi = {
   id: string;
@@ -139,6 +162,12 @@ type GoalRowUi = {
   title: string;
   description?: string | null;
   status: string;
+};
+type ProjectRowUi = {
+  id: string;
+  title: string;
+  sort_order?: number;
+  status?: string;
 };
 type GovEvent = {
   id: string;
@@ -186,6 +215,7 @@ export default function ConsolePage() {
   const [coCompanies, setCoCompanies] = useState<CompanyRow[]>([]);
   const [coSel, setCoSel] = useState<string | null>(null);
   const [focusAgentPersona, setFocusAgentPersona] = useState<string | null>(null);
+  const [focusProjectId, setFocusProjectId] = useState<string | null>(null);
   const [taskDashboardFilter, setTaskDashboardFilter] = useState<TaskListDashboardFilter | null>(null);
   const [dashScrollTaskId, setDashScrollTaskId] = useState<string | null>(null);
   const [coSpendOpen, setCoSpendOpen] = useState(false);
@@ -198,7 +228,11 @@ export default function ConsolePage() {
   const [coNewName, setCoNewName] = useState("");
   const [coNewTaskTitle, setCoNewTaskTitle] = useState("");
   const [coNewTaskSpec, setCoNewTaskSpec] = useState("");
+  const [coNewTaskProjectId, setCoNewTaskProjectId] = useState("");
+  const [coNewTaskWorkspacePaths, setCoNewTaskWorkspacePaths] = useState("");
+  const [coNewProjectTitle, setCoNewProjectTitle] = useState("");
   const [coGoals, setCoGoals] = useState<GoalRowUi[]>([]);
+  const [coProjects, setCoProjects] = useState<ProjectRowUi[]>([]);
   const [coGovernance, setCoGovernance] = useState<GovEvent[]>([]);
   const [coSpend, setCoSpend] = useState<SpendSummary | null>(null);
   const [coEditGoal, setCoEditGoal] = useState<string | null>(null);
@@ -222,11 +256,11 @@ export default function ConsolePage() {
   const [coEvalAmount, setCoEvalAmount] = useState("");
   const [coPolicyEvalRes, setCoPolicyEvalRes] = useState<string | null>(null);
   const [coAgents, setCoAgents] = useState<CoAgentRow[]>([]);
-  const [coQueueView, setCoQueueView] = useState<QueueView>("all");
+  const [coQueueView, setCoQueueView] = useState<QueueView>("human_inbox");
   const [coQueueTasks, setCoQueueTasks] = useState<TaskRow[]>([]);
   const [coFocusedSkillRequest, setCoFocusedSkillRequest] = useState<{ slug: string; nonce: number } | null>(null);
   /** Splits Company OS into daily work vs team setup vs power tools. */
-  const [coWorkspaceTab, setCoWorkspaceTab] = useState<"work" | "packs" | "sops" | "team" | "advanced">("work");
+  const [coWorkspaceTab, setCoWorkspaceTab] = useState<CoWorkspaceTab>("inbox");
   /** Workspace-scoped custom SOP templates (browser localStorage); merged into reference tabs. */
   const [customSops, setCustomSops] = useState<SopExampleDocument[]>([]);
   const [coSlaDueAt, setCoSlaDueAt] = useState<Record<string, string>>({});
@@ -367,6 +401,7 @@ export default function ConsolePage() {
           setCoCompanies([]);
           setCoTasks([]);
           setCoGoals([]);
+          setCoProjects([]);
           setCoAgents([]);
           setCoGovernance([]);
           setCoSpend(null);
@@ -382,10 +417,16 @@ export default function ConsolePage() {
         const effectiveSel = selOverride !== undefined ? selOverride : coSel;
         if (effectiveSel) {
           const cid = effectiveSel;
-          const [g, t, ag, gov, sp, pr, q] = await Promise.all([
+          const [g, proj, t, ag, gov, sp, pr, q] = await Promise.all([
             fetch(`${api}/api/company/companies/${cid}/goals`).then((r) => {
               if (!r.ok) throw new Error(`goals ${r.status}`);
               return r.json() as Promise<{ goals: GoalRowUi[] }>;
+            }),
+            fetch(`${api}/api/company/companies/${cid}/projects`).then(async (r) => {
+              // Older hsm_console builds or routing glitches may 404; keep the rest of Company OS usable.
+              if (r.status === 404) return { projects: [] as ProjectRowUi[] };
+              if (!r.ok) throw new Error(`projects ${r.status}`);
+              return r.json() as Promise<{ projects: ProjectRowUi[] }>;
             }),
             fetch(`${api}/api/company/companies/${cid}/tasks`).then((r) => {
               if (!r.ok) throw new Error(`tasks ${r.status}`);
@@ -413,6 +454,7 @@ export default function ConsolePage() {
             }),
           ]);
           setCoGoals(g.goals ?? []);
+          setCoProjects(proj.projects ?? []);
           setCoTasks(t.tasks ?? []);
           setCoAgents(ag.agents ?? []);
           setCoGovernance(gov.events ?? []);
@@ -422,6 +464,7 @@ export default function ConsolePage() {
         } else {
           setCoTasks([]);
           setCoGoals([]);
+          setCoProjects([]);
           setCoAgents([]);
           setCoGovernance([]);
           setCoSpend(null);
@@ -437,6 +480,11 @@ export default function ConsolePage() {
 
   useEffect(() => {
     if (coSel) setCoGovSubjId(coSel);
+  }, [coSel]);
+
+  useEffect(() => {
+    setFocusProjectId(null);
+    setCoNewTaskProjectId("");
   }, [coSel]);
 
   const coGoalDepth = useMemo(() => {
@@ -526,7 +574,7 @@ export default function ConsolePage() {
       setFocusAgentPersona(null);
       setCoSpendOpen(false);
       setCoErr(null);
-      setCoWorkspaceTab(d.type === "spend" ? "advanced" : "work");
+      setCoWorkspaceTab(companyTabForDashboardDrill(d));
 
       if (!coSel) return;
 
@@ -537,7 +585,7 @@ export default function ConsolePage() {
 
       switch (d.type) {
         case "inbox":
-          await q("all");
+          await q("human_inbox");
           return;
         case "queue":
           await q(d.view as QueueView);
@@ -591,242 +639,23 @@ export default function ConsolePage() {
 
   const createFromCatalog = useCallback(
     async (item: CompaniesShItem) => {
-      if (coHealth && !coHealth.postgres_configured) {
-        setCoErr("Set HSM_COMPANY_OS_DATABASE_URL and restart hsm_console to add companies.");
-        return;
-      }
-      setCoErr(null);
-      setCoPackImportOk(null);
-
-      const paperclip = isPaperclipPack(item);
-      const repo = (item.repo ?? "").trim();
-      const packSlug = (item.slug ?? "").trim();
-      const base = slugBaseFromCatalogItem(item);
-
-      let freshCompanies: CompanyRow[] = [];
-      try {
-        const lr = await fetch(`${api}/api/company/companies`);
-        if (!lr.ok) throw new Error(`companies ${lr.status}`);
-        const lj = (await lr.json()) as { companies?: CompanyRow[] };
-        freshCompanies = lj.companies ?? [];
-      } catch (e) {
-        setCoErr(e instanceof Error ? e.message : String(e));
-        return;
-      }
-
-      const existingRow =
-        findExistingCompanyForCatalogPack(freshCompanies, base) ??
-        findCompanyByPackFolder(freshCompanies, packSlug);
-
-      const runInstall = async (): Promise<{ home: string | null; warning: string | null }> => {
-        if (!repo || !packSlug) return { home: null, warning: null };
-        try {
-          const ir = await fetch("/api/companies-sh/install", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ repo, slug: packSlug }),
-          });
-          const raw = await ir.text();
-          let ij = {} as {
-            skipped?: boolean;
-            hsmii_home?: string | null;
-            warning?: string;
-            error?: string;
-          };
-          if (raw.trim()) {
-            try {
-              ij = JSON.parse(raw);
-            } catch {
-              return { home: null, warning: raw.slice(0, 400) || `Pack install HTTP ${ir.status}` };
-            }
-          }
-          if (!ir.ok) {
-            return { home: null, warning: ij.error ?? `Pack install HTTP ${ir.status}` };
-          }
-          if (typeof ij.hsmii_home === "string" && ij.hsmii_home.length > 0) {
-            return { home: ij.hsmii_home, warning: null };
-          }
-          return { home: null, warning: ij.warning ?? null };
-        } catch (e) {
-          return { home: null, warning: e instanceof Error ? e.message : String(e) };
-        }
-      };
-
-      const runImport = async (cid: string): Promise<boolean> => {
-        const title = paperclip ? "Paperclip template" : "Pack";
-        try {
-          const ir = await fetch(`${api}/api/company/companies/${cid}/import-paperclip-home`, {
-            method: "POST",
-          });
-          const raw = await ir.text();
-          let ij = {} as {
-            error?: string;
-            agents_inserted?: number;
-            agents_skipped_existing?: number;
-            skills_saved?: number;
-          };
-          if (raw.trim()) {
-            try {
-              ij = JSON.parse(raw);
-            } catch {
-              setCoPackImportOk(null);
-              setCoErr(
-                !ir.ok
-                  ? `${raw.slice(0, 400)} (${title})`
-                  : `${title}: import returned non-JSON (proxy or server error).`
-              );
-              return false;
-            }
-          }
-          if (!ir.ok) {
-            setCoPackImportOk(null);
-            setCoErr(
-              typeof ij.error === "string"
-                ? `${ij.error} (${title}: hsm_console must be running; pack files must exist at hsmii_home on that host.)`
-                : `${title} import failed (${ir.status})`
-            );
-            return false;
-          }
-          setCoErr(null);
-          const inserted = ij.agents_inserted ?? 0;
-          const skipped = ij.agents_skipped_existing ?? 0;
-          const skills = ij.skills_saved ?? 0;
-          const bits: string[] = [];
-          if (inserted > 0) {
-            bits.push(`${inserted} new agent${inserted === 1 ? "" : "s"} added to Team & roles`);
-          }
-          if (skipped > 0) {
-            bits.push(`${skipped} agent${skipped === 1 ? "" : "s"} already in roster`);
-          }
-          if (skills > 0) {
-            bits.push(`${skills} skill${skills === 1 ? "" : "s"} saved as importable templates`);
-          }
-          if (bits.length === 0) {
-            setCoPackImportOk(
-              paperclip
-                ? `${title}: roster up to date. Skills are saved as importable templates.`
-                : `${title}: synced from disk (no new agents).`
-            );
-          } else {
-            setCoPackImportOk(`${title}: ${bits.join(". ")}.`);
-          }
-          return true;
-        } catch (e) {
-          setCoPackImportOk(null);
-          setCoErr(e instanceof Error ? e.message : String(e));
-          return false;
-        }
-      };
-
-      if (existingRow) {
-        let home = (existingRow.hsmii_home ?? "").trim();
-        if (!home && repo && packSlug) {
-          const { home: installed, warning } = await runInstall();
-          if (warning && !installed) {
-            setCoErr(warning);
-            return;
-          }
-          if (installed) {
-            const pr = await fetch(`${api}/api/company/companies/${existingRow.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ hsmii_home: installed }),
-            });
-            const pRaw = await pr.text();
-            let pj = {} as { error?: string };
-            if (pRaw.trim()) {
-              try {
-                pj = JSON.parse(pRaw);
-              } catch {
-                setCoErr(pRaw.slice(0, 280) || `PATCH company ${pr.status}`);
-                setCoSel(existingRow.id);
-                await loadCompanyOs(existingRow.id);
-                return;
-              }
-            }
-            if (!pr.ok) {
-              setCoErr(pj.error ?? `PATCH company ${pr.status}`);
-              setCoSel(existingRow.id);
-              await loadCompanyOs(existingRow.id);
-              return;
-            }
-            home = installed;
-          }
-        }
-        let paperclipImportOk = false;
-        if (home) {
-          // Paperclip / pack: always re-run import on pick so agents + skills index stay aligned with disk.
-          paperclipImportOk = await runImport(existingRow.id);
-        } else {
-          setCoErr(
-            paperclip
-              ? "Paperclip template needs files on this machine first. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server, then pick the template again: we run npx companies.sh add, set hsmii_home, then import every agents/*/AGENTS.md and index skills/*/SKILL.md into Company OS."
-              : "No local pack folder is linked yet. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server, then use this pack again so `npx companies.sh add` can materialize `agents/` and `skills/` on disk. Import does not clone from GitHub by itself."
-          );
-          return;
-        }
-        setCoSel(existingRow.id);
-        await loadCompanyOs(existingRow.id);
-        if (paperclip && paperclipImportOk) {
+      await createFromCatalogItem({
+        apiBase: api,
+        postgresConfigured: !!coHealth?.postgres_configured,
+        item,
+        setError: setCoErr,
+        setPackImportOk: setCoPackImportOk,
+        selectCompany: async (id) => {
+          setCoSel(id);
+          await loadCompanyOs(id);
+        },
+        afterPaperclipTeamOpen: () => {
           setView("company");
           requestAnimationFrame(() => setCoWorkspaceTab("team"));
-        }
-        return;
-      }
-
-      const { home: hsmii_home, warning: installWarn } = await runInstall();
-      if (installWarn && !hsmii_home) {
-        setCoErr(installWarn);
-        return;
-      }
-
-      const display_name = item.name.trim() || base;
-      let slug = base;
-      for (let i = 0; i < 8; i++) {
-        const r = await fetch(`${api}/api/company/companies`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            slug,
-            display_name,
-            hsmii_home: hsmii_home ?? undefined,
-          }),
-        });
-        const j = (await r.json()) as {
-          company?: { id: string; hsmii_home?: string | null };
-          error?: string;
-        };
-        if (r.ok && j.company?.id) {
-          const cid = j.company.id;
-          const home = (j.company.hsmii_home ?? "").trim();
-          let paperclipImportOk = false;
-          if (home) {
-            paperclipImportOk = await runImport(cid);
-          } else if (!installWarn) {
-            setCoErr(
-              paperclip
-                ? "Paperclip: workspace created but no pack folder yet. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js host and pick this template again to install files and import agents + skills."
-                : "Workspace created without a pack path. Set HSM_COMPANY_PACK_INSTALL_ROOT on the Next.js server and add this pack again to install files, then import will load agents and skills."
-            );
-          }
-          setCoSel(cid);
-          await loadCompanyOs(cid);
-          if (paperclip && paperclipImportOk) {
-            setView("company");
-            requestAnimationFrame(() => setCoWorkspaceTab("team"));
-          }
-          return;
-        }
-        if (r.status === 409) {
-          slug = `${base}-${i + 2}`;
-          continue;
-        }
-        setCoErr(j.error ?? `HTTP ${r.status}`);
-        return;
-      }
-      setCoErr("Could not create company (slug conflict).");
+        },
+      });
     },
-    [api, coHealth, loadCompanyOs, setView]
+    [api, coHealth?.postgres_configured, loadCompanyOs, setView, setCoWorkspaceTab]
   );
 
   useEffect(() => {
@@ -851,7 +680,7 @@ export default function ConsolePage() {
     setTaskDashboardFilter(null);
     setDashScrollTaskId(null);
     setCoSpendOpen(false);
-    setCoWorkspaceTab("work");
+    setCoWorkspaceTab("inbox");
   }, [coSel]);
 
   const workspaceLabel = coCompanies.find((c) => c.id === coSel)?.display_name ?? "Workspace";
@@ -959,10 +788,15 @@ export default function ConsolePage() {
     [coTasks]
   );
 
+  /** Paperclip-style: only items that need a human (not total open tasks). */
   const inboxCount = useMemo(() => {
-    if (coQueueTasks.length > 0) return coQueueTasks.length;
-    return coTasks.filter((t) => /open|todo|pending/i.test(t.state)).length;
-  }, [coQueueTasks, coTasks]);
+    return coTasks.filter(
+      (t) =>
+        t.requires_human === true ||
+        t.state === "waiting_admin" ||
+        t.state === "blocked"
+    ).length;
+  }, [coTasks]);
 
   /** Personas / checkout names on tasks → agent id suggestions in Team tab. */
   const coAgentIdSuggestions = useMemo(() => {
@@ -976,10 +810,36 @@ export default function ConsolePage() {
     return [...s];
   }, [coTasks]);
 
+  const coProjectsSorted = useMemo(
+    () =>
+      [...coProjects].sort(
+        (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.title.localeCompare(b.title)
+      ),
+    [coProjects]
+  );
+
   const sidebarProjects = useMemo(
-    () => coGoalsSorted.map((g) => ({ id: g.id, name: g.title })),
+    () => coProjectsSorted.map((p) => ({ id: p.id, title: p.title })),
+    [coProjectsSorted]
+  );
+
+  const projectTitleById = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const p of coProjects) m[p.id] = p.title;
+    return m;
+  }, [coProjects]);
+
+  const sidebarGoals = useMemo(
+    () => coGoalsSorted.map((g) => ({ id: g.id, title: g.title })),
     [coGoalsSorted]
   );
+
+  const focusProjectMeta = useMemo(() => {
+    const id = focusProjectId?.trim();
+    if (!id) return null;
+    const p = coProjects.find((x) => x.id === id);
+    return { id, title: p?.title ?? id };
+  }, [focusProjectId, coProjects]);
 
   const focusAgentGovernance = useMemo(() => {
     const p = focusAgentPersona?.trim();
@@ -1026,18 +886,37 @@ export default function ConsolePage() {
         dashboardLiveCount={dashboardLiveCount}
         inboxCount={inboxCount}
         projects={sidebarProjects}
+        selectedProjectId={focusProjectId}
+        onSelectProject={(id) => {
+          setFocusProjectId(id);
+          setFocusAgentPersona(null);
+        }}
+        goals={sidebarGoals}
         agents={sidebarAgents}
         selectedAgentPersona={focusAgentPersona}
+        companyWorkTab={view === "company" ? coWorkspaceTab : null}
+        onNavigateInbox={() => {
+          setFocusProjectId(null);
+          setView("company");
+          setCoWorkspaceTab("inbox");
+          setCoQueueView("human_inbox");
+          void loadQueueView("human_inbox");
+        }}
+        onNavigateTasks={() => {
+          setView("company");
+          setCoWorkspaceTab("tasks");
+        }}
         onSelectAgent={(persona) => {
+          setFocusProjectId(null);
           setFocusAgentPersona(persona);
           setView("company");
-          setCoWorkspaceTab("work");
+          setCoWorkspaceTab("tasks");
         }}
         onDeleteRegistryAgent={coSel ? deleteRegistryAgentFromSidebar : undefined}
         onAddRegistryAgent={coSel ? openTeamRolesForAgents : undefined}
         onNewIssue={() => {
           setView("company");
-          setCoWorkspaceTab("work");
+          setCoWorkspaceTab("tasks");
         }}
         onOpenOnboarding={() => setView("onboard")}
         onDeleteCompany={coHealth?.postgres_configured ? deleteCompanyFromSidebar : undefined}
@@ -1053,13 +932,21 @@ export default function ConsolePage() {
       <main
         className={
           view === "command" || view === "company"
-            ? "min-h-screen min-w-0 flex-1 overflow-auto bg-[#010409] px-6 py-5"
-            : "min-h-screen min-w-0 flex-1 overflow-auto px-6 py-5"
+            ? "nd-dashboard-shell min-h-screen min-w-0 flex-1 overflow-auto bg-[#010409] px-6 py-5"
+            : "nd-dashboard-shell min-h-screen min-w-0 flex-1 overflow-auto px-6 py-5"
         }
       >
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#30363D] bg-[#0d1117] px-3 py-2 text-sm text-[#8B949E]">
           <span>
-            New workspace UI: dashboard, agents, issues —{" "}
+            Workspace UI matches this console: dashboard, agents, issues,{" "}
+            <Link href="/workspace/marketplace" className="font-mono text-[#58a6ff] underline-offset-4 hover:underline">
+              marketplace
+            </Link>
+            ,{" "}
+            <Link href="/workspace/playbooks" className="font-mono text-[#58a6ff] underline-offset-4 hover:underline">
+              playbooks
+            </Link>
+            , intelligence —{" "}
             <Link href="/workspace/dashboard" className="font-mono text-[#58a6ff] underline-offset-4 hover:underline">
               /workspace
             </Link>
@@ -1202,6 +1089,7 @@ export default function ConsolePage() {
               setCoPackImportOk(null);
               setCoSel(cid);
               setView("company");
+              setCoWorkspaceTab("inbox");
               await loadCompanyOs(cid);
             }}
           />
@@ -1214,36 +1102,41 @@ export default function ConsolePage() {
                 Company OS
               </p>
               <h1 className="mt-1 text-lg font-medium tracking-tight text-white">
-                {coWorkspaceTab === "work"
-                  ? "Tasks & queue"
-                  : coWorkspaceTab === "packs"
-                    ? "Pack marketplace"
-                    : coWorkspaceTab === "sops"
-                      ? "SOPs & playbooks"
-                      : coWorkspaceTab === "team"
-                        ? "Team & roles"
-                        : "Advanced"}
+                {coWorkspaceTab === "inbox"
+                  ? "Inbox"
+                  : coWorkspaceTab === "tasks"
+                    ? "Tasks"
+                    : coWorkspaceTab === "packs"
+                      ? "Pack marketplace"
+                      : coWorkspaceTab === "sops"
+                        ? "SOPs & playbooks"
+                        : coWorkspaceTab === "team"
+                          ? "Team & setup"
+                          : "Advanced"}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
-                {coWorkspaceTab === "work"
-                  ? "Triage, approvals, and the full task list—same layout language as Command dashboard."
-                  : coWorkspaceTab === "packs"
-                    ? "Browse agent-company templates from the open directory, see what each pack is for, add a workspace, or send a new pack idea for listing."
-                    : coWorkspaceTab === "sops"
-                      ? "Author standard operating procedures: phases, escalation, and governance log templates—then implement them as tasks in this workspace."
-                      : coWorkspaceTab === "team"
-                        ? "Company context, imported skill templates, workforce roster, personas, and org chart backing task owners."
-                        : "Backup, spend, goals, policies, orchestration, and power tools."}
+                {coWorkspaceTab === "inbox"
+                  ? "Decision feed: agents work on their own and surface items here when they need you—approve, reject, or reply; cleared like email. Your job is to unblock them, not to manage every task."
+                  : coWorkspaceTab === "tasks"
+                    ? "Full task graph: create work, check out, SLA, filters—the operational backlog. Urgent human decisions live in Inbox, not here."
+                    : coWorkspaceTab === "packs"
+                      ? "Browse agent-company templates from the open directory, see what each pack is for, add a workspace, or send a new pack idea for listing."
+                      : coWorkspaceTab === "sops"
+                        ? "Author standard operating procedures: phases, escalation, and governance log templates—then implement them as tasks in this workspace."
+                        : coWorkspaceTab === "team"
+                          ? "Configure agents and knowledge here. Day-to-day approvals and escalations are in Inbox — this tab is backstage, not the decision feed."
+                          : "Backup, spend, goals, policies, orchestration, and power tools."}
               </p>
             </header>
             <div className="mb-4 max-w-3xl">
               <div className="inline-flex max-w-full flex-wrap gap-px rounded-md border border-[#30363D] bg-[#0d1117] p-px">
                 {(
                   [
-                    ["work", "Tasks & queue"],
+                    ["inbox", "Inbox"],
+                    ["tasks", "Tasks"],
                     ["packs", "Pack marketplace"],
                     ["sops", "SOPs & playbooks"],
-                    ["team", "Team & roles"],
+                    ["team", "Team & setup"],
                     ["advanced", "Advanced"],
                   ] as const
                 ).map(([id, label]) => {
@@ -1252,7 +1145,13 @@ export default function ConsolePage() {
                     <button
                       key={id}
                       type="button"
-                      onClick={() => setCoWorkspaceTab(id)}
+                      onClick={() => {
+                        setCoWorkspaceTab(id);
+                        if (id === "inbox") {
+                          setCoQueueView("human_inbox");
+                          void loadQueueView("human_inbox");
+                        }
+                      }}
                       className={cn(
                         "inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
                         coWorkspaceTab === id
@@ -1267,11 +1166,12 @@ export default function ConsolePage() {
                 })}
               </div>
               <p className="mt-2 text-xs leading-relaxed text-gray-600">
-                <strong className="font-medium text-gray-500">Tasks &amp; queue</strong> — inbox and task list.{" "}
-                <strong className="font-medium text-gray-500">Pack marketplace</strong> — directory + propose new packs.{" "}
-                <strong className="font-medium text-gray-500">SOPs &amp; playbooks</strong> — design procedures and
-                materialize them. <strong className="font-medium text-gray-500">Team &amp; roles</strong> — roster and
-                company context. <strong className="font-medium text-gray-500">Advanced</strong> — backup, spend, goals,
+                <strong className="font-medium text-gray-500">Inbox</strong> — human decisions only (approvals, blocks,
+                agent escalations). <strong className="font-medium text-gray-500">Tasks</strong> — full list and
+                operations. <strong className="font-medium text-gray-500">Pack marketplace</strong> — directory + propose
+                new packs. <strong className="font-medium text-gray-500">SOPs &amp; playbooks</strong> — design procedures
+                and materialize them.                 <strong className="font-medium text-gray-500">Team &amp; setup</strong> — roster, skills, shared
+                context. <strong className="font-medium text-gray-500">Advanced</strong> — backup, spend, goals,
                 orchestration.
               </p>
             </div>
@@ -1347,121 +1247,94 @@ export default function ConsolePage() {
               </div>
             )}
             {coCompanies.length > 0 && (
-              <div
-                className="mb-6 rounded-lg border border-[#222222] p-4 transition-[border-color] duration-200 ease-out"
-                style={{
-                  background:
-                    "linear-gradient(92deg in oklab, #000000 0%, #121212 48%, #030303 100%)",
-                }}
-              >
-                <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex items-center gap-2">
-                      <Building2 className="h-3.5 w-3.5 shrink-0 text-[#666666]" aria-hidden />
-                      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[#999999]">
-                        Workspace
-                      </span>
-                    </div>
-                    <p className="mb-3 max-w-2xl font-mono text-[10px] uppercase leading-relaxed tracking-[0.06em] text-[#666666]">
-                      Select name to switch · Slug is the unique id (spot duplicates) · Del removes database row only;
-                      pack files on disk stay
-                    </p>
-                    <div className="flex flex-wrap gap-2">
+              <div className="mb-6 overflow-hidden rounded-xl border border-[#30363D] bg-[#0d1117]">
+                <div className="border-b border-[#30363D] px-4 py-3">
+                  <p className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#6e7681]">
+                    Workspace
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Building2 className="h-4 w-4 shrink-0 text-[#8B949E]" aria-hidden />
+                    <select
+                      value={coSel ?? ""}
+                      onChange={(e) => {
+                        setCoPackImportOk(null);
+                        setCoSel(e.target.value);
+                        void loadCompanyOs(e.target.value);
+                      }}
+                      className="min-w-[200px] flex-1 rounded-lg border border-[#30363D] bg-[#010409] px-3 py-2.5 text-sm text-[#E8E8E8] outline-none focus:border-[#58a6ff] sm:max-w-xs sm:flex-none"
+                      aria-label="Active workspace"
+                    >
+                      <option value="" disabled>
+                        Select workspace…
+                      </option>
                       {coCompanies.map((c) => (
-                        <div
-                          key={c.id}
-                          className={cn(
-                            "group inline-flex items-stretch overflow-hidden rounded-[6px] border text-sm transition-colors duration-200 ease-out",
-                            coSel === c.id
-                              ? "border-[#5B9BF6]/50 bg-[#1A1A1A] text-[#E8E8E8]"
-                              : "border-[#333333] bg-[#111111] text-[#E8E8E8]/90 hover:border-[#484848] hover:bg-[#1A1A1A]"
-                          )}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setCoPackImportOk(null);
-                              setCoSel(c.id);
-                            }}
-                            className="inline-flex min-w-0 max-w-[220px] items-center gap-2 px-3 py-2 text-left sm:max-w-[280px]"
-                          >
-                            <Building2
-                              className={cn(
-                                "h-3.5 w-3.5 shrink-0 stroke-[1.5]",
-                                coSel === c.id ? "text-[#5B9BF6]" : "text-[#666666] group-hover:text-[#999999]"
-                              )}
-                              aria-hidden
-                            />
-                            <span className="flex min-w-0 flex-col gap-1">
-                              <span className="truncate font-sans text-[13px] font-medium leading-tight">
-                                {c.display_name}
-                              </span>
-                              <span className="flex min-w-0 items-baseline gap-1.5 truncate">
-                                <span className="shrink-0 font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[#666666]">
-                                  Id
-                                </span>
-                                <span className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.06em] text-[#888888]">
-                                  {c.slug}
-                                </span>
-                              </span>
-                            </span>
-                          </button>
-                          {coHealth?.postgres_configured ? (
-                            <button
-                              type="button"
-                              title={`Remove workspace from database: ${c.display_name} (${c.slug})`}
-                              aria-label={`Delete workspace ${c.display_name}`}
-                              disabled={deletingWorkspaceId === c.id}
-                              className={cn(
-                                "flex min-w-[44px] flex-col items-center justify-center gap-0.5 border-l border-[#333333] px-2 py-1.5 text-[#666666] transition-colors duration-200 ease-out hover:bg-[#2a1212] hover:text-[#D71921] disabled:cursor-not-allowed disabled:opacity-40",
-                                coSel === c.id && "border-[#333333]"
-                              )}
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                void (async () => {
-                                  setDeletingWorkspaceId(c.id);
-                                  try {
-                                    await deleteCompanyFromSidebar({
-                                      id: c.id,
-                                      slug: c.slug,
-                                      display_name: c.display_name,
-                                    });
-                                  } finally {
-                                    setDeletingWorkspaceId(null);
-                                  }
-                                })();
-                              }}
-                            >
-                              {deletingWorkspaceId === c.id ? (
-                                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
-                              ) : (
-                                <Trash2 className="h-3.5 w-3.5 shrink-0 stroke-[1.5]" aria-hidden />
-                              )}
-                              <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.14em]">
-                                {deletingWorkspaceId === c.id ? "…" : "Del"}
-                              </span>
-                            </button>
-                          ) : null}
-                        </div>
+                        <option key={c.id} value={c.id}>
+                          {c.display_name}
+                        </option>
                       ))}
-                    </div>
+                    </select>
+                    {coSel && coHealth?.postgres_configured && (() => {
+                      const sel = coCompanies.find((c) => c.id === coSel);
+                      if (!sel) return null;
+                      return (
+                        <button
+                          type="button"
+                          title={`Permanently delete ${sel.display_name} from the database`}
+                          disabled={!!deletingWorkspaceId}
+                          className="inline-flex items-center gap-2 rounded-lg border border-[#30363D] px-3 py-2 text-sm text-[#8B949E] transition-colors hover:border-[#f85149]/50 hover:bg-[#f85149]/10 hover:text-[#ffa198] disabled:cursor-not-allowed disabled:opacity-40"
+                          onClick={() => {
+                            void (async () => {
+                              setDeletingWorkspaceId(sel.id);
+                              try {
+                                await deleteCompanyFromSidebar({
+                                  id: sel.id,
+                                  slug: sel.slug,
+                                  display_name: sel.display_name,
+                                });
+                              } finally {
+                                setDeletingWorkspaceId(null);
+                              }
+                            })();
+                          }}
+                        >
+                          {deletingWorkspaceId === sel.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                          ) : (
+                            <Trash2 className="h-4 w-4 stroke-[1.5]" aria-hidden />
+                          )}
+                          Delete workspace
+                        </button>
+                      );
+                    })()}
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="nd-label font-normal" htmlFor="co-checkout-agent">
-                      Sign approvals as
-                    </label>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0 max-w-xl">
+                      <label
+                        className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#6e7681]"
+                        htmlFor="co-checkout-agent"
+                      >
+                        Your actor ID
+                      </label>
+                      <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+                        Logged on <strong className="font-medium text-[#c9d1d9]">Inbox</strong> actions (approve / reject
+                        / clear flag), task checkouts, and governance events. Use a stable id (e.g. your name or{" "}
+                        <code className="rounded bg-white/5 px-1 font-mono text-[11px]">agent-1</code> for testing).
+                      </p>
+                    </div>
                     <input
                       id="co-checkout-agent"
-                      className="w-44 rounded-lg border border-line bg-ink px-3 py-2 text-sm"
-                      placeholder="e.g. your name"
+                      className="h-10 w-full shrink-0 rounded-lg border border-[#30363D] bg-[#010409] px-3 font-mono text-sm text-[#E8E8E8] outline-none focus:border-[#58a6ff] sm:w-52"
+                      placeholder="e.g. jamie or agent-1"
                       value={coCheckoutAgent}
                       onChange={(e) => setCoCheckoutAgent(e.target.value)}
+                      autoComplete="username"
                     />
                   </div>
                 </div>
-                <details className="rounded-lg border border-dashed border-line/80 bg-black/20">
-                  <summary className="cursor-pointer px-3 py-2 text-xs text-gray-500 hover:text-gray-400">
+                <details className="border-t border-[#30363D] border-dashed bg-[#010409]/40">
+                  <summary className="cursor-pointer px-4 py-2.5 text-xs text-[#8B949E] hover:text-[#c9d1d9]">
                     Add another workspace
                   </summary>
                   <div className="border-t border-line/60 px-3 py-3">
@@ -1758,6 +1631,51 @@ export default function ConsolePage() {
 
                 {coWorkspaceTab === "team" ? (
                   <>
+                    <div className="mb-6 rounded-xl border border-[#30363D] bg-gradient-to-br from-[#388bfd]/15 via-[#0d1117] to-[#0d1117] px-4 py-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <h2 className="text-sm font-semibold text-white">Configure agents, not the inbox</h2>
+                          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[#8B949E]">
+                            This screen is <strong className="font-medium text-[#c9d1d9]">backstage</strong>: shared
+                            knowledge, imported skills, and roster. Agents run work elsewhere; when they need a person, items
+                            appear under <strong className="font-medium text-[#c9d1d9]">Inbox</strong> in the sidebar.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-[#58a6ff]/45 bg-[#388bfd]/15 px-4 py-2.5 text-sm font-medium text-[#79b8ff] transition-colors hover:bg-[#388bfd]/25"
+                          onClick={() => {
+                            setCoWorkspaceTab("inbox");
+                            setCoQueueView("human_inbox");
+                            void loadQueueView("human_inbox");
+                          }}
+                        >
+                          <Inbox className="h-4 w-4 shrink-0" aria-hidden />
+                          Open Inbox
+                        </button>
+                      </div>
+                      <ol className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        {(
+                          [
+                            ["1", "Shared context", "Stable facts for every agent via llm-context."],
+                            ["2", "Skill templates", "What the pack indexed from disk."],
+                            ["3", "Agent ↔ skills", "Who references which template."],
+                            ["4", "Roster", "Org chart, adapters, budgets."],
+                          ] as const
+                        ).map(([n, t, d]) => (
+                          <li
+                            key={n}
+                            className="rounded-lg border border-[#30363D]/90 bg-[#010409]/50 px-3 py-2.5 text-xs leading-snug text-[#8B949E]"
+                          >
+                            <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#21262d] font-mono text-[10px] font-bold text-[#58a6ff]">
+                              {n}
+                            </span>
+                            <span className="font-medium text-[#c9d1d9]">{t}</span>
+                            <span className="mt-1 block text-[11px] text-[#6e7681]">{d}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
                     <CompanyContextPanel
                       api={api}
                       companyId={coSel}
@@ -1804,132 +1722,29 @@ export default function ConsolePage() {
                   </>
                 ) : null}
 
-                {coWorkspaceTab === "work" ? (
+                {coWorkspaceTab === "inbox" ? (
                   <>
-                    <div className="mb-4 flex flex-wrap gap-4">
-                      <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-4">
-                        <div className="mb-1 text-sm font-semibold text-white">New task</div>
-                        <p className="mb-3 text-xs text-gray-500">
-                          A single thing someone should do—or that you want help with.
-                        </p>
-                        <input
-                          className="mb-2 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
-                          placeholder="What needs to happen?"
-                          value={coNewTaskTitle}
-                          onChange={(e) => setCoNewTaskTitle(e.target.value)}
-                        />
-                        <textarea
-                          className="mb-3 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
-                          placeholder="Details or acceptance criteria (optional)"
-                          rows={3}
-                          value={coNewTaskSpec}
-                          onChange={(e) => setCoNewTaskSpec(e.target.value)}
-                        />
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-2 rounded-md border border-[#30363d] bg-[#21262d] px-4 py-2 text-sm font-medium text-white hover:bg-[#30363d]"
-                          onClick={async () => {
-                            setCoErr(null);
-                            try {
-                              const r = await fetch(`${api}/api/company/companies/${coSel}/tasks`, {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  title: coNewTaskTitle.trim(),
-                                  specification: coNewTaskSpec.trim() || undefined,
-                                }),
-                              });
-                              const j = await r.json();
-                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
-                              setCoNewTaskTitle("");
-                              setCoNewTaskSpec("");
-                              await loadCompanyOs();
-                            } catch (e) {
-                              setCoErr(e instanceof Error ? e.message : String(e));
-                            }
-                          }}
-                        >
-                          <Plus className="h-4 w-4 opacity-90" aria-hidden />
-                          Add to list
-                        </button>
-                      </div>
+                    <div className="mb-5 max-w-3xl rounded-lg border border-[#30363D] bg-[#0d1117] px-4 py-3 text-sm leading-relaxed text-[#8B949E]">
+                      <p className="text-[#c9d1d9]">
+                        Agents run autonomously; they only interrupt you when something needs a person. Typical lines look
+                        like:
+                      </p>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-[#8B949E]">
+                        <li>
+                          <span className="text-[#c9d1d9]">“Agent X needs approval to spend $500”</span>
+                        </li>
+                        <li>
+                          <span className="text-[#c9d1d9]">“Ambiguous customer request — pick A or B”</span>
+                        </li>
+                        <li>
+                          <span className="text-[#c9d1d9]">“Contract ready for your signature”</span>
+                        </li>
+                      </ul>
+                      <p className="mt-2 text-xs text-[#6e7681]">
+                        Approve, reject, or respond — the item leaves your inbox. Everything else is under{" "}
+                        <strong className="font-medium text-[#8B949E]">Tasks</strong>.
+                      </p>
                     </div>
-
-                    {focusAgentMeta ? (
-                      <div className="mb-4 rounded-2xl border border-[#30363D] bg-[#0d1117] px-4 py-4">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
-                              Filtered inbox
-                            </p>
-                            <h2 className="mt-1 break-all font-mono text-base font-semibold text-[#58a6ff]">
-                              {focusAgentMeta.id}
-                            </h2>
-                            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
-                              This is the <strong className="font-medium text-[#c9d1d9]">persona id</strong> stored on
-                              tasks as <strong className="font-medium text-[#c9d1d9]">owner</strong> or{" "}
-                              <strong className="font-medium text-[#c9d1d9]">checked out by</strong>. The queue and task
-                              list below only show work tied to this id. You applied the filter by clicking this agent
-                              in the left sidebar.
-                            </p>
-                            {focusAgentMeta.inRegistry ? (
-                              <p className="mt-2 text-xs text-[#484f58]">
-                                Workforce registry:{" "}
-                                {focusAgentMeta.role ? (
-                                  <span className="text-[#8B949E]">role “{focusAgentMeta.role}”</span>
-                                ) : (
-                                  <span className="text-[#8B949E]">(no role text)</span>
-                                )}
-                                {focusAgentMeta.title ? (
-                                  <>
-                                    {" "}
-                                    · <span className="text-[#8B949E]">{focusAgentMeta.title}</span>
-                                  </>
-                                ) : null}
-                              </p>
-                            ) : (
-                              <p className="mt-2 text-xs text-[#484f58]">
-                                Not in <strong className="text-[#6e7681]">Team &amp; roles</strong> yet—only appearing
-                                because it is on tasks. Add a matching row there if you want a proper profile.
-                              </p>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            className="shrink-0 rounded-md border border-[#30363D] px-3 py-2 font-mono text-[11px] font-medium uppercase tracking-wide text-[#c9d1d9] hover:border-[#484f58] hover:bg-[#161b22]"
-                            onClick={() => setFocusAgentPersona(null)}
-                          >
-                            Show all tasks
-                          </button>
-                        </div>
-                        <div className="mt-4 border-t border-[#30363D] pt-4">
-                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
-                            Governance log · actor = this id
-                          </p>
-                          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[#484f58]">
-                            Only events where the <strong className="text-[#6e7681]">Actor</strong> field equals{" "}
-                            <span className="font-mono text-[#8B949E]">{focusAgentMeta.id}</span> (e.g. checkout as that
-                            identity). That is separate from “tasks they own,” so this section is often empty until
-                            someone acts under this id.
-                          </p>
-                          {focusAgentGovernance.length > 0 ? (
-                            <ul className="mt-3 max-h-40 space-y-1.5 overflow-auto font-mono text-[11px] text-[#8B949E]">
-                              {focusAgentGovernance.map((ev) => (
-                                <li key={ev.id} className="flex flex-wrap gap-x-2">
-                                  <span className="text-[#484f58]">{ev.created_at}</span>
-                                  <span className="text-[#c9d1d9]">{ev.action}</span>
-                                  <span className="text-[#484f58]">
-                                    {ev.subject_type} {ev.subject_id?.slice(0, 8)}…
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <p className="mt-3 text-xs text-[#484f58]">None yet for this actor string.</p>
-                          )}
-                        </div>
-                      </div>
-                    ) : null}
 
                     <PolicyQueuePanel
                       api={api}
@@ -1961,6 +1776,223 @@ export default function ConsolePage() {
                       }}
                       loadQueueView={loadQueueView}
                     />
+                  </>
+                ) : null}
+
+                {coWorkspaceTab === "tasks" ? (
+                  <>
+                    <div className="mb-4 flex flex-wrap gap-4">
+                      <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-4">
+                        <div className="mb-1 text-sm font-semibold text-white">New project</div>
+                        <p className="mb-3 text-xs text-gray-500">
+                          Group related issues (Paperclip-style). Projects are separate from the strategic goal tree.
+                        </p>
+                        <input
+                          className="mb-3 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                          placeholder="Project name"
+                          value={coNewProjectTitle}
+                          onChange={(e) => setCoNewProjectTitle(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-2 rounded-md border border-[#30363d] bg-[#21262d] px-4 py-2 text-sm font-medium text-white hover:bg-[#30363d]"
+                          onClick={async () => {
+                            setCoErr(null);
+                            const title = coNewProjectTitle.trim();
+                            if (!title) {
+                              setCoErr("Project title required");
+                              return;
+                            }
+                            try {
+                              const r = await fetch(`${api}/api/company/companies/${coSel}/projects`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ title }),
+                              });
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              setCoNewProjectTitle("");
+                              await loadCompanyOs();
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          <Plus className="h-4 w-4 opacity-90" aria-hidden />
+                          Create project
+                        </button>
+                      </div>
+                      <div className="min-w-[240px] flex-1 rounded border border-line bg-panel p-4">
+                        <div className="mb-1 text-sm font-semibold text-white">New task</div>
+                        <p className="mb-3 text-xs text-gray-500">
+                          A single thing someone should do—or that you want help with.
+                        </p>
+                        <label className="mb-2 block font-mono text-[10px] uppercase tracking-wide text-gray-500">
+                          Project (optional)
+                          <select
+                            className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm text-white"
+                            value={coNewTaskProjectId}
+                            onChange={(e) => setCoNewTaskProjectId(e.target.value)}
+                          >
+                            <option value="">— None —</option>
+                            {coProjectsSorted.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <input
+                          className="mb-2 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                          placeholder="What needs to happen?"
+                          value={coNewTaskTitle}
+                          onChange={(e) => setCoNewTaskTitle(e.target.value)}
+                        />
+                        <textarea
+                          className="mb-2 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm"
+                          placeholder="Details or acceptance criteria (optional)"
+                          rows={3}
+                          value={coNewTaskSpec}
+                          onChange={(e) => setCoNewTaskSpec(e.target.value)}
+                        />
+                        <label className="mb-3 block font-mono text-[10px] uppercase tracking-wide text-gray-500">
+                          Workspace paths (optional, one per line — relative to company hsmii_home)
+                          <textarea
+                            className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2 font-mono text-xs text-gray-300"
+                            placeholder={"e.g. workspace/content/handbook.md"}
+                            rows={2}
+                            value={coNewTaskWorkspacePaths}
+                            onChange={(e) => setCoNewTaskWorkspacePaths(e.target.value)}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-2 rounded-md border border-[#30363d] bg-[#21262d] px-4 py-2 text-sm font-medium text-white hover:bg-[#30363d]"
+                          onClick={async () => {
+                            setCoErr(null);
+                            try {
+                              const body: Record<string, unknown> = {
+                                title: coNewTaskTitle.trim(),
+                                specification: coNewTaskSpec.trim() || undefined,
+                              };
+                              const pid = coNewTaskProjectId.trim();
+                              if (pid) body.project_id = pid;
+                              const pathLines = coNewTaskWorkspacePaths
+                                .split(/\r?\n/)
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              if (pathLines.length) body.workspace_attachment_paths = pathLines;
+                              const r = await fetch(`${api}/api/company/companies/${coSel}/tasks`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(body),
+                              });
+                              const j = await r.json();
+                              if (!r.ok) throw new Error((j as { error?: string }).error ?? r.statusText);
+                              setCoNewTaskTitle("");
+                              setCoNewTaskSpec("");
+                              setCoNewTaskWorkspacePaths("");
+                              await loadCompanyOs();
+                            } catch (e) {
+                              setCoErr(e instanceof Error ? e.message : String(e));
+                            }
+                          }}
+                        >
+                          <Plus className="h-4 w-4 opacity-90" aria-hidden />
+                          Add to list
+                        </button>
+                      </div>
+                    </div>
+
+                    {focusProjectMeta ? (
+                      <div className="mb-4 rounded-2xl border border-[#30363D] bg-[#0d1117] px-4 py-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                              Project view
+                            </p>
+                            <h2 className="mt-1 text-base font-semibold text-[#58a6ff]">{focusProjectMeta.title}</h2>
+                            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                              Showing tasks linked to this project. Pick another project in the sidebar or clear to see all
+                              tasks.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded-md border border-[#30363D] px-3 py-2 font-mono text-[11px] font-medium uppercase tracking-wide text-[#c9d1d9] hover:border-[#484f58] hover:bg-[#161b22]"
+                            onClick={() => setFocusProjectId(null)}
+                          >
+                            Show all tasks
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {focusAgentMeta ? (
+                      <div className="mb-4 rounded-2xl border border-[#30363D] bg-[#0d1117] px-4 py-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                              Agent view
+                            </p>
+                            <h2 className="mt-1 break-all font-mono text-base font-semibold text-[#58a6ff]">
+                              {focusAgentMeta.id}
+                            </h2>
+                            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                              Showing tasks owned by or checked out by this agent.
+                            </p>
+                            {focusAgentMeta.inRegistry ? (
+                              <p className="mt-2 text-xs text-[#8B949E]">
+                                {focusAgentMeta.role ? (
+                                  <>Role: <span className="text-[#c9d1d9]">{focusAgentMeta.role}</span></>
+                                ) : null}
+                                {focusAgentMeta.title ? (
+                                  <>
+                                    {focusAgentMeta.role ? " · " : ""}
+                                    <span className="text-[#c9d1d9]">{focusAgentMeta.title}</span>
+                                  </>
+                                ) : null}
+                              </p>
+                            ) : (
+                              <p className="mt-2 text-xs text-[#484f58]">
+                                Not yet in <strong className="text-[#6e7681]">Team &amp; setup</strong>. Add a row
+                                there to give this agent a proper profile.
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded-md border border-[#30363D] px-3 py-2 font-mono text-[11px] font-medium uppercase tracking-wide text-[#c9d1d9] hover:border-[#484f58] hover:bg-[#161b22]"
+                            onClick={() => setFocusAgentPersona(null)}
+                          >
+                            Show all tasks
+                          </button>
+                        </div>
+                        <div className="mt-4 border-t border-[#30363D] pt-4">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B949E]">
+                            Activity log
+                          </p>
+                          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[#484f58]">
+                            Actions performed by this agent (e.g. checking out tasks under this identity).
+                          </p>
+                          {focusAgentGovernance.length > 0 ? (
+                            <ul className="mt-3 max-h-40 space-y-1.5 overflow-auto font-mono text-[11px] text-[#8B949E]">
+                              {focusAgentGovernance.map((ev) => (
+                                <li key={ev.id} className="flex flex-wrap gap-x-2">
+                                  <span className="text-[#484f58]">{ev.created_at}</span>
+                                  <span className="text-[#c9d1d9]">{ev.action}</span>
+                                  <span className="text-[#484f58]">
+                                    {ev.subject_type} {ev.subject_id?.slice(0, 8)}…
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-3 text-xs text-[#484f58]">No activity yet.</p>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
 
                     <TaskListPanel
                       api={api}
@@ -1981,6 +2013,9 @@ export default function ConsolePage() {
                       loadCompanyOs={async () => {
                         await loadCompanyOs();
                       }}
+                      filterProjectId={focusProjectId}
+                      onClearProjectFilter={() => setFocusProjectId(null)}
+                      projectTitles={projectTitleById}
                       filterPersona={focusAgentPersona}
                       onClearPersonaFilter={() => setFocusAgentPersona(null)}
                       dashboardFilter={taskDashboardFilter}
@@ -1998,6 +2033,78 @@ export default function ConsolePage() {
                 templates without selecting one yet.
               </div>
             ) : null}
+          </>
+        )}
+        {view === "marketplace" && (
+          <>
+            <header className="mb-6 border-b border-[#30363D] pb-5">
+              <h1 className="text-lg font-medium tracking-tight text-white">Marketplace</h1>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                Browse agent-company templates from the open directory. Add a workspace to get started, or propose a new
+                pack for listing.
+              </p>
+            </header>
+            <PackMarketplacePanel
+              items={companiesSh.items}
+              loading={companiesSh.loading}
+              error={companiesSh.error}
+              postgresConfigured={!!coHealth?.postgres_configured}
+              companies={coCompanies.map((c) => ({
+                id: c.id,
+                slug: c.slug,
+                hsmii_home: c.hsmii_home,
+              }))}
+              onCreateFromCatalog={createFromCatalog}
+              setCoErr={setCoErr}
+            />
+          </>
+        )}
+        {view === "sops" && (
+          <>
+            <header className="mb-6 border-b border-[#30363D] pb-5">
+              <h1 className="text-lg font-medium tracking-tight text-white">Playbooks</h1>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#8B949E]">
+                Design standard operating procedures, escalation steps, and governance templates—then implement them
+                directly as tasks in your workspace.
+              </p>
+            </header>
+            {coSel ? (
+              <div className="space-y-6">
+                <SopComposerPanel
+                  apiBase={api}
+                  companyId={coSel}
+                  referenceExamples={sopReferenceExamples}
+                  onCustomSopsChanged={setCustomSops}
+                  onApplied={async () => {
+                    await loadCompanyOs();
+                  }}
+                  setCoErr={setCoErr}
+                />
+                <div>
+                  <h2 className="mb-2 text-sm font-semibold text-white">Reference &amp; saved library</h2>
+                  <p className="mb-4 max-w-3xl text-xs leading-relaxed text-gray-500">
+                    Built-in examples plus templates you saved for this workspace (tabs marked{" "}
+                    <span className="rounded border border-line px-1 text-[10px] text-gray-400">yours</span>). Use{" "}
+                    <strong className="font-medium text-gray-400">Implement in workspace</strong> to create playbook
+                    tasks and governance seeds.
+                  </p>
+                  <SopReferenceExamples
+                    apiBase={api}
+                    companyId={coSel}
+                    onApplied={async () => {
+                      await loadCompanyOs();
+                    }}
+                    setCoErr={setCoErr}
+                    additionalExamples={customSops}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-amber-900/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100/90">
+                Select a <strong className="font-medium text-white">workspace</strong> from the sidebar first to author
+                SOPs and implement playbooks.
+              </div>
+            )}
           </>
         )}
         {view === "email" && (
@@ -2074,16 +2181,35 @@ export default function ConsolePage() {
         )}
         {view === "memory" && (
           <>
-            <h1 className="mb-4 text-lg font-medium text-white">Memory files</h1>
-            <p className="mb-4 text-sm text-gray-400">{memoryFiles?.count ?? 0} markdown files under memory/</p>
-            <ul className="max-h-[70vh] space-y-3 overflow-auto">
-              {memoryFiles?.files?.map((f) => (
-                <li key={f.path} className="rounded border border-line bg-panel p-3 text-sm">
-                  <div className="font-mono text-accent">{f.path}</div>
-                  <div className="mt-1 text-xs text-gray-500">{f.snippet}</div>
-                </li>
-              ))}
-            </ul>
+            <h1 className="mb-2 text-lg font-medium text-white">Memory</h1>
+            <p className="mb-6 max-w-3xl text-sm text-gray-500">
+              <strong className="font-medium text-gray-300">Company shared memory</strong> lives in Postgres and is merged
+              into task LLM context. <strong className="font-medium text-gray-300">Local memory/</strong> files below are
+              on-disk snippets from the console host (Hermes-style).
+            </p>
+
+            <section className="mb-10">
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-400">Workspace shared pool</h2>
+              <CompanySharedMemoryPanel
+                apiBase={api}
+                companyId={coSel}
+                postgresOk={!!(coHealth?.postgres_configured && coHealth?.postgres_ok)}
+                onError={(msg) => setCoErr(msg)}
+              />
+            </section>
+
+            <section>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-400">Local memory/ markdown</h2>
+              <p className="mb-4 text-sm text-gray-400">{memoryFiles?.count ?? 0} markdown files under memory/</p>
+              <ul className="max-h-[50vh] space-y-3 overflow-auto">
+                {memoryFiles?.files?.map((f) => (
+                  <li key={f.path} className="rounded border border-line bg-panel p-3 text-sm">
+                    <div className="font-mono text-accent">{f.path}</div>
+                    <div className="mt-1 text-xs text-gray-500">{f.snippet}</div>
+                  </li>
+                ))}
+              </ul>
+            </section>
           </>
         )}
         {view === "graph" && (

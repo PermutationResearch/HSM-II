@@ -25,7 +25,12 @@ type WorkspaceContextValue = {
   companies: HsmCompanyRow[];
   companiesLoading: boolean;
   companiesError: Error | null;
+  /** Company OS DB URL is set (required to add workspaces from catalog). */
+  postgresConfigured: boolean;
+  /** DB reachable and healthy. */
   postgresOk: boolean;
+  /** Browser could not load `/api/company/health` (wrong URL, API down, or network). */
+  apiHealthError: string | null;
   refreshWorkspace: () => Promise<void>;
   propertiesSelection: PropertiesSelection;
   setPropertiesSelection: (s: PropertiesSelection) => void;
@@ -36,7 +41,11 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const apiBase = useMemo(() => getApiBase(), []);
   const qc = useQueryClient();
-  const { data: health } = useCompanyHealth(apiBase);
+  const {
+    data: health,
+    isError: healthQueryError,
+    error: healthQueryErr,
+  } = useCompanyHealth(apiBase);
   const {
     data: companies = [],
     isLoading: companiesLoading,
@@ -58,7 +67,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     await qc.invalidateQueries({ queryKey: ["hsm"] });
   }, [qc]);
 
+  const postgresConfigured = !!health?.postgres_configured;
   const postgresOk = !!(health?.postgres_configured && health?.postgres_ok);
+  const apiHealthError = healthQueryError
+    ? healthQueryErr instanceof Error
+      ? healthQueryErr.message
+      : String(healthQueryErr)
+    : null;
 
   const value = useMemo(
     (): WorkspaceContextValue => ({
@@ -68,7 +83,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       companies,
       companiesLoading,
       companiesError: companiesError instanceof Error ? companiesError : companiesError ? new Error(String(companiesError)) : null,
+      postgresConfigured,
       postgresOk,
+      apiHealthError,
       refreshWorkspace,
       propertiesSelection,
       setPropertiesSelection,
@@ -79,7 +96,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       companies,
       companiesLoading,
       companiesError,
+      postgresConfigured,
       postgresOk,
+      apiHealthError,
       refreshWorkspace,
       propertiesSelection,
     ],

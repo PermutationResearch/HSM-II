@@ -1,0 +1,21 @@
+{
+  "name": "hsm-company-console-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron shell for HSM company-console + hsm_console (paperclip-desktop style)",
+  "main": "dist/main.js",
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "dev": "npm run compile && electron .",
+    "dev:setup": "bash scripts/run-dev.sh",
+    "stage": "node scripts/stage-from-repo.mjs",
+    "pack": "npm run compile && npm run stage && electron-builder --dir",
+    "dist:mac": "npm run compile && npm run stage && electron-builder --mac"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^5.5.3"
+  }
+}

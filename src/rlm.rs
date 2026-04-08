@@ -5,7 +5,22 @@ use std::sync::Arc;
 
 use crate::agent::Role;
 use crate::hyper_stigmergy::{BeliefSource, HyperStigmergicMorphogenesis};
+use crate::tools::scored_tool_router::rank_tools_for_prompt;
 use crate::tools::{ToolOutput, ToolRegistry};
+
+const DEFAULT_RLM_TOOL_PROMPT_CAP: usize = 24;
+
+fn tool_prompt_cap_from_env() -> usize {
+    std::env::var("HSM_TOOL_PROMPT_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_RLM_TOOL_PROMPT_CAP)
+}
+
+fn approx_tokens_from_chars(chars: usize) -> usize {
+    chars.div_ceil(4)
+}
 
 /// Configuration for the bidding system
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -413,12 +428,41 @@ impl RLM {
         role: Role,
     ) -> anyhow::Result<Vec<Context>> {
         // Build a tool-selection prompt
-        let available_tools: Vec<_> = self
-            .tool_registry
-            .list_tools()
-            .into_iter()
-            .map(|(name, desc)| format!("  - {}: {}", name, desc))
+        let rank_cap = tool_prompt_cap_from_env();
+        let ranked = rank_tools_for_prompt(&self.tool_registry, intent, rank_cap);
+        let listed = self.tool_registry.list_tools();
+        let tool_descs: HashMap<&str, &str> = listed.iter().copied().collect();
+        let mut visible_tool_count = 0usize;
+        let mut available_tools: Vec<_> = ranked
+            .iter()
+            .filter_map(|t| {
+                tool_descs.get(t.name.as_str()).map(|desc| {
+                    visible_tool_count += 1;
+                    format!("  - {}: {} [score={:.1}]", t.name, desc, t.score)
+                })
+            })
             .collect();
+        if available_tools.is_empty() {
+            available_tools = listed
+                .iter()
+                .take(rank_cap)
+                .map(|(name, desc)| format!("  - {}: {}", name, desc))
+                .collect();
+            visible_tool_count = available_tools.len();
+        }
+        let hidden_tools = listed.len().saturating_sub(visible_tool_count);
+        if hidden_tools > 0 {
+            available_tools.push(format!(
+                "  - ... {} additional tools hidden by prompt budget cap",
+                hidden_tools
+            ));
+        }
+        tracing::info!(
+            "rlm tool prompt budget: exposed={} hidden={} approx_tokens={}",
+            visible_tool_count,
+            hidden_tools,
+            approx_tokens_from_chars(available_tools.iter().map(|s| s.len()).sum())
+        );
 
         let prompt = format!(
             "You are an agent with role {:?} in a hyper-stigmergic morphogenesis system.\n\

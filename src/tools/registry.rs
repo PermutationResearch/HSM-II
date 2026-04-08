@@ -1,11 +1,13 @@
 //! Tool Registry - manages all available tools
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use super::bundle::ToolBundle;
+use super::harness_gate::HarnessPolicyGate;
 use super::tool_permissions::ToolPermissionContext;
 use super::{Tool, ToolCall, ToolCallResult, ToolOutput};
 
@@ -16,10 +18,14 @@ pub struct ToolRegistry {
     timeout: Duration,
     /// Track tool usage statistics
     stats: HashMap<String, ToolStats>,
-    /// ECC-style allowlist / prefix blocklist
-    permissions: ToolPermissionContext,
+    /// Unified policy gate (allowlist + long-horizon lead/subagent rules).
+    gate: HarnessPolicyGate,
+    /// Default harness envelope when [`ToolCall::harness_run`] is unset (e.g. personal agent thread).
+    harness_context: Option<crate::harness::HarnessRunEnvelope>,
     /// When set, firewall denials append `tool_denied` rows here
     audit_trail: Option<crate::personal::task_trail::TaskTrail>,
+    /// Named bundles (metadata; tools must already be registered).
+    bundles: HashMap<String, ToolBundle>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -41,8 +47,10 @@ impl ToolRegistry {
             tools: HashMap::new(),
             timeout: Duration::from_secs(60),
             stats: HashMap::new(),
-            permissions,
+            gate: HarnessPolicyGate::new(permissions),
+            harness_context: None,
             audit_trail: None,
+            bundles: HashMap::new(),
         }
     }
 
@@ -52,11 +60,48 @@ impl ToolRegistry {
     }
 
     pub fn permissions(&self) -> &ToolPermissionContext {
-        &self.permissions
+        &self.gate.tool_permissions
     }
 
     pub fn set_permissions(&mut self, permissions: ToolPermissionContext) {
-        self.permissions = permissions;
+        self.gate.tool_permissions = permissions;
+    }
+
+    pub fn harness_gate(&self) -> &HarnessPolicyGate {
+        &self.gate
+    }
+
+    /// Per-thread default for [`HarnessRunEnvelope`] (merged with per-call [`ToolCall::harness_run`]).
+    pub fn set_harness_context(&mut self, ctx: Option<crate::harness::HarnessRunEnvelope>) {
+        self.harness_context = ctx;
+    }
+
+    pub fn harness_context(&self) -> Option<&crate::harness::HarnessRunEnvelope> {
+        self.harness_context.as_ref()
+    }
+
+    /// Register a versioned bundle after verifying every named tool exists.
+    pub fn register_bundle(&mut self, bundle: ToolBundle) -> Result<(), String> {
+        for n in &bundle.tool_names {
+            if !self.tools.contains_key(n) {
+                return Err(format!(
+                    "bundle `{}` references unknown tool `{n}`",
+                    bundle.id
+                ));
+            }
+        }
+        self.bundles.insert(bundle.id.clone(), bundle);
+        Ok(())
+    }
+
+    pub fn get_bundle(&self, id: &str) -> Option<&ToolBundle> {
+        self.bundles.get(id)
+    }
+
+    pub fn list_bundle_ids(&self) -> Vec<&str> {
+        let mut v: Vec<_> = self.bundles.keys().map(|s| s.as_str()).collect();
+        v.sort();
+        v
     }
 
     /// Create registry with default HSM-II tools
@@ -124,7 +169,19 @@ impl ToolRegistry {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
 
-        if let Err(reason) = self.permissions.check(&call.name) {
+        let env_merged: Option<crate::harness::HarnessRunEnvelope> = call
+            .harness_run
+            .clone()
+            .or_else(|| self.harness_context.clone());
+        let envelope = env_merged.as_ref();
+        let harness_correlation_id = envelope
+            .and_then(|e| e.run.correlation_id.clone())
+            .unwrap_or_default();
+        let span = crate::harness::tool_execution_span(&call.name, envelope);
+        let _span_guard = span.enter();
+
+        if let Err(reason) = self.gate.check_tool(&call.name, envelope) {
+            crate::harness::record_policy_result(&span, false, Some(&reason));
             warn!(target: "hsm_tool_firewall", tool = %call.name, %reason, "blocked");
             if let Some(ref trail) = self.audit_trail {
                 if let Err(e) = trail.append_tool_denied(&call.name, &reason).await {
@@ -138,6 +195,46 @@ impl ToolRegistry {
                 timestamp,
             };
         }
+        crate::harness::record_policy_result(&span, true, None);
+
+        if let Ok(list_str) = std::env::var("HSM_TOOL_APPROVAL_LIST") {
+            let set: HashSet<String> = list_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !set.is_empty() && set.contains(&call.name) {
+                let appr = crate::harness::ApprovalService::from_env();
+                let key = format!(
+                    "{}:{}",
+                    call.name,
+                    call.idempotency_key.as_deref().unwrap_or(&call.call_id)
+                );
+                let summary = crate::harness::redact_secrets(&format!(
+                    "tool={} params={}",
+                    call.name, call.parameters
+                ));
+                match appr.evaluate_or_queue(&key, &summary) {
+                    Ok(crate::harness::ApprovalOutcome::Allow) => {}
+                    Ok(crate::harness::ApprovalOutcome::Deny) => {
+                        return ToolCallResult {
+                            call,
+                            output: ToolOutput::error("Tool denied by approval store".to_string()),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            timestamp,
+                        };
+                    }
+                    Err(e) => {
+                        return ToolCallResult {
+                            call,
+                            output: ToolOutput::error(e.to_string()),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            timestamp,
+                        };
+                    }
+                }
+            }
+        }
 
         let output = if let Some(tool) = self.tools.get(&call.name) {
             debug!(
@@ -145,9 +242,49 @@ impl ToolRegistry {
                 call.name, call.parameters
             );
 
-            // Execute without timeout
-            let result = tool.execute(call.parameters.clone()).await;
+            let max_retry = std::env::var("HSM_TOOL_RETRY_MAX")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .min(8);
+            let backoff_ms = std::env::var("HSM_TOOL_RETRY_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(400)
+                .min(30_000);
+
+            let mut result = tool.execute(call.parameters.clone()).await;
+            let mut retries = 0u32;
+            while !result.success && retries < max_retry && transient_tool_failure(&result) {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                result = tool.execute(call.parameters.clone()).await;
+            }
+
             self.update_stats(&call.name, result.success, start.elapsed());
+
+            if let Ok(dir) = std::env::var("HSM_HARNESS_TOOL_CHECKPOINT_DIR") {
+                let d = dir.trim();
+                if !d.is_empty() {
+                    let params_txt = crate::harness::redact_secrets(
+                        &serde_json::to_string(&call.parameters).unwrap_or_else(|_| "{}".into()),
+                    );
+                    let row = serde_json::json!({
+                        "ts": timestamp.to_rfc3339(),
+                        "tool": call.name,
+                        "call_id": call.call_id,
+                        "idempotency_key": call.idempotency_key,
+                        "correlation_id": harness_correlation_id,
+                        "success": result.success,
+                        "params_redacted": params_txt,
+                        "error": result.error.as_ref().map(|e| crate::harness::redact_secrets(e)),
+                    });
+                    if let Err(e) = crate::harness::append_tool_checkpoint(d, &row).await {
+                        warn!(target: "hsm.tool.checkpoint", "append failed: {}", e);
+                    }
+                }
+            }
+
             result
         } else {
             warn!("Tool not found: {}", call.name);
@@ -197,6 +334,15 @@ impl ToolRegistry {
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
+}
+
+fn transient_tool_failure(output: &ToolOutput) -> bool {
+    let e = output.error.as_deref().unwrap_or("").to_ascii_lowercase();
+    e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("429")
+        || e.contains("rate limit")
+        || e.contains("temporar")
 }
 
 impl Default for ToolRegistry {
@@ -251,6 +397,8 @@ mod tests {
             name: "test_tool".to_string(),
             parameters: json!({"input": "hello"}),
             call_id: "1".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -270,6 +418,8 @@ mod tests {
             name: "bash".to_string(),
             parameters: json!({"command": "echo hi"}),
             call_id: "1".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
         let result = registry.execute(call).await;
         assert!(!result.output.success);
@@ -301,6 +451,9 @@ mod tests {
         assert!(registry.has("bash"), "bash missing");
         assert!(registry.has("grep"), "grep missing");
         assert!(registry.has("web_search"), "web_search missing");
+        assert!(registry.has("firecrawl_scrape"), "firecrawl_scrape missing");
+        assert!(registry.has("browser_navigate"), "browser_navigate missing");
+        assert!(registry.has("browser_wait"), "browser_wait missing");
         assert!(registry.has("git_status"), "git_status missing");
         assert!(registry.has("calculator"), "calculator missing");
         assert!(registry.has("system_info"), "system_info missing");
@@ -316,6 +469,8 @@ mod tests {
             name: "read_file".to_string(),
             parameters: json!({"path": "Cargo.toml"}),
             call_id: "test_read".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -343,6 +498,8 @@ mod tests {
             name: "calculator".to_string(),
             parameters: json!({"expression": "2 + 2"}),
             call_id: "test_calc".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -367,6 +524,8 @@ mod tests {
             name: "system_info".to_string(),
             parameters: json!({}),
             call_id: "test_sysinfo".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -390,6 +549,8 @@ mod tests {
             name: "grep".to_string(),
             parameters: json!({"pattern": "fn main", "path": "src/"}),
             call_id: "test_grep".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -414,6 +575,8 @@ mod tests {
             name: "list_directory".to_string(),
             parameters: json!({"path": "src/"}),
             call_id: "test_ls".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;
@@ -437,6 +600,8 @@ mod tests {
             name: "git_status".to_string(),
             parameters: json!({}),
             call_id: "test_git".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = registry.execute(call).await;

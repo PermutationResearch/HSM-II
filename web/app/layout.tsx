@@ -17,6 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/peers" className="hover:text-zinc-100 transition-colors">Peers</a>
             <a href="/memory" className="hover:text-zinc-100 transition-colors">Memory</a>
             <a href="/council" className="hover:text-zinc-100 transition-colors">Council</a>
+            <a href="/llm-chat" className="hover:text-zinc-100 transition-colors">LLM stream</a>
             <a href="/gen-ui" className="hover:text-zinc-100 transition-colors">Gen UI</a>
             <a href="/architecture" className="hover:text-zinc-100 transition-colors">Architecture</a>
           </nav>

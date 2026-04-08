@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/hsm-api/:path*",
-        destination: `${process.env.HSM_API_URL ?? "http://localhost:8080"}/api/:path*`,
+        destination: `${process.env.HSM_API_URL ?? "http://127.0.0.1:3000"}/api/:path*`,
       },
     ];
   },

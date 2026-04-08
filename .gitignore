@@ -93,6 +93,7 @@ certs/
 # =============================================================================
 # Temporary files
 # =============================================================================
+/tmp/
 *.tmp
 *.temp
 .cache/
@@ -151,6 +152,9 @@ agent_tools/visual-explainer/output/
 
 # Npm-extracted @anthropic-ai/claude-code sources (reference only; check vendor license)
 /external/claude-code-from-npm/
+
+# Nested clone (use submodule if you need it in-tree)
+/external/LongMemEval/
 
 # Local eval / benchmark outputs (regenerate locally)
 /runs/

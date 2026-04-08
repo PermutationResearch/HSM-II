@@ -1,0 +1,39 @@
+# HSM-II operator policy (optional). Copy to a path and set HSM_POLICY_FILE=/abs/path/policy.yaml
+# Loaded after dotenv in binaries that call policy_config::ensure_loaded().
+
+version: 1
+
+# Section keys match personal agent prompt assembly (see src/personal/prompt_assembly.rs).
+# Used for context manifests (tier breakdown) — not automatic token budgeting yet.
+context_tiers:
+  hot:
+    - living
+    - memory
+  warm:
+    - route
+    - business
+    - belief
+    - skill
+    - autocontext
+    - md_skills
+  cold:
+    - prefetch
+    - tail
+
+# Company OS: GET /api/company/tasks/:id/llm-context (section byte accounting + manifest).
+company_llm_context_tiers:
+  hot:
+    - company
+    - task
+    - agent_profile
+  warm:
+    - shared_memory
+    - agent_memory
+  cold: []
+
+# Hard-denied tool names for any harness/registry path using HarnessPolicyGate.
+tools:
+  deny: []
+  # example:
+  # deny:
+  #   - some_custom_tool

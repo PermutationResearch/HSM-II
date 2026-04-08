@@ -2,9 +2,9 @@
   "name": "hsm-company-console",
   "private": true,
   "scripts": {
-    "dev": "bash scripts/run-next-with-path.sh dev -p 3050",
-    "dev:3051": "bash scripts/run-next-with-path.sh dev -p 3051",
-    "build": "bash scripts/run-next-with-path.sh build",
+    "dev": "bash scripts/run-next-with-path.sh dev -H 127.0.0.1 -p 3050",
+    "dev:3051": "bash scripts/run-next-with-path.sh dev -H 127.0.0.1 -p 3051",
+    "build": "bash scripts/run-next-with-path.sh build --webpack && node scripts/copy-standalone-assets.mjs",
     "start": "bash scripts/run-next-with-path.sh start -p 3050"
   },
   "dependencies": {

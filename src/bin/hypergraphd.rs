@@ -1309,7 +1309,6 @@ struct UiWorldSnapshot {
     cass: UiCASSSnapshot,
     navigation: UiNavigationSnapshot,
     communication: UiCommunicationSnapshot,
-    gpu: UiGpuSnapshot,
     llm: UiLlmSnapshot,
     email: UiEmailSnapshot,
     federation: UiFederationSnapshot,
@@ -1358,7 +1357,6 @@ impl UiWorldSnapshot {
             cass: UiCASSSnapshot::default(),
             navigation: UiNavigationSnapshot::default(),
             communication: UiCommunicationSnapshot::default(),
-            gpu: UiGpuSnapshot::default(),
             llm: UiLlmSnapshot::default(),
             email: UiEmailSnapshot::default(),
             federation: UiFederationSnapshot::default(),
@@ -1490,13 +1488,6 @@ struct UiCommunicationSnapshot {
     swarm_agents: usize,
     stigmergic_fields: usize,
     message_throughput: u64,
-}
-
-#[derive(serde::Serialize, Clone, Debug, Default)]
-struct UiGpuSnapshot {
-    available: bool,
-    device_name: Option<String>,
-    compute_load: Option<f64>,
 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]

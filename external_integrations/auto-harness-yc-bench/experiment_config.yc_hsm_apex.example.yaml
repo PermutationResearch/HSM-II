@@ -1,0 +1,24 @@
+# Copy to auto-harness repo as experiment_config.yaml (or use vendored ../auto-harness-hsm).
+benchmark_backend: yc_hsm
+
+# Tau-bench placeholder when using yc_hsm (ignored by runner).
+domain: "yc_hsm_placeholder"
+
+split: "train"
+gate_split: "test"
+max_concurrency: 1
+
+# ── YC-bench / HSM marketplace (apex-systems) ─────────────────────────────
+yc_bench_root: "/ABS/PATH/TO/yc-bench"
+uv_bin: "uv"
+yc_model: "openrouter/qwen/qwen3.6-plus:free"
+yc_seed: 6
+# Must match a config stanza in your yc-bench checkout (see HSM seed JSON files).
+yc_config: "hsm_market_apex-systems"
+yc_no_live: true
+yc_extra_args: []
+
+# If yc-bench supports train/test splits, map them to CLI fragments, e.g.:
+# yc_split_cli:
+#   train: ["--split", "train"]
+#   test: ["--split", "test"]

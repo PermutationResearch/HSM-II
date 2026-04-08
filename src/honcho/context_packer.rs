@@ -204,7 +204,9 @@ impl PackedContextBuilder {
         if let Some(repr) = self.peer_repr {
             let block = repr.render_context(self.budget.peer_representation * 4); // bytes
             let tokens = estimate_tokens(&block);
-            if tokens <= self.budget.peer_representation && token_count + tokens <= self.budget.total {
+            if tokens <= self.budget.peer_representation
+                && token_count + tokens <= self.budget.total
+            {
                 ctx.peer_representation = Some(block);
                 token_count += tokens;
             }
@@ -212,16 +214,21 @@ impl PackedContextBuilder {
 
         // 2. Entity summaries (sorted by recall score descending)
         let mut es = self.entity_summaries;
-        es.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        es.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut es_tokens = 0usize;
         for recall in es {
-            let text = recall.entry.abstract_l0
+            let text = recall
+                .entry
+                .abstract_l0
                 .as_deref()
                 .unwrap_or(&recall.entry.content)
                 .to_string();
             let t = estimate_tokens(&text);
-            if es_tokens + t <= self.budget.entity_summaries
-                && token_count + t <= self.budget.total
+            if es_tokens + t <= self.budget.entity_summaries && token_count + t <= self.budget.total
             {
                 ctx.entity_summaries.push(text);
                 es_tokens += t;
@@ -233,9 +240,7 @@ impl PackedContextBuilder {
         let mut conc_tokens = 0usize;
         for c in self.conclusions.into_iter().rev() {
             let t = estimate_tokens(&c);
-            if conc_tokens + t <= self.budget.conclusions
-                && token_count + t <= self.budget.total
-            {
+            if conc_tokens + t <= self.budget.conclusions && token_count + t <= self.budget.total {
                 ctx.conclusions.push(c);
                 conc_tokens += t;
                 token_count += t;
@@ -245,7 +250,10 @@ impl PackedContextBuilder {
 
         // 4. Messages: fit as many recent messages as possible (newest last)
         let mut msg_tokens = 0usize;
-        let msg_budget = self.budget.recent_messages.min(self.budget.total - token_count);
+        let msg_budget = self
+            .budget
+            .recent_messages
+            .min(self.budget.total - token_count);
         // Walk from newest to oldest, then reverse for final output
         let mut packed_msgs: Vec<PackedMessage> = Vec::new();
         for (role, content) in self.messages.into_iter().rev() {

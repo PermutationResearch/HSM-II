@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import {
@@ -174,22 +175,30 @@ export function CompanyAgentsPanel({
   };
 
   return (
-    <details className="mb-6 rounded-lg border border-line bg-panel" open>
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
-        <span className="text-gray-400">▸</span> Workforce agents{" "}
-        <span className="font-normal text-gray-500">
-          (roles, org chart, adapter, budget — like Paperclip employees)
-        </span>
+    <details className="group mb-6 rounded-xl border border-[#30363D] bg-[#0d1117]" open>
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="mt-0.5 h-4 w-4 shrink-0 text-[#8B949E] transition-transform duration-200 group-open:rotate-90"
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-white">Workforce roster</span>
+            <span className="rounded border border-[#a371f7]/35 bg-[#a371f7]/10 px-2 py-px font-mono text-[10px] font-semibold uppercase tracking-wide text-[#d2a8ff]">
+              Paperclip-style
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+            People-shaped rows: org chart, adapters, budgets. Agent <strong className="text-[#c9d1d9]">id</strong> must
+            match <code className="text-[11px] text-[#79b8ff]">owner_persona</code> / checkout names on tasks.
+          </p>
+        </div>
       </summary>
-      <div className="space-y-4 border-t border-line px-4 py-4">
-        <p className="text-sm leading-relaxed text-gray-500">
-          <strong className="text-gray-400">Agent id</strong> is the stable key: it should match a task’s{" "}
-          <code className="text-xs text-accent">owner_persona</code> or the name used at checkout (letters, digits,{" "}
-          <code className="text-xs">_</code>, <code className="text-xs">-</code> only).{" "}
-          <strong className="text-gray-400">Role</strong> is separate — <code className="text-xs">worker</code>,{" "}
-          <code className="text-xs">manager</code>, etc. describe place in the org chart, not the id. Presets below
-          mirror Paperclip onboarding roles, Hermes <code className="text-xs">adapter_type=hermes</code> workers, and
-          SOP examples in the catalog.
+      <div className="space-y-4 border-t border-[#30363D] px-4 py-4">
+        <p className="text-sm leading-relaxed text-[#8B949E]">
+          <strong className="text-[#c9d1d9]">Role</strong> is org position (<code className="text-[11px]">worker</code>,{" "}
+          <code className="text-[11px]">manager</code>, …), not the id. Presets mirror Paperclip rosters, Hermes{" "}
+          <code className="text-[11px] text-[#79b8ff]">adapter_type=hermes</code>, and SOP catalog examples.
         </p>
 
         {!creating ? (

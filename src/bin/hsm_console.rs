@@ -10,11 +10,15 @@
 //! — clap 4.5+ infers a `-p` short from that name and collides with `--port -p`.
 
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
 
 use clap::Parser;
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 use hyper_stigmergy::console::{console_router, ConsoleState};
+use hyper_stigmergy::paperclip::IntelligenceLayer;
 use hyper_stigmergy::personal::resolve_hsmii_home;
 
 #[derive(Parser, Debug)]
@@ -41,6 +45,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Load `.env` from the package root (workspace root), not the shell cwd — so
+    // `HSM_COMPANY_OS_DATABASE_URL` is found even when the binary is started from e.g. `web/company-console`.
+    let repo_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if repo_env.is_file() {
+        if let Err(e) = dotenvy::from_path(&repo_env) {
+            tracing::warn!(path = %repo_env.display(), error = %e, "failed to parse repo-root .env");
+        }
+    }
+    // Optional: `.env` in the current working directory (only fills vars still unset).
+    let _ = dotenvy::dotenv();
+
+    hyper_stigmergy::policy_config::ensure_loaded();
+    hyper_stigmergy::telemetry::init_from_env();
+
     let args = Args::parse();
     let home = resolve_hsmii_home(args.config, args.hsm_profile.as_deref());
 
@@ -49,11 +67,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Company OS: PostgreSQL connected and migrations applied");
     } else {
         tracing::info!(
-            "Company OS: disabled (set HSM_COMPANY_OS_DATABASE_URL to enable /api/company/*)"
+            repo_env_path = %repo_env.display(),
+            repo_env_exists = repo_env.is_file(),
+            "Company OS: disabled — set non-empty HSM_COMPANY_OS_DATABASE_URL in repo-root .env (see .env.example) or export it, then restart hsm_console"
         );
     }
 
-    let state = ConsoleState::new(home.clone(), company_db);
+    let paperclip = Arc::new(Mutex::new(IntelligenceLayer::new()));
+    let state = ConsoleState::with_paperclip_layer(home.clone(), company_db, paperclip);
     if let Some(pool) = state.company_db.clone() {
         hyper_stigmergy::company_os::start_automation_worker(pool);
         tracing::info!("Company OS automation worker started");

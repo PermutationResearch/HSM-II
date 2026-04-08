@@ -112,16 +112,10 @@ impl SessionVisibility {
     ///
     /// Adds a bilateral restriction: observer sees only allowed_senders, and each
     /// allowed_sender sees only observer + each other.
-    pub fn add_private_channel(
-        &mut self,
-        observer: &str,
-        allowed_senders: &[&str],
-    ) {
+    pub fn add_private_channel(&mut self, observer: &str, allowed_senders: &[&str]) {
         // observer sees only allowed_senders
-        self.matrix.restrict(
-            observer,
-            allowed_senders.iter().copied(),
-        );
+        self.matrix
+            .restrict(observer, allowed_senders.iter().copied());
         // each allowed_sender also sees observer
         for &sender in allowed_senders {
             let mut visible: HashSet<String> = allowed_senders
@@ -183,6 +177,12 @@ fn now_secs() -> u64 {
 
 fn sanitize_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

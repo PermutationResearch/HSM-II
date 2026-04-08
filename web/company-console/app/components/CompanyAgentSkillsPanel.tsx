@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { CoAgentRow } from "./CompanyAgentsPanel";
@@ -128,19 +129,23 @@ export function CompanyAgentSkillsPanel({ api, companyId, agents, setCoErr, onOp
   );
 
   return (
-    <details className="mb-6 rounded-lg border border-line bg-panel" open>
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
-        <span className="text-gray-400">▸</span> Agent skill map{" "}
-        <span className="font-normal text-gray-500">
-          (joined view of workforce agents and imported <code className="text-xs text-accent">skills/</code>)
-        </span>
+    <details className="group mb-6 rounded-xl border border-[#30363D] bg-[#0d1117]">
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="mt-0.5 h-4 w-4 shrink-0 text-[#8B949E] transition-transform duration-200 group-open:rotate-90"
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <span className="text-sm font-medium text-white">Agent ↔ skills map</span>
+          <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+            Who has which imported skills — click a chip to open the template.
+          </p>
+        </div>
       </summary>
-      <div className="space-y-4 border-t border-line px-4 py-4">
-        <p className="text-sm leading-relaxed text-gray-500">
-          This is the missing joined table: each agent shows the skill refs imported from the pack. HSM-II prefers the
-          explicit <code className="text-xs text-accent">adapter_config.paperclip.skills</code> list and only falls
-          back to comma-separated <strong className="text-gray-400">capabilities</strong> when older rows do not have
-          the import metadata yet.
+      <div className="space-y-4 border-t border-[#30363D] px-4 py-4">
+        <p className="text-sm leading-relaxed text-[#8B949E]">
+          Skills come from <code className="text-[11px] text-[#79b8ff]">adapter_config.paperclip.skills</code> when
+          present; otherwise we parse the <strong className="text-[#c9d1d9]">capabilities</strong> text field.
         </p>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">

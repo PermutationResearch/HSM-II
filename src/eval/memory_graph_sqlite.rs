@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS hsm_memory_incidence (
   role TEXT NOT NULL,
   PRIMARY KEY (entity_id, fact_id, role)
 );
+CREATE INDEX IF NOT EXISTS idx_hsm_entity_kind ON hsm_memory_entity(kind);
 CREATE INDEX IF NOT EXISTS idx_hsm_incidence_fact ON hsm_memory_incidence(fact_id);
 CREATE INDEX IF NOT EXISTS idx_hsm_incidence_entity ON hsm_memory_incidence(entity_id);
+CREATE INDEX IF NOT EXISTS idx_hsm_incidence_role ON hsm_memory_incidence(role);
 CREATE INDEX IF NOT EXISTS idx_hsm_fact_relation ON hsm_memory_fact(relation);
 "#;
 
@@ -160,6 +162,13 @@ mod tests {
                 source_turn: 0,
                 created_at: 0,
                 keywords: vec![],
+                source_excerpt: None,
+                supporting_evidence: vec![],
+                contradicting_evidence: vec![],
+                supersedes_belief_index: None,
+                evidence_belief_indices: vec![],
+                human_committed: false,
+                claims: vec![],
             }],
             session_summaries: vec![],
             skills: vec![],
@@ -209,5 +218,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(r, 1);
+        let e: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hsm_memory_entity WHERE kind = 'evidence_turn'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(e, 1);
     }
 }

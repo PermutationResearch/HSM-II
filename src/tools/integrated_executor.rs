@@ -23,8 +23,10 @@ pub struct IntegratedToolExecutor {
 
 impl IntegratedToolExecutor {
     pub fn new(agent_id: AgentId) -> Self {
+        let mut registry = ToolRegistry::new();
+        crate::tools::register_all_tools(&mut registry);
         Self {
-            registry: ToolRegistry::with_default_tools(),
+            registry,
             agent_id,
             world: None,
         }
@@ -126,7 +128,7 @@ impl IntegratedToolExecutor {
             }
         }
 
-        // 5. Record stigmergic trace (completion)
+        // 5. Record stigmergic trace (completion) + optional web → experience/belief ingest
         if let Some(world_arc) = &self.world {
             let mut world = world_arc.lock().await;
             let trace_kind = if result.output.success {
@@ -146,8 +148,17 @@ impl IntegratedToolExecutor {
                 ),
                 Some(result.output.success),
                 Some(if result.output.success { 0.9 } else { 0.3 }),
-                sensitivity,
+                sensitivity.clone(),
             );
+
+            if result.output.success {
+                super::web_ingest::ingest_web_tool_success(
+                    &mut *world,
+                    &call.name,
+                    &call.parameters,
+                    &result.output,
+                );
+            }
         }
 
         result
@@ -177,6 +188,8 @@ mod tests {
             name: "bash".to_string(),
             parameters: serde_json::json!({"command": "echo hello"}),
             call_id: "test-1".to_string(),
+            harness_run: None,
+            idempotency_key: None,
         };
 
         let result = executor

@@ -69,14 +69,13 @@ use hyper_stigmergy::{
     ConstitutionConfig, ContextSnapshot as CassContextSnapshot, Council, CouncilBridge,
     CouncilBridgeConfig, CouncilMember, CouncilMode, DKSConfig, DKSSystem, DKSTickResult,
     DataSensitivity, Decision, EdgeScope, EvalResult, EvidenceBundle, EvidenceContract,
-    EvidenceRequirements, FederationClient, FederationConfig, FederationServer, GpuAccelerator,
-    HybridMemory, HyperStigmergicMorphogenesis, HyperedgeInjectionRequest, KuramotoEngine,
-    KuramotoSnapshot, LLMDeliberationConfig, Message, MessageType, MetaGraph, ModeConfig,
-    ModeSelectionReport, ModeSwitcher, ModelServer, PolicyContext, PolicyDecision, PolicyEngine,
-    PromiseStatus, Proposal, ProposedAction, Provenance, ReleaseState, RiskGate, RiskGateConfig,
-    Role, RooDb, RooDbConfig, RuntimeSnapshot, RuntimeThresholds, SkillBank,
-    StigmergicCouncilContext, SubscriptionFilter, Target, ToolExecutor, ToolRegistry,
-    VaultEmbeddingRow, CASS,
+    EvidenceRequirements, FederationClient, FederationConfig, FederationServer, HybridMemory,
+    HyperStigmergicMorphogenesis, HyperedgeInjectionRequest, KuramotoEngine, KuramotoSnapshot,
+    LLMDeliberationConfig, Message, MessageType, MetaGraph, ModeConfig, ModeSelectionReport,
+    ModeSwitcher, ModelServer, PolicyContext, PolicyDecision, PolicyEngine, PromiseStatus,
+    Proposal, ProposedAction, Provenance, ReleaseState, RiskGate, RiskGateConfig, Role, RooDb,
+    RooDbConfig, RuntimeSnapshot, RuntimeThresholds, SkillBank, StigmergicCouncilContext,
+    SubscriptionFilter, Target, ToolExecutor, ToolRegistry, VaultEmbeddingRow, CASS,
 };
 
 // ── Chat types ─────────────────────────────────────────────────────────
@@ -370,7 +369,6 @@ struct RuntimeComponents {
     navigation: NavigationSnapshot,
     communication: CommunicationSnapshot,
     kuramoto: Option<KuramotoSnapshot>,
-    gpu: GpuSnapshot,
     llm: LLMSnapshot,
     email: EmailSnapshot,
 }
@@ -384,7 +382,6 @@ struct RuntimeServices {
     kuramoto: KuramotoEngine,
     last_kuramoto_world_tick: Option<u64>,
     llm_server: ModelServer,
-    gpu_available: bool,
     last_dks_tick: Option<DKSTickResult>,
 }
 
@@ -474,15 +471,6 @@ struct CommunicationSnapshot {
 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
-struct GpuSnapshot {
-    available: bool,
-    device_name: Option<String>,
-    compute_load: Option<f64>,
-    memory_used_mb: Option<u64>,
-    fallback_active: bool,
-}
-
-#[derive(serde::Serialize, Clone, Debug, Default)]
 struct LLMSnapshot {
     model_loaded: bool,
     model_name: Option<String>,
@@ -529,7 +517,6 @@ struct WorldSnapshot {
     navigation: NavigationSnapshot,
     communication: CommunicationSnapshot,
     kuramoto: Option<KuramotoSnapshot>,
-    gpu: GpuSnapshot,
     llm: LLMSnapshot,
     email: EmailSnapshot,
     federation: FederationSnapshot,
@@ -975,7 +962,6 @@ impl App {
         let navigator = CodeNavigator::new();
         let communication = CommunicationHub::new(0, CommunicationConfig::default());
         let llm_server = ModelServer::new();
-        let gpu_available = GpuAccelerator::is_available();
         let chat_session = Arc::new(Mutex::new(DspySession::new(NoopSessionAdapter)));
         let council_session = Arc::new(Mutex::new(DspySession::new(NoopSessionAdapter)));
 
@@ -1081,7 +1067,6 @@ impl App {
                 kuramoto: KuramotoEngine::default(),
                 last_kuramoto_world_tick: None,
                 llm_server,
-                gpu_available,
                 last_dks_tick: None,
             },
             components: RuntimeComponents::default(),
@@ -1454,14 +1439,6 @@ impl App {
         self.components.communication.message_throughput =
             comm_stats.messages_sent + comm_stats.messages_received;
         self.refresh_kuramoto_component();
-
-        self.components.gpu = GpuSnapshot {
-            available: self.services.gpu_available,
-            device_name: None,
-            compute_load: None,
-            memory_used_mb: None,
-            fallback_active: !self.services.gpu_available,
-        };
 
         self.components.llm.cache_hit_rate = self.lcm_context.as_ref().and_then(|lcm| {
             let stats = lcm.get_stats();
@@ -2407,7 +2384,6 @@ impl App {
         let navigation = self.components.navigation.clone();
         let communication = self.components.communication.clone();
         let kuramoto = self.components.kuramoto.clone();
-        let gpu = self.components.gpu.clone();
         let llm = self.components.llm.clone();
         let email = self.components.email.clone();
 
@@ -2588,7 +2564,6 @@ impl App {
             navigation,
             communication,
             kuramoto,
-            gpu,
             llm,
             email,
             federation,
@@ -3144,13 +3119,6 @@ impl App {
                     cass.skill_count
                 )
             }
-            "/gpu" => {
-                #[cfg(feature = "gpu")]
-                let status = "GPU ENABLED\nDevice: Metal/Apple Silicon\nCompute: Active\nFallback: No";
-                #[cfg(not(feature = "gpu"))]
-                let status = "GPU DISABLED\nUsing CPU fallback\nBuild with: --features gpu";
-                status.into()
-            }
             "/llm" => {
                 let llm = &self.components.llm;
                 let cache = llm.cache_hit_rate
@@ -3303,7 +3271,6 @@ impl App {
                  ── Visualization ────────────────────────\n\
                  /export         Export viz + trigger browser reload\n\
                  /status         Show system state\n\
-                 /gpu            GPU acceleration status\n\
                  /email          Email agent status\n\\n                 /draw <desc>    Generate visual diagram (HTML)\n\
                  Studio UI:      http://localhost:8787\n\
                  ── LARS Semantic SQL ─────────────────────\n\
@@ -3955,34 +3922,6 @@ impl App {
                     .into()
             };
             sections.push(fed_status);
-        }
-
-        // ── GPU ─────────────────────────────────────────────────────────────
-        let wants_gpu = q.contains("gpu")
-            || q.contains("acceleration")
-            || q.contains("compute")
-            || q.contains("shader")
-            || q.contains("metal")
-            || q.contains("cuda");
-
-        if wants_gpu {
-            let gpu = &self.components.gpu;
-            let load = gpu
-                .compute_load
-                .map(|v| format!("{:.0}%", v * 100.0))
-                .unwrap_or_else(|| "n/a".to_string());
-            let mem = gpu
-                .memory_used_mb
-                .map(|v| format!("{} MB", v))
-                .unwrap_or_else(|| "n/a".to_string());
-            sections.push(format!(
-                "GPU:\n  Status: {}\n  Device: {}\n  Load: {}\n  Memory: {}\n  Fallback: {}",
-                if gpu.available { "ENABLED" } else { "DISABLED" },
-                gpu.device_name.as_deref().unwrap_or("n/a"),
-                load,
-                mem,
-                if gpu.fallback_active { "Yes" } else { "No" },
-            ));
         }
 
         // ── LLM ─────────────────────────────────────────────────────────────
@@ -12113,15 +12052,6 @@ async fn web_api_server(state: WebApiState) {
         }))
     }
 
-    // GET /api/components/gpu - GPU acceleration status
-    async fn handle_gpu_state(State(s): State<ApiState>) -> impl IntoResponse {
-        let snap = s.snapshot.read().await;
-        AxumJson(json!({
-            "gpu": snap.gpu,
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-        }))
-    }
-
     // GET /api/components/llm - LLM inference status
     async fn handle_llm_state(State(s): State<ApiState>) -> impl IntoResponse {
         let snap = s.snapshot.read().await;
@@ -12985,7 +12915,6 @@ async fn web_api_server(state: WebApiState) {
             "/api/components/communication",
             get(handle_communication_state),
         )
-        .route("/api/components/gpu", get(handle_gpu_state))
         .route("/api/components/llm", get(handle_llm_state))
         .route("/api/components/email", get(handle_email_state))
         .route("/api/skills/evidence", get(handle_skill_evidence))

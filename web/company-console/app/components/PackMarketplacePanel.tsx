@@ -224,14 +224,14 @@ export function PackMarketplacePanel({
             Pack marketplace
           </p>
           <h2 className="mt-1 text-base font-semibold text-white">What each template is for</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-gray-500">
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#8B949E]">
             Browse the same directory as the workspace picker. Each card summarizes the pack from{" "}
-            <a className="text-accent hover:underline" href="https://companies.sh/" target="_blank" rel="noreferrer">
+            <a className="text-[#58a6ff] hover:underline" href="https://companies.sh/" target="_blank" rel="noreferrer">
               companies.sh
             </a>
             . Add a workspace to install into Company OS (with{" "}
-            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">HSM_COMPANY_PACK_INSTALL_ROOT</code>, the real{" "}
-            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">npx companies.sh add</code> flow runs, then
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px] text-[#c9d1d9]">HSM_COMPANY_PACK_INSTALL_ROOT</code>, the real{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px] text-[#c9d1d9]">npx companies.sh add</code> flow runs, then
             agents import from disk).
           </p>
         </div>

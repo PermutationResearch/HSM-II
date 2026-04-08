@@ -42,6 +42,7 @@ impl Default for SandboxConfig {
                 "grep".to_string(),
                 "find".to_string(),
                 "web_search".to_string(),
+                "firecrawl_scrape".to_string(),
                 "bash".to_string(),
                 "calculator".to_string(),
                 "text_replace".to_string(),
@@ -256,7 +257,7 @@ impl RlmExecutor {
         if !self.config.allow_network
             && matches!(
                 tool_name,
-                "web_search" | "http_request" | "browser_navigate"
+                "web_search" | "firecrawl_scrape" | "http_request" | "browser_navigate"
             )
         {
             return false;
@@ -368,6 +369,7 @@ pub fn create_full_sandbox() -> SandboxConfig {
             "grep".to_string(),
             "find".to_string(),
             "web_search".to_string(),
+            "firecrawl_scrape".to_string(),
             "bash".to_string(),
             "calculator".to_string(),
             "text_replace".to_string(),

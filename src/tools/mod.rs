@@ -2,9 +2,10 @@
 //!
 //! Provides 60+ production-ready tools, competing with Hermes/OpenClaw:
 //!
-//! ## Web & Browser (7 tools)
+//! ## Web & Browser (9 tools)
 //! - web_search - Search with multiple backends
-//! - browser_navigate, browser_click, browser_type, browser_screenshot
+//! - firecrawl_scrape - Firecrawl API (markdown/html; needs FIRECRAWL_API_KEY)
+//! - browser_navigate, browser_wait, browser_click, browser_type, browser_screenshot
 //! - browser_get_text, browser_close
 //!
 //! ## File Operations (10 tools)
@@ -23,7 +24,7 @@
 //! - git_push, git_pull, git_branch, git_checkout, git_clone
 //! - git_fetch, git_merge, git_stash, git_reset, git_remote
 //!
-//! ## API & Data (13 tools)
+//! ## API & Data (14 tools)
 //! - http_request, webhook_send
 //! - json_parse, json_validate
 //! - base64, url, markdown
@@ -46,12 +47,19 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod bash_policy;
 pub mod file_tools;
+pub mod harness_gate;
 pub mod integrated_executor;
 pub mod registry;
 pub mod scored_tool_router;
 pub mod shell_tools;
 pub mod tool_permissions;
+pub use harness_gate::HarnessPolicyGate;
+pub mod bundle;
+pub use bundle::ToolBundle;
+pub mod firecrawl_tool;
+pub mod web_ingest;
 pub mod web_search;
 
 // New comprehensive tool modules
@@ -64,6 +72,7 @@ pub mod system_tools;
 pub mod text_tools;
 
 pub use file_tools::{EditTool, ReadTool, WriteTool};
+pub use firecrawl_tool::FirecrawlScrapeTool;
 pub use integrated_executor::IntegratedToolExecutor;
 pub use registry::ToolRegistry;
 pub use scored_tool_router::{
@@ -77,7 +86,7 @@ pub use web_search::WebSearchTool;
 // Browser tools
 pub use browser_tools::{
     BrowserClickTool, BrowserCloseTool, BrowserGetTextTool, BrowserNavigateTool,
-    BrowserScreenshotTool, BrowserTypeTool,
+    BrowserScreenshotTool, BrowserTypeTool, BrowserWaitTool,
 };
 
 // Git tools
@@ -126,6 +135,17 @@ pub mod mcp_bridge;
 /// Enterprise ops YAML: `read_operations`, `list_tickets` (personal agent home).
 pub mod ops_tools;
 pub use ops_tools::register_personal_ops_tools;
+
+/// Company OS human inbox + memory pool HTTP tools.
+pub mod company_os_tools;
+pub use company_os_tools::{
+    CompanyAgentRunFeedbackTool, CompanyMemoryAppendTool, CompanyMemorySearchTool,
+    CompanyPromoteFeedbackToTaskTool, CompanyTaskRequiresHumanTool,
+};
+
+/// On-disk SKILL.md: `skills_list`, `skill_md_read` (shared catalog from personal agent).
+pub mod skill_md_tools;
+pub use skill_md_tools::register_skill_md_tools;
 
 // MiroFish-inspired prediction tool
 pub mod prediction_tool;
@@ -188,6 +208,24 @@ pub struct ToolCall {
     pub name: String,
     pub parameters: Value,
     pub call_id: String,
+    /// Optional long-horizon harness envelope (gateway / lead–subagent contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_run: Option<crate::harness::HarnessRunEnvelope>,
+    /// Optional idempotency key for dedupe / audit (gap 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+impl Default for ToolCall {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            parameters: Value::Null,
+            call_id: String::new(),
+            harness_run: None,
+            idempotency_key: None,
+        }
+    }
 }
 
 /// Result of a tool execution with call info
@@ -250,6 +288,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
 
     // Core tools
     registry.register(Arc::new(WebSearchTool::new()));
+    registry.register(Arc::new(FirecrawlScrapeTool::new()));
     registry.register(Arc::new(ReadTool));
     registry.register(Arc::new(WriteTool));
     registry.register(Arc::new(EditTool));
@@ -259,6 +298,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
 
     // Browser tools
     registry.register(Arc::new(BrowserNavigateTool::new()));
+    registry.register(Arc::new(BrowserWaitTool::new()));
     registry.register(Arc::new(BrowserClickTool::new()));
     registry.register(Arc::new(BrowserTypeTool::new()));
     registry.register(Arc::new(BrowserScreenshotTool::new()));
@@ -279,6 +319,11 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
 
     // API tools
     registry.register(Arc::new(HttpRequestTool::new()));
+    registry.register(Arc::new(CompanyTaskRequiresHumanTool::new()));
+    registry.register(Arc::new(CompanyMemorySearchTool::new()));
+    registry.register(Arc::new(CompanyMemoryAppendTool::new()));
+    registry.register(Arc::new(CompanyAgentRunFeedbackTool::new()));
+    registry.register(Arc::new(CompanyPromoteFeedbackToTaskTool::new()));
     registry.register(Arc::new(WebhookSendTool::new()));
     registry.register(Arc::new(JsonParseTool::new()));
     registry.register(Arc::new(JsonValidateTool::new()));

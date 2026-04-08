@@ -1,0 +1,613 @@
+//! Company-scoped shared memory pool (`company_memory_entries`) and HTTP API.
+
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::Response,
+    routing::{get, patch, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::console::ConsoleState;
+
+use super::memory_summaries::derive_summary_l0_l1;
+use super::no_db;
+
+pub fn router() -> Router<ConsoleState> {
+    Router::new()
+        .route(
+            "/api/company/companies/:company_id/memory",
+            get(list_memory).post(create_memory),
+        )
+        .route(
+            "/api/company/companies/:company_id/memory/export.md",
+            get(export_shared_memory_markdown),
+        )
+        .route(
+            "/api/company/companies/:company_id/memory/:memory_id/delete",
+            post(post_delete_memory_entry),
+        )
+        .route(
+            "/api/company/companies/:company_id/memory/:memory_id",
+            patch(patch_memory).delete(delete_memory),
+        )
+}
+
+#[derive(sqlx::FromRow, Serialize, Clone)]
+pub struct CompanyMemoryRow {
+    pub id: Uuid,
+    pub company_id: Uuid,
+    pub scope: String,
+    pub company_agent_id: Option<Uuid>,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub source: String,
+    pub summary_l0: Option<String>,
+    pub summary_l1: Option<String>,
+    pub kind: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct MemoryListQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    company_agent_id: Option<Uuid>,
+    #[serde(default)]
+    q: Option<String>,
+}
+
+/// Unified list: optional full-text + substring (`ILIKE`) on title/body/summaries; `kind` tie-break.
+async fn list_memory(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Query(q): Query<MemoryListQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let mode = q
+        .scope
+        .as_deref()
+        .unwrap_or("shared")
+        .trim()
+        .to_ascii_lowercase();
+    if mode == "agent" && q.company_agent_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "company_agent_id required when scope=agent" })),
+        ));
+    }
+    let mode_key = match mode.as_str() {
+        "all" => "all",
+        "agent" => "agent",
+        _ => "shared",
+    };
+    let agent_bind = q.company_agent_id.unwrap_or_else(Uuid::nil);
+
+    let q_raw =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+    let q_search = if q_raw.len() > 512 {
+        q_raw.chars().take(512).collect::<String>()
+    } else {
+        q_raw.to_string()
+    };
+    let like_pat = if q_search.is_empty() {
+        "%".to_string()
+    } else {
+        format!("%{}%", q_search.replace('%', "\\%").replace('_', "\\_"))
+    };
+
+    let rows: Vec<CompanyMemoryRow> = sqlx::query_as::<_, CompanyMemoryRow>(
+        r#"SELECT id, company_id, scope, company_agent_id, title, body, tags, source,
+                  summary_l0, summary_l1, kind, created_at::text, updated_at::text
+           FROM company_memory_entries
+           WHERE company_id = $1
+             AND CASE $4::text
+               WHEN 'all' THEN true
+               WHEN 'shared' THEN scope = 'shared'
+               WHEN 'agent' THEN scope = 'agent' AND company_agent_id = $5
+               ELSE false
+             END
+             AND (
+               trim(coalesce($2::text, '')) = ''
+               OR to_tsvector(
+                    'english',
+                    coalesce(title, '') || ' ' || coalesce(body, '') || ' ' || coalesce(summary_l1, '') || ' ' || coalesce(summary_l0, '')
+                  ) @@ plainto_tsquery('english', trim($2::text))
+               OR title ILIKE $3 ESCAPE '\'
+               OR body ILIKE $3 ESCAPE '\'
+               OR COALESCE(summary_l1, '') ILIKE $3 ESCAPE '\'
+               OR COALESCE(summary_l0, '') ILIKE $3 ESCAPE '\'
+             )
+           ORDER BY
+             CASE WHEN trim(coalesce($2::text, '')) = '' THEN 0::real
+                  ELSE ts_rank_cd(
+                    to_tsvector(
+                      'english',
+                      coalesce(title, '') || ' ' || coalesce(body, '') || ' ' || coalesce(summary_l1, '') || ' ' || coalesce(summary_l0, '')
+                    ),
+                    plainto_tsquery('english', trim($2::text))
+                  )
+             END DESC,
+             CASE WHEN kind = 'broadcast' THEN 0 ELSE 1 END,
+             updated_at DESC
+           LIMIT 200"#,
+    )
+    .bind(company_id)
+    .bind(&q_search)
+    .bind(&like_pat)
+    .bind(mode_key)
+    .bind(agent_bind)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({ "entries": rows, "scope_filter": mode })))
+}
+
+#[derive(Deserialize)]
+struct CreateMemoryBody {
+    title: String,
+    #[serde(default)]
+    body: String,
+    /// `shared` or `agent`
+    scope: String,
+    #[serde(default)]
+    company_agent_id: Option<Uuid>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    summary_l0: Option<String>,
+    #[serde(default)]
+    summary_l1: Option<String>,
+    /// `general` or `broadcast` (shared pool: merged first in llm-context).
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+fn normalize_memory_kind(raw: Option<&str>) -> Result<String, &'static str> {
+    let k = raw.unwrap_or("general").trim().to_ascii_lowercase();
+    if k == "general" || k == "broadcast" {
+        Ok(k)
+    } else {
+        Err("kind must be general or broadcast")
+    }
+}
+
+async fn create_memory(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateMemoryBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "title required" })),
+        ));
+    }
+    let scope = body.scope.trim().to_ascii_lowercase();
+    if scope != "shared" && scope != "agent" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "scope must be shared or agent" })),
+        ));
+    }
+    if scope == "agent" && body.company_agent_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "company_agent_id required for agent scope" })),
+        ));
+    }
+    let kind = normalize_memory_kind(body.kind.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+    if scope == "agent" && kind == "broadcast" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "broadcast kind is only valid for shared scope" })),
+        ));
+    }
+    if let Some(aid) = body.company_agent_id {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM company_agents WHERE id = $1 AND company_id = $2)",
+        )
+        .bind(aid)
+        .bind(company_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        if !ok {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "company_agent_id not in company" })),
+            ));
+        }
+    }
+    let source = body
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("human")
+        .to_string();
+
+    let body_trim = body.body.trim().to_string();
+    let mut s0 = body
+        .summary_l0
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mut s1 = body
+        .summary_l1
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if s0.is_none() && s1.is_none() {
+        let (a, b) = derive_summary_l0_l1(&title, &body_trim);
+        s0 = a;
+        s1 = b;
+    }
+
+    let row = sqlx::query_as::<_, CompanyMemoryRow>(
+        r#"INSERT INTO company_memory_entries
+           (company_id, scope, company_agent_id, title, body, tags, source, summary_l0, summary_l1, kind)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING id, company_id, scope, company_agent_id, title, body, tags, source,
+                     summary_l0, summary_l1, kind, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(&scope)
+    .bind(body.company_agent_id)
+    .bind(&title)
+    .bind(&body_trim)
+    .bind(&body.tags)
+    .bind(&source)
+    .bind(s0)
+    .bind(s1)
+    .bind(&kind)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "entry": row }))))
+}
+
+#[derive(Deserialize, Default)]
+struct PatchMemoryBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    summary_l0: Option<String>,
+    #[serde(default)]
+    summary_l1: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+async fn patch_memory(
+    State(st): State<ConsoleState>,
+    Path((company_id, memory_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<PatchMemoryBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let title_upd = body
+        .title
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let kind_upd = if let Some(ref k) = body.kind {
+        Some(
+            normalize_memory_kind(Some(k.as_str()))
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?,
+        )
+    } else {
+        None
+    };
+    let row = sqlx::query_as::<_, CompanyMemoryRow>(
+        r#"UPDATE company_memory_entries SET
+            title = COALESCE($3, title),
+            body = COALESCE($4, body),
+            tags = COALESCE($5, tags),
+            summary_l0 = COALESCE($6, summary_l0),
+            summary_l1 = COALESCE($7, summary_l1),
+            kind = COALESCE($8, kind),
+            updated_at = NOW()
+           WHERE id = $1 AND company_id = $2
+           RETURNING id, company_id, scope, company_agent_id, title, body, tags, source,
+                     summary_l0, summary_l1, kind, created_at::text, updated_at::text"#,
+    )
+    .bind(memory_id)
+    .bind(company_id)
+    .bind(title_upd)
+    .bind(
+        body.body
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()),
+    )
+    .bind(body.tags.as_ref())
+    .bind(
+        body.summary_l0
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()),
+    )
+    .bind(
+        body.summary_l1
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()),
+    )
+    .bind(kind_upd.as_deref())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(row) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "memory entry not found" })),
+        ));
+    };
+    Ok(Json(json!({ "entry": row })))
+}
+
+/// Same as [`delete_memory`] for clients that cannot send `DELETE` through a proxy.
+async fn post_delete_memory_entry(
+    State(st): State<ConsoleState>,
+    Path((company_id, memory_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    delete_memory(State(st), Path((company_id, memory_id))).await
+}
+
+async fn delete_memory(
+    State(st): State<ConsoleState>,
+    Path((company_id, memory_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let r = sqlx::query("DELETE FROM company_memory_entries WHERE id = $1 AND company_id = $2")
+        .bind(memory_id)
+        .bind(company_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    if r.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "memory entry not found" })),
+        ));
+    }
+    Ok(Json(json!({ "ok": true, "id": memory_id })))
+}
+
+/// Git-friendly export of shared memories (Postgres remains source of truth).
+async fn export_shared_memory_markdown(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        r#"SELECT title, body, summary_l1, kind FROM company_memory_entries
+           WHERE company_id = $1 AND scope = 'shared'
+           ORDER BY CASE WHEN kind = 'broadcast' THEN 0 ELSE 1 END, updated_at DESC"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    let mut md = String::from("# SHARED_MEMORY_INDEX\n\n");
+    md.push_str(
+        "<!-- Generated from company_memory_entries (shared). Source of truth: Postgres. -->\n\n",
+    );
+    for (title, body, sum1, kind) in rows {
+        let body_use = sum1
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(body.as_str());
+        md.push_str(&format!("## {title}\n"));
+        if kind == "broadcast" {
+            md.push_str("*kind: broadcast*\n\n");
+        }
+        md.push_str(body_use);
+        md.push_str("\n\n---\n\n");
+    }
+
+    let resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+        .body(Body::from(md))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    Ok(resp)
+}
+
+/// UTF-8 budget for each of shared-memory and agent-memory blocks in task `llm-context` (default ~3k).
+///
+/// Override: `HSM_COMPANY_MEMORY_LLM_CONTEXT_MAX_BYTES`.
+pub fn company_memory_llm_context_max_bytes() -> usize {
+    std::env::var("HSM_COMPANY_MEMORY_LLM_CONTEXT_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 100_000)
+        .unwrap_or(3072)
+}
+
+/// Rows to load per pool, newest first (default **1** = single most recent entry only).
+///
+/// Override: `HSM_COMPANY_MEMORY_LLM_CONTEXT_ENTRY_LIMIT` (1–50).
+pub fn company_memory_llm_context_entry_limit() -> i64 {
+    std::env::var("HSM_COMPANY_MEMORY_LLM_CONTEXT_ENTRY_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= 1 && n <= 50)
+        .unwrap_or(1)
+}
+
+/// Markdown block injected into `GET /api/company/tasks/:id/llm-context` after company `context_markdown`.
+///
+/// Loads up to [`company_memory_llm_context_entry_limit`] newest **shared** rows and trims to
+/// [`company_memory_llm_context_max_bytes`] so agents are not flooded with old memory.
+pub async fn fetch_shared_memory_addon(
+    pool: &PgPool,
+    company_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    let limit = company_memory_llm_context_entry_limit();
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        r#"SELECT title, body, summary_l1 FROM company_memory_entries
+           WHERE company_id = $1 AND scope = 'shared'
+           ORDER BY CASE WHEN kind = 'broadcast' THEN 0 ELSE 1 END, updated_at DESC
+           LIMIT $2"#,
+    )
+    .bind(company_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = String::from("## Company shared memory (injected: newest only; size-capped)\n\n");
+    let mut total: usize = 0;
+    let max_bytes = company_memory_llm_context_max_bytes();
+    for (title, body, sum1) in rows {
+        let body_use = sum1
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(body.as_str());
+        let mut chunk = format!("### {title}\n{body_use}\n\n");
+        if total + chunk.len() > max_bytes {
+            let room = max_bytes.saturating_sub(total);
+            if room > 200 {
+                let mut n = room.saturating_sub(80);
+                while n > 0 && !chunk.is_char_boundary(n) {
+                    n -= 1;
+                }
+                chunk.truncate(n);
+                chunk.push_str("\n\n_(truncated to context budget.)_\n\n");
+                out.push_str(&chunk);
+            }
+            break;
+        }
+        total += chunk.len();
+        out.push_str(&chunk);
+    }
+    Ok(out)
+}
+
+/// Markdown block for `scope = agent` rows tied to a workforce agent (`company_agent_id`).
+/// Injected into task LLM context after shared pool, before task spec.
+pub async fn fetch_agent_memory_addon(
+    pool: &PgPool,
+    company_id: Uuid,
+    company_agent_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    let limit = company_memory_llm_context_entry_limit();
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        r#"SELECT title, body, summary_l1 FROM company_memory_entries
+           WHERE company_id = $1 AND scope = 'agent' AND company_agent_id = $2
+           ORDER BY updated_at DESC LIMIT $3"#,
+    )
+    .bind(company_id)
+    .bind(company_agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = String::from("## Company agent memory (injected: newest only; size-capped)\n\n");
+    let mut total: usize = 0;
+    let max_bytes = company_memory_llm_context_max_bytes();
+    for (title, body, sum1) in rows {
+        let body_use = sum1
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(body.as_str());
+        let mut chunk = format!("### {title}\n{body_use}\n\n");
+        if total + chunk.len() > max_bytes {
+            let room = max_bytes.saturating_sub(total);
+            if room > 200 {
+                let mut n = room.saturating_sub(80);
+                while n > 0 && !chunk.is_char_boundary(n) {
+                    n -= 1;
+                }
+                chunk.truncate(n);
+                chunk.push_str("\n\n_(truncated to context budget.)_\n\n");
+                out.push_str(&chunk);
+            }
+            break;
+        }
+        total += chunk.len();
+        out.push_str(&chunk);
+    }
+    Ok(out)
+}

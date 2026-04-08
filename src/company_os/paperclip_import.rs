@@ -1,12 +1,20 @@
 //! Import Paperclip-style **company packs** from `hsmii_home` on disk into `company_agents` + context index.
 //!
-//! This is **on-disk agent/skill content** for Postgres-backed company views — not the in-process
-//! [`crate::paperclip::IntelligenceLayer`]. The unified `personal_agent` runtime owns goals, DRIs, and
-//! capability tracking for all companies; packs do not replace that layer.
+//! **Canonical path:** roster and skills land in **Postgres** for the given `company_id` (`company_agents`,
+//! optional context append). This is the supported bridge from pack layout → Company OS.
+//!
+//! Optional in-process [`crate::paperclip::IntelligenceLayer`] (`/api/paperclip/*`) is a **global demo**;
+//! do not treat it as a second goal registry — use `goals` / `tasks` in Company OS and `tasks.capability_refs`
+//! to link work to skills and SOPs.
 //!
 //! Layout (e.g. `paperclipai/companies` packs):
 //! - `{hsmii_home}/agents/{id}/AGENTS.md` — YAML front matter + markdown briefing
-//! - `{hsmii_home}/skills/{slug}/SKILL.md` — optional; indexed into `context_markdown`
+//! - `{hsmii_home}/skills/**/SKILL.md` — optional; nested paths become slugs (e.g. `devops/webhook-subscriptions`)
+//!
+//! **Shared skill libraries** (usable by every agent once imported): set `HSM_SKILL_EXTERNAL_DIRS` to
+//! comma-separated roots (same as personal-agent `skill_markdown`), e.g. a clone of
+//! [NousResearch/hermes-agent/skills](https://github.com/NousResearch/hermes-agent/tree/main/skills).
+//! Those skills are upserted first; the company pack’s `skills/` tree **overrides** on matching slug.
 //!
 //! `reportsTo` in front matter may be folder id (any case), display `name`, or a rough slug from name;
 //! we normalize lookups. If `agents/` is missing at the stored root but exists under one child
@@ -21,6 +29,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+use crate::skill_markdown::{enumerate_skill_md_under_root, external_skill_dir_roots_from_env};
 
 const MAX_CONTEXT_APPEND_BYTES: usize = 512 * 1024;
 
@@ -339,66 +349,153 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
     }
 
     let skills_dir = pack_root.join("skills");
-    let mut skills_block = String::new();
-    let mut parsed_skills: Vec<ParsedSkill> = Vec::new();
+    let external_roots = external_skill_dir_roots_from_env();
+    let mut merged: HashMap<String, (ParsedSkill, &'static str)> = HashMap::new();
+
+    for root in &external_roots {
+        if !root.is_dir() {
+            tracing::warn!(
+                path = %root.display(),
+                "HSM_SKILL_EXTERNAL_DIRS entry missing or not a directory (company skills import)"
+            );
+            continue;
+        }
+        let listed = enumerate_skill_md_under_root(root).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %root.display(),
+                error = %e,
+                "enumerate_skill_md_under_root failed"
+            );
+            Vec::new()
+        });
+        for (slug, path) in listed {
+            match parse_skill_md(&path) {
+                Ok((fm, body)) => {
+                    let name = fm.name.unwrap_or_else(|| {
+                        slug.split('/')
+                            .next_back()
+                            .unwrap_or(slug.as_str())
+                            .to_string()
+                    });
+                    let desc = fm.description.unwrap_or_default();
+                    merged.insert(
+                        slug.clone(),
+                        (
+                            ParsedSkill {
+                                slug,
+                                name,
+                                description: desc,
+                                body,
+                            },
+                            "shared-skills/v1",
+                        ),
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skip SKILL.md for company_skills (shared dir)"
+                ),
+            }
+        }
+    }
 
     if skills_dir.is_dir() {
+        let listed = enumerate_skill_md_under_root(&skills_dir).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %skills_dir.display(),
+                error = %e,
+                "enumerate pack skills/ failed"
+            );
+            Vec::new()
+        });
+        for (slug, path) in listed {
+            match parse_skill_md(&path) {
+                Ok((fm, body)) => {
+                    let name = fm.name.unwrap_or_else(|| {
+                        slug.split('/')
+                            .next_back()
+                            .unwrap_or(slug.as_str())
+                            .to_string()
+                    });
+                    let desc = fm.description.unwrap_or_default();
+                    merged.insert(
+                        slug.clone(),
+                        (
+                            ParsedSkill {
+                                slug,
+                                name,
+                                description: desc,
+                                body,
+                            },
+                            "paperclip/v1",
+                        ),
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skip SKILL.md for company_skills (pack)"
+                ),
+            }
+        }
+    }
+
+    let mut merged_vec: Vec<(ParsedSkill, &'static str)> = merged.into_values().collect();
+    merged_vec.sort_by(|a, b| a.0.slug.cmp(&b.0.slug));
+
+    let mut skills_block = String::new();
+    if !merged_vec.is_empty() {
         let mut lines: Vec<String> = vec![
             String::new(),
             "<!-- hsm-paperclip-skills-start -->".to_string(),
-            "## Paperclip pack skills (on disk)".to_string(),
+            "## Workspace skills (imported)".to_string(),
             String::new(),
             format!(
-                "Pack root: `{}`. Skills live under `skills/<slug>/SKILL.md` — edit those files or adjust agents in **Team & roles**.",
+                "Pack root: `{}`. Nested `skills/**/SKILL.md` plus optional `HSM_SKILL_EXTERNAL_DIRS` (shared libraries). Pack skills override shared entries when slugs match.",
                 pack_root.display()
             ),
             String::new(),
         ];
-
-        let mut entries: Vec<_> = fs::read_dir(&skills_dir)?.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in entries {
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let slug = entry.file_name().to_string_lossy().to_string();
-            if slug.starts_with('.') {
-                continue;
-            }
-            let skill_md = entry.path().join("SKILL.md");
-            if !skill_md.is_file() {
-                continue;
-            }
-            if let Ok((fm, body)) = parse_skill_md(&skill_md) {
-                let name = fm.name.unwrap_or_else(|| slug.clone());
-                let desc = fm.description.unwrap_or_default();
-                let one_line: String = desc.split_whitespace().collect::<Vec<_>>().join(" ");
-                let short: String = one_line.chars().take(240).collect();
-                lines.push(format!("- **`{name}`** (`skills/{slug}/`) — {short}"));
-                parsed_skills.push(ParsedSkill {
-                    slug: slug.clone(),
-                    name,
-                    description: desc,
-                    body,
-                });
-            }
+        if !external_roots.is_empty() {
+            lines.push(format!(
+                "**Shared libraries** (`HSM_SKILL_EXTERNAL_DIRS`): {}",
+                external_roots
+                    .iter()
+                    .map(|p| format!("`{}`", p.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            lines.push(String::new());
+        }
+        for (skill, _src) in &merged_vec {
+            let one_line: String = skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let short: String = one_line.chars().take(240).collect();
+            lines.push(format!(
+                "- **`{}`** (`skills/{}/`) — {}",
+                skill.name, skill.slug, short
+            ));
         }
         lines.push("<!-- hsm-paperclip-skills-end -->".to_string());
         skills_block = lines.join("\n");
     }
 
     let mut skills_saved = 0usize;
-    for skill in &parsed_skills {
+    for (skill, source) in &merged_vec {
         let skill_path = format!("skills/{}/", skill.slug);
         sqlx::query(
             r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
-               VALUES ($1, $2, $3, $4, $5, $6, 'paperclip/v1')
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT (company_id, slug) DO UPDATE SET
                    name        = EXCLUDED.name,
                    description = EXCLUDED.description,
                    body        = EXCLUDED.body,
                    skill_path  = EXCLUDED.skill_path,
+                   source      = EXCLUDED.source,
                    updated_at  = now()"#,
         )
         .bind(company_id)
@@ -407,6 +504,7 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         .bind(&skill.description)
         .bind(&skill.body)
         .bind(&skill_path)
+        .bind(source)
         .execute(pool)
         .await
         .with_context(|| format!("upsert skill {}", skill.slug))?;
@@ -438,5 +536,6 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         "agents_skipped_existing": skipped_existing,
         "skills_saved": skills_saved,
         "pack_root_resolved": pack_root.display().to_string(),
+        "external_skill_dirs": external_roots.iter().map(|p| p.display().to_string()).collect::<Vec<String>>(),
     }))
 }

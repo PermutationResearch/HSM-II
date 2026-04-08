@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type CompanySkillTemplate = {
@@ -98,18 +99,24 @@ export function CompanySkillsPanel({
   }, [focusSkillNonce, focusSkillSlug, skills]);
 
   return (
-    <details className="mb-6 rounded-lg border border-line bg-panel" open>
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-200 marker:content-none [&::-webkit-details-marker]:hidden">
-        <span className="text-gray-400">▸</span> Imported skill templates{" "}
-        <span className="font-normal text-gray-500">
-          (ready from <code className="text-xs text-accent">skills/&lt;slug&gt;/SKILL.md</code>)
-        </span>
+    <details className="group mb-6 rounded-xl border border-[#30363D] bg-[#0d1117]">
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="mt-0.5 h-4 w-4 shrink-0 text-[#8B949E] transition-transform duration-200 group-open:rotate-90"
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <span className="text-sm font-medium text-white">Imported skill templates</span>
+          <p className="mt-1 text-xs leading-relaxed text-[#8B949E]">
+            From pack <code className="text-[11px] text-[#79b8ff]">skills/&lt;slug&gt;/SKILL.md</code> — what the
+            directory install indexed for this workspace.
+          </p>
+        </div>
       </summary>
-      <div className="space-y-4 border-t border-line px-4 py-4">
-        <p className="text-sm leading-relaxed text-gray-500">
-          Paperclip and <strong className="text-gray-400">companies.sh</strong> imports save each pack skill as a local
-          template for this workspace. Use these when shaping new agents, copying playbooks, or checking what the pack
-          brought in alongside the roster.
+      <div className="space-y-4 border-t border-[#30363D] px-4 py-4">
+        <p className="text-sm leading-relaxed text-[#8B949E]">
+          Use this list to see what a Paperclip or <strong className="text-[#c9d1d9]">companies.sh</strong> import
+          brought in, then wire skills to agents in the map below or in each agent&apos;s adapter config.
         </p>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">

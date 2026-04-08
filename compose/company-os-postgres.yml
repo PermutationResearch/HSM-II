@@ -1,0 +1,28 @@
+# Local PostgreSQL for Company OS (`hsm_console` /api/company/*).
+# Usage from repo root:
+#   ./scripts/company_os_postgres.sh up
+# Add to `.env` (repo root, gitignored):
+#   HSM_COMPANY_OS_DATABASE_URL=postgres://hsm:hsm@127.0.0.1:55432/hsm_company_os
+# Then restart hsm_console (migrations run on connect).
+
+services:
+  company-os-postgres:
+    image: postgres:16-alpine
+    container_name: hsm-company-os-postgres
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_USER: hsm
+      POSTGRES_PASSWORD: hsm
+      POSTGRES_DB: hsm_company_os
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hsm -d hsm_company_os"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    volumes:
+      - hsm_company_os_pgdata:/var/lib/postgresql/data
+
+volumes:
+  hsm_company_os_pgdata:

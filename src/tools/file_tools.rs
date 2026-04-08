@@ -5,7 +5,7 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::debug;
 
 use super::{object_schema, Tool, ToolOutput};
@@ -103,7 +103,10 @@ impl Tool for ReadTool {
             return ToolOutput::error("Path parameter is required");
         }
 
-        let path = PathBuf::from(path_str);
+        let path = match crate::harness::resolve_tool_fs_path(path_str) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
 
         if !path.exists() {
             return ToolOutput::error(format!("File not found: {}", path_str));
@@ -172,7 +175,10 @@ impl Tool for WriteTool {
             return ToolOutput::error("Path parameter is required");
         }
 
-        let path = PathBuf::from(path_str);
+        let path = match crate::harness::resolve_tool_fs_path(path_str) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -287,7 +293,10 @@ impl Tool for EditTool {
             return ToolOutput::error("Path parameter is required");
         }
 
-        let path = PathBuf::from(path_str);
+        let path = match crate::harness::resolve_tool_fs_path(path_str) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        };
 
         if !path.exists() {
             return ToolOutput::error(format!("File not found: {}", path_str));

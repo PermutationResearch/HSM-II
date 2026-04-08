@@ -52,7 +52,7 @@ import { formatCents } from "../lib/utils";
 
 export type HsmCompanyOption = { id: string; display_name: string; issue_key_prefix?: string };
 
-/** Queue tabs on Inbox & tasks — must match `QueueView` in PolicyQueuePanel / API. */
+/** Queue tabs (PolicyQueuePanel / API). Used when drilling from the dashboard into the inbox or task filters. */
 export type DashboardDrillQueueView =
   | "all"
   | "overdue"
@@ -776,7 +776,7 @@ export function Dashboard({
                       <button
                         key={issue.id}
                         type="button"
-                        title="Open in Inbox & tasks"
+                        title="Open in Tasks"
                         onClick={() => drill({ type: "task", taskId: issue.id })}
                         className="block w-full cursor-pointer px-4 py-3 text-left text-sm text-inherit transition-colors duration-200 ease-out hover:bg-[#161b22]"
                       >

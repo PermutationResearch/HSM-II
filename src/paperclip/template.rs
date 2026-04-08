@@ -365,10 +365,14 @@ impl CompanyTemplate {
         capabilities.sort_by(|a, b| a.id.cmp(&b.id));
         let caps_len = capabilities.len();
 
-        let roles = merge_blueprint_roles_with_dri(layer.org_blueprint.as_ref(), &layer.dri_registry);
+        let roles =
+            merge_blueprint_roles_with_dri(layer.org_blueprint.as_ref(), &layer.dri_registry);
 
-        let mut seed_goals: Vec<TemplateGoal> =
-            layer.goals.values().map(|g| goal_to_template_goal(g)).collect();
+        let mut seed_goals: Vec<TemplateGoal> = layer
+            .goals
+            .values()
+            .map(|g| goal_to_template_goal(g))
+            .collect();
         seed_goals.sort_by(|a, b| a.title.cmp(&b.title));
 
         let default_escalation = layer
@@ -511,8 +515,8 @@ impl CompanyTemplate {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::goal::GoalPriority;
+    use super::*;
 
     #[test]
     fn apply_stores_blueprint_and_export_round_trips_taxonomy() {
@@ -527,7 +531,10 @@ mod tests {
 
         let exported = CompanyTemplate::from_intelligence_layer(&layer);
         assert_eq!(exported.roles.len(), t.roles.len());
-        assert_eq!(exported.default_escalation.len(), t.default_escalation.len());
+        assert_eq!(
+            exported.default_escalation.len(),
+            t.default_escalation.len()
+        );
         assert_eq!(exported.name, t.name);
         assert!(exported.metadata["has_org_blueprint"].as_bool().unwrap());
     }
