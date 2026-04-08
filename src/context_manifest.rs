@@ -60,7 +60,7 @@ impl ContextManifest {
 }
 
 /// Logical sections for [`GET /api/company/tasks/:task_id/llm-context`](crate::company_os::agents).
-/// Keys are stable: `company`, `shared_memory`, `agent_memory`, `task`, `agent_profile`.
+/// Keys are stable: `company`, `vision_alignment`, `shared_memory`, `agent_memory`, `task`, `agent_profile`.
 pub fn company_task_llm_context_manifest<F>(
     chunks: Vec<(&str, usize)>,
     tier_for: F,

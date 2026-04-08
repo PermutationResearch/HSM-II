@@ -27,6 +27,7 @@ import { Label } from "@/app/components/ui/label";
 import { Textarea } from "@/app/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select";
 import { Separator } from "@/app/components/ui/separator";
+import { SopVisionAlignment } from "@/app/components/SopVisionAlignment";
 import { ChevronDown, GitBranch, Plus, Sparkles, Trash2, Users } from "lucide-react";
 
 function downloadJson(doc: SopExampleDocument) {
@@ -147,6 +148,9 @@ const STEPS = [
 type Props = {
   apiBase: string;
   companyId: string | null;
+  /** Company PATCH shared context — merged with visions.md for alignment lint. */
+  contextMarkdown?: string | null;
+  hsmiiHome?: string | null;
   referenceExamples: SopExampleDocument[];
   onCustomSopsChanged: (docs: SopExampleDocument[]) => void;
   onApplied: () => Promise<void>;
@@ -156,6 +160,8 @@ type Props = {
 export function SopComposerPanel({
   apiBase,
   companyId,
+  contextMarkdown,
+  hsmiiHome,
   referenceExamples,
   onCustomSopsChanged,
   onApplied,
@@ -356,6 +362,14 @@ export function SopComposerPanel({
           ids, filenames, or raw audit rows? Expand <span className="text-gray-400">Technical options</span> in each section.
         </p>
       </div>
+
+      <SopVisionAlignment
+        apiBase={apiBase}
+        companyId={companyId}
+        contextMarkdown={contextMarkdown}
+        hsmiiHome={hsmiiHome}
+        sopDraft={draft}
+      />
 
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1">

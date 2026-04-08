@@ -9,7 +9,8 @@ import type { SopExampleDocument } from "@/app/lib/sop-examples-types";
 import { loadCustomSops } from "@/app/lib/sop-storage";
 
 export default function WorkspacePlaybooksPage() {
-  const { apiBase, companyId, refreshWorkspace } = useWorkspace();
+  const { apiBase, companyId, companies, refreshWorkspace } = useWorkspace();
+  const companyRow = companies.find((c) => c.id === companyId);
   const [customSops, setCustomSops] = useState<SopExampleDocument[]>([]);
   const [coErr, setCoErr] = useState<string | null>(null);
 
@@ -48,6 +49,8 @@ export default function WorkspacePlaybooksPage() {
           <SopComposerPanel
             apiBase={apiBase}
             companyId={companyId}
+            contextMarkdown={companyRow?.context_markdown}
+            hsmiiHome={companyRow?.hsmii_home}
             referenceExamples={sopReferenceExamples}
             onCustomSopsChanged={setCustomSops}
             onApplied={async () => {

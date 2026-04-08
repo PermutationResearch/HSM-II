@@ -1321,10 +1321,27 @@ async fn get_task_llm_context(
         company_addon.push_str("\n\n");
     }
     let company_context_addon_bytes = company_addon.len();
+
+    let vision_alignment_enabled = std::env::var("HSM_VISION_ALIGNMENT_LLM_ADDON")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true);
+    let (vision_alignment_addon, vision_alignment_addon_bytes) = if vision_alignment_enabled {
+        super::build_llm_vision_alignment_addon(pool, t.company_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+            })?
+    } else {
+        (String::new(), 0)
+    };
+
     let shared_memory_addon_bytes = shared_mem_addon.len();
     let task_context_addon_bytes = task_addon.len();
     let combined_system_addon = format!(
-        "{company_addon}{shared_mem_addon}{agent_mem_addon}{task_addon}{}",
+        "{company_addon}{vision_alignment_addon}{shared_mem_addon}{agent_mem_addon}{task_addon}{}",
         profile.system_context_addon
     );
     let combined_system_addon_bytes = combined_system_addon.len();
@@ -1333,6 +1350,7 @@ async fn get_task_llm_context(
     let context_manifest = crate::context_manifest::company_task_llm_context_manifest(
         vec![
             ("company", company_context_addon_bytes),
+            ("vision_alignment", vision_alignment_addon_bytes),
             ("shared_memory", shared_memory_addon_bytes),
             ("agent_memory", agent_memory_addon_bytes),
             ("task", task_context_addon_bytes),
@@ -1379,6 +1397,7 @@ async fn get_task_llm_context(
         endpoint = "llm_context_get",
         company_agent_row_found = profile.resolved,
         company_context_addon_bytes,
+        vision_alignment_addon_bytes,
         shared_memory_addon_bytes,
         agent_memory_addon_bytes,
         task_context_addon_bytes,
@@ -1398,6 +1417,8 @@ async fn get_task_llm_context(
         "capability_refs": t.capability_refs.0.clone(),
         "workspace_attachment_paths": paths,
         "company_context_addon_bytes": company_context_addon_bytes,
+        "vision_alignment_addon": vision_alignment_addon,
+        "vision_alignment_addon_bytes": vision_alignment_addon_bytes,
         "shared_memory_addon_bytes": shared_memory_addon_bytes,
         "agent_memory_addon_bytes": agent_memory_addon_bytes,
         "task_context_addon_bytes": task_context_addon_bytes,

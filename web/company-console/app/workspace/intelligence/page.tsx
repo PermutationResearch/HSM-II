@@ -116,7 +116,10 @@ export default function IntelligencePage() {
       <div className="space-y-4">
         <p className="pc-page-eyebrow">Runtime</p>
         <h1 className="pc-page-title">Intelligence</h1>
-        <p className="pc-page-desc">Select a company in the shell header to load Postgres-backed goals, tasks, and workflow signals.</p>
+        <p className="pc-page-desc">
+          Select a company to load the runtime view: Postgres-backed goals, tasks, and workflow signals—the console
+          face of company coordination, not the full composer or hypergraph.
+        </p>
       </div>
     );
   }
@@ -127,7 +130,11 @@ export default function IntelligencePage() {
         <p className="pc-page-eyebrow">Runtime</p>
         <h1 className="pc-page-title">Intelligence</h1>
         <p className="pc-page-desc">
-          Operational graph (Postgres): goals, task states, spend, workforce, and workflow signals from task lifecycle.
+          This page helps represent the intelligence layer in the product: a{" "}
+          <span className="text-foreground/90">company-scoped runtime view</span> of goals, task
+          states, spend, workforce, and workflow events from Postgres—live state and provenance-friendly
+          signals that ground alignment and routing. It is not the whole unified world model or dynamic
+          composer; those live across HyperStigmergicMorphogenesis, capabilities, gateways, and jobs.
           Canonical API{" "}
           <span className="font-mono text-xs">
             GET /api/company/companies/{`{id}`}/intelligence/summary

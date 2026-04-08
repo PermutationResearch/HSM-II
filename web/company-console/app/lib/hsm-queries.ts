@@ -7,6 +7,8 @@ import type {
   HsmCompanyRow,
   HsmGoalRow,
   HsmIntelligenceSummary,
+  HsmIssueLabelRow,
+  HsmProjectRow,
   HsmSpendSummaryRow,
   HsmTaskRow,
 } from "./hsm-api-types";
@@ -149,6 +151,72 @@ export function useCompanyGoals(apiBase: string, companyId: string | null) {
       return j.goals ?? [];
     },
     enabled: !!companyId,
+  });
+}
+
+export function useCompanyProjects(apiBase: string, companyId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "projects", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/projects`));
+      const j = (await r.json().catch(() => ({}))) as { projects?: HsmProjectRow[]; error?: string };
+      if (r.status === 404) {
+        return [];
+      }
+      if (!r.ok) {
+        throw new Error(j.error ?? `projects ${r.status}`);
+      }
+      return j.projects ?? [];
+    },
+    enabled: !!companyId,
+    retry: false,
+  });
+}
+
+export function useCompanyIssueLabels(apiBase: string, companyId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "issue-labels", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/issue-labels`));
+      const j = (await r.json().catch(() => ({}))) as { labels?: HsmIssueLabelRow[]; error?: string };
+      if (r.status === 404) {
+        return [];
+      }
+      if (!r.ok) {
+        throw new Error(j.error ?? `issue-labels ${r.status}`);
+      }
+      return j.labels ?? [];
+    },
+    enabled: !!companyId,
+    retry: false,
+  });
+}
+
+/** GET …/agents/:id/operator-thread — stigmergic operator notes + compact digest */
+export type HsmOperatorThreadResponse = {
+  agent_id: string;
+  agent_name: string;
+  total_tasks: number;
+  compact_digest: string;
+  tasks?: unknown[];
+  notes_flat?: { task_id?: string; task_title?: string; note?: unknown }[];
+};
+
+export function useAgentOperatorThread(apiBase: string, companyId: string | null, agentId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "operator-thread", apiBase, companyId, agentId],
+    queryFn: async () => {
+      if (!companyId || !agentId) throw new Error("missing company or agent");
+      const r = await fetch(
+        companyOsUrl(apiBase, `/api/company/companies/${companyId}/agents/${agentId}/operator-thread`),
+      );
+      const j = (await r.json().catch(() => ({}))) as HsmOperatorThreadResponse & { error?: string };
+      if (!r.ok) {
+        throw new Error(j.error ?? `operator-thread ${r.status}`);
+      }
+      return j;
+    },
+    enabled: !!companyId && !!agentId,
   });
 }
 

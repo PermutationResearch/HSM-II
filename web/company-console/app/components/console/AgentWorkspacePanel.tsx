@@ -3,13 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { File, Folder, FolderPlus, Trash2 } from "lucide-react";
 import { companyOsUrl } from "@/app/lib/company-api-url";
+import { AgentWorkspaceTaskHistory } from "@/app/components/console/AgentWorkspaceTaskHistory";
 import { WorkspaceNewIssueDialog } from "@/app/components/console/WorkspaceNewIssueDialog";
 import { Button } from "@/app/components/ui/button";
 import { ScrollArea } from "@/app/components/ui/scroll-area";
 import { Skeleton } from "@/app/components/ui/skeleton";
 import { Textarea } from "@/app/components/ui/textarea";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card";
-
 export type WorkspaceListEntry = {
   name: string;
   path: string;
@@ -100,9 +99,17 @@ type Props = {
   agentPackName: string;
   /** Label for the new-issue modal checkbox, e.g. Corey. */
   assigneeDisplayName: string;
+  /** Company issue key prefix (e.g. COM) for task id column. */
+  issueKeyPrefix: string;
 };
 
-export function AgentWorkspacePanel({ apiBase, companyId, agentPackName, assigneeDisplayName }: Props) {
+export function AgentWorkspacePanel({
+  apiBase,
+  companyId,
+  agentPackName,
+  assigneeDisplayName,
+  issueKeyPrefix,
+}: Props) {
   const rootPrefix = `agents/${agentPackName}`;
   const [browsePath, setBrowsePath] = useState(rootPrefix);
   const [listLoading, setListLoading] = useState(false);
@@ -352,25 +359,13 @@ export function AgentWorkspacePanel({ apiBase, companyId, agentPackName, assigne
   const folderLabel = browsePath === rootPrefix ? "workspace" : browsePath.replace(/^.*\//, "") || browsePath;
 
   return (
-    <div className="space-y-3">
-      <Card className="border-admin-border bg-muted/20">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium">Agent workspace (harness-style)</CardTitle>
-          <CardDescription className="text-xs leading-relaxed">
-            This is the on-disk home for this roster agent:{" "}
-            <span className="font-mono text-foreground/90">{rootPrefix}</span> under the company{" "}
-            <span className="font-mono">hsmii_home</span>. Same idea as a thread workspace in a harness: durable
-            Markdown, notes, and pack files the runtime and operators can read. Put long-lived instructions next to{" "}
-            <span className="font-mono">AGENTS.md</span>; use a <span className="font-mono">workspace/</span> subfolder
-            for scratch or task-local files. Click a file to edit; use New file / New folder; deletes apply on disk
-            only under this agent tree.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-0 text-[11px] text-muted-foreground">
-          Requires <span className="font-mono">hsmii_home</span> set on the company and a reachable Company OS API
-          (e.g. <span className="font-mono">hsm_console</span> or the Next proxy).
-        </CardContent>
-      </Card>
+    <div className="space-y-6">
+      <AgentWorkspaceTaskHistory
+        apiBase={apiBase}
+        companyId={companyId}
+        agentPersonaName={agentPackName}
+        issueKeyPrefix={issueKeyPrefix}
+      />
 
       <WorkspaceNewIssueDialog
         open={issueOpen}

@@ -40,10 +40,35 @@ export type HsmTaskRow = {
   requires_human?: boolean;
   due_at?: string | null;
   run?: HsmTaskRun | null;
+  /** Paperclip-style work container */
+  project_id?: string | null;
   /** Relative to company `hsmii_home`; JSON array from API */
   workspace_attachment_paths?: unknown;
-  /** JSON array of `{ kind, ref }` (skill | sop | tool | pack | agent) */
+  /** JSON array of `{ kind, ref }` (skill | sop | tool | pack | agent | mode | label | …) */
   capability_refs?: unknown;
+};
+
+export type HsmProjectRow = {
+  id: string;
+  company_id: string;
+  title: string;
+  description?: string | null;
+  status: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Company catalog for task labels (`capability_refs` entries with `kind: "label"`). */
+export type HsmIssueLabelRow = {
+  id: string;
+  company_id: string;
+  slug: string;
+  display_name: string;
+  description?: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 };
 
 /** Postgres-backed shared/agent memory entries */

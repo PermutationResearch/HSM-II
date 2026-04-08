@@ -43,6 +43,8 @@ cargo run --bin hsm-eval -- --suite tool
 cargo run --bin hsm-eval -- --suite council
 ```
 
+For **`hsm_meta_harness`** vs **`hsm_outer_loop`**, artifact locations, promoted-config semantics, and copy-paste smoke commands, see **[`docs/EVAL_AND_META_HARNESS.md`](docs/EVAL_AND_META_HARNESS.md)**.
+
 ## Naming
 
 - **`HsmSqliteStore`** (crate export; deprecated alias `LadybugDb`) = bundled **SQLite** for subsystem tables via `DATABASE_URL`.

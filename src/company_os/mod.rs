@@ -11,6 +11,7 @@ mod agent_runs;
 mod agents;
 mod bundle;
 mod company_memory;
+mod company_memory_hybrid;
 pub mod markdown_toc;
 mod memory_summaries;
 pub mod onboarding_contracts;
@@ -166,6 +167,14 @@ pub fn router() -> Router<ConsoleState> {
         .route(
             "/api/company/companies/:company_id/projects/:project_id",
             patch(patch_project),
+        )
+        .route(
+            "/api/company/companies/:company_id/issue-labels/seed-defaults",
+            post(seed_default_issue_labels),
+        )
+        .route(
+            "/api/company/companies/:company_id/issue-labels",
+            get(list_issue_labels).post(create_issue_label),
         )
         .route(
             "/api/company/companies/:company_id/tasks",
@@ -1661,13 +1670,11 @@ Execution rules:\n\
     )
 }
 
-async fn get_company_yc_bench_profile(
-    State(st): State<ConsoleState>,
-    Path(company_id): Path<Uuid>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Some(ref pool) = st.company_db else {
-        return Err(no_db());
-    };
+/// Loads company + workforce + skills for YC-Bench / vision alignment (same inputs as [`get_company_yc_bench_profile`]).
+async fn load_yc_bench_profile_inputs(
+    pool: &PgPool,
+    company_id: Uuid,
+) -> Result<Option<(CompanyRow, Vec<agents::CompanyAgentRow>, Vec<CompanySkillRow>)>, sqlx::Error> {
     let company = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
                   context_markdown, created_at::text
@@ -1676,19 +1683,11 @@ async fn get_company_yc_bench_profile(
     )
     .bind(company_id)
     .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?
-    .ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "company not found" })),
-        )
-    })?;
+    .await?;
+
+    let Some(company) = company else {
+        return Ok(None);
+    };
 
     let agents = sqlx::query_as::<_, agents::CompanyAgentRow>(
         r#"SELECT id, company_id, name, role, title, capabilities, reports_to, adapter_type,
@@ -1700,13 +1699,7 @@ async fn get_company_yc_bench_profile(
     )
     .bind(company_id)
     .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    .await?;
 
     let skills = sqlx::query_as::<_, CompanySkillRow>(
         r#"SELECT id, company_id, slug, name, description, body, skill_path, source, updated_at::text
@@ -1716,13 +1709,74 @@ async fn get_company_yc_bench_profile(
     )
     .bind(company_id)
     .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-    })?;
+    .await?;
+
+    Ok(Some((company, agents, skills)))
+}
+
+/// Markdown block injected into [`crate::company_os::agents::get_task_llm_context`] so workforce LLMs see an explicit **vision alignment** summary (YC-Bench strategy parity).
+///
+/// Disable with `HSM_VISION_ALIGNMENT_LLM_ADDON=0` (see agents module).
+pub async fn build_llm_vision_alignment_addon(
+    pool: &PgPool,
+    company_id: Uuid,
+) -> Result<(String, usize), sqlx::Error> {
+    let Some((company, agents, skills)) = load_yc_bench_profile_inputs(pool, company_id).await? else {
+        return Ok((String::new(), 0));
+    };
+    let domain_scores = compute_domain_scores(&company, &agents, &skills);
+    let strategy = build_yc_bench_strategy_summary(&company, &domain_scores, &skills);
+    let domains_line: String = domain_scores
+        .iter()
+        .filter(|d| d.score > 0.0)
+        .take(4)
+        .map(|d| format!("{} ({:.1})", d.domain, d.score))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut s = String::new();
+    s.push_str("## Vision alignment (company)\n\n");
+    s.push_str(
+        "Ground task outputs in **Company-wide context** (above) when present. The following is the same **strategy snapshot** used for YC-Bench / marketplace profiling.\n\n",
+    );
+    s.push_str("### Strategy snapshot\n\n");
+    s.push_str(&strategy);
+    s.push_str("\n\n");
+    if !domains_line.is_empty() {
+        s.push_str(&format!("**Strategic domain signals:** {domains_line}\n\n"));
+    }
+    s.push_str(
+        "**Explicit alignment:** Prefer outcomes, constraints, and vocabulary consistent with this strategy, the company’s workforce agents, and imported skill templates. If instructions conflict, defer to Company-wide context and operator-visible policies.\n\n",
+    );
+    const MAX: usize = 8 * 1024;
+    if s.len() > MAX {
+        s.truncate(MAX);
+        s.push_str("\n… [truncated]\n");
+    }
+    let bytes = s.len();
+    Ok((s, bytes))
+}
+
+async fn get_company_yc_bench_profile(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let (company, agents, skills) = load_yc_bench_profile_inputs(pool, company_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "company not found" })),
+            )
+        })?;
 
     let domain_scores = compute_domain_scores(&company, &agents, &skills);
     let top_domains = domain_scores
@@ -1844,11 +1898,13 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/intelligence/summary", "summary": "Per-company intelligence: goals/tasks/spend/workforce + workflow feed (governance_events)" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/projects", "summary": "Paperclip-style project containers for tasks" },
         { "scope": "company", "methods": ["PATCH"], "path": "/api/company/companies/{company_id}/projects/{project_id}", "summary": "Update project" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/issue-labels", "summary": "Company catalog for task labels (capability_refs kind=label)" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/issue-labels/seed-defaults", "summary": "Idempotent starter label set for the company" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/agent-runs", "summary": "List / create agent execution runs (optional external_run_id idempotency)" },
         { "scope": "company", "methods": ["GET", "PATCH"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}", "summary": "Get run + feedback timeline; patch status/summary/meta" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}/feedback", "summary": "Append human feedback on a run (optional step_index)" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/agent-runs/{run_id}/feedback/{event_id}/promote-task", "summary": "Create a task from feedback; sets spawned_task_id on the event" },
-        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/memory", "summary": "Company shared / agent-scoped memory pool (FTS + ILIKE when q= set)" },
+        { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/memory", "summary": "Company shared / agent-scoped memory: hybrid FTS + vector + recency (RRF), optional Ollama embed + HTTP rerank when q= set; see HSM_MEMORY_* env" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/export.md", "summary": "Export shared memories as SHARED_MEMORY_INDEX.md markdown" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/{memory_id}/delete", "summary": "Delete memory entry (POST alias when DELETE is blocked)" },
         { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/memory/{memory_id}", "summary": "Update or delete memory entry" },
@@ -1872,7 +1928,7 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/release", "summary": "Release checkout" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/run-telemetry", "summary": "Append run snapshot / log tail" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/stigmergic-note", "summary": "Append task handoff note (context_notes); shown in llm-context" },
-        { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context + shared memories + task spec/attachments + agent profile" },
+        { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context + vision alignment (YC-Bench strategy snapshot) + shared memories + task spec/attachments + agent profile" },
         { "scope": "global", "methods": ["GET"], "path": "/api/company/health", "summary": "Postgres connectivity" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/import", "summary": "Import company bundle" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/{handoff_id}/review", "summary": "Review handoff" },
@@ -2591,6 +2647,9 @@ struct CreateTaskBody {
     parent_task_id: Option<Uuid>,
     #[serde(default)]
     spawned_by_rule_id: Option<Uuid>,
+    /// Task queue ordering (higher runs first in `ORDER BY priority DESC`). Omitted or reviewer-deferred uses 0.
+    #[serde(default)]
+    priority: Option<i32>,
 }
 
 pub(super) fn workspace_attachment_paths_json(paths: Option<Vec<String>>) -> Value {
@@ -2651,13 +2710,25 @@ pub(super) fn normalize_capability_refs(raw: Option<Vec<Value>>) -> Result<Value
                     .to_ascii_lowercase();
                 if !matches!(
                     kind.as_str(),
-                    "skill" | "sop" | "tool" | "pack" | "agent" | "ticket" | "mode"
+                    "skill" | "sop" | "tool" | "pack" | "agent" | "ticket" | "mode" | "label"
                 ) {
                     return Err(format!(
-                        "capability_refs[{i}]: kind must be skill|sop|tool|pack|agent|ticket|mode"
+                        "capability_refs[{i}]: kind must be skill|sop|tool|pack|agent|ticket|mode|label"
                     ));
                 }
-                json!({ "kind": kind, "ref": r })
+                let role = map
+                    .get("role")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if let Some(rv) = role {
+                    if rv.len() > 32 {
+                        return Err(format!("capability_refs[{i}]: role too long"));
+                    }
+                    json!({ "kind": kind, "ref": r, "role": rv })
+                } else {
+                    json!({ "kind": kind, "ref": r })
+                }
             }
             _ => return Err(format!("capability_refs[{i}]: expected string or object")),
         };
@@ -2817,9 +2888,10 @@ async fn create_task(
     let ws_json = workspace_attachment_paths_json(body.workspace_attachment_paths.clone());
     let caps_json = normalize_capability_refs(body.capability_refs.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+    let priority_val = body.priority.unwrap_or(0).clamp(-1000, 1000);
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, owner_persona, parent_task_id, spawned_by_rule_id, display_number)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, owner_persona, parent_task_id, spawned_by_rule_id, display_number, priority)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
                      owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
@@ -2835,6 +2907,7 @@ async fn create_task(
     .bind(&body.parent_task_id)
     .bind(&body.spawned_by_rule_id)
     .bind(display_n)
+    .bind(priority_val)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -3035,6 +3108,175 @@ async fn patch_project(
         )
     })?;
     Ok(Json(json!({ "project": row })))
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct IssueLabelRow {
+    id: Uuid,
+    company_id: Uuid,
+    slug: String,
+    display_name: String,
+    description: Option<String>,
+    sort_order: i32,
+    created_at: String,
+    updated_at: String,
+}
+
+fn normalize_issue_label_slug(raw: &str) -> Result<String, String> {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Err("slug required".to_string());
+    }
+    if s.len() > 48 {
+        return Err("slug too long (max 48)".to_string());
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return Err("slug required".to_string());
+    };
+    if !first.is_ascii_alphanumeric() {
+        return Err("slug must start with a letter or number".to_string());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("slug may only contain a-z, 0-9, underscore, hyphen".to_string());
+    }
+    Ok(s)
+}
+
+async fn list_issue_labels(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let rows = sqlx::query_as::<_, IssueLabelRow>(
+        r#"SELECT id, company_id, slug, display_name, description, sort_order, created_at::text, updated_at::text
+           FROM company_issue_labels WHERE company_id = $1 ORDER BY sort_order, display_name"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "labels": rows })))
+}
+
+#[derive(Deserialize)]
+struct CreateIssueLabelBody {
+    slug: String,
+    display_name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    sort_order: Option<i32>,
+}
+
+async fn create_issue_label(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<CreateIssueLabelBody>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let slug = normalize_issue_label_slug(&body.slug).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        )
+    })?;
+    let name = body.display_name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "display_name required" })),
+        ));
+    }
+    let sort = body.sort_order.unwrap_or(0);
+    let row = sqlx::query_as::<_, IssueLabelRow>(
+        r#"INSERT INTO company_issue_labels (company_id, slug, display_name, description, sort_order)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, company_id, slug, display_name, description, sort_order, created_at::text, updated_at::text"#,
+    )
+    .bind(company_id)
+    .bind(&slug)
+    .bind(&name)
+    .bind(body.description.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
+    .bind(sort)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("duplicate key") || msg.contains("unique constraint") {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "label slug already exists for this company" })),
+            )
+        } else {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": msg })),
+            )
+        }
+    })?;
+    Ok((StatusCode::CREATED, Json(json!({ "label": row }))))
+}
+
+/// Idempotent starter set (product, engineering, risk, and workflow cues).
+async fn seed_default_issue_labels(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    const DEFAULTS: &[(&str, &str, i32)] = &[
+        ("bug", "Bug", 10),
+        ("feature", "Feature", 20),
+        ("chore", "Chore", 30),
+        ("docs", "Docs", 40),
+        ("infra", "Infra", 50),
+        ("customer", "Customer", 60),
+        ("security", "Security", 70),
+        ("data", "Data", 80),
+        ("design", "Design", 90),
+        ("research", "Research", 100),
+    ];
+    for (slug, display_name, ord) in DEFAULTS {
+        let _ = sqlx::query(
+            r#"INSERT INTO company_issue_labels (company_id, slug, display_name, sort_order)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (company_id, slug) DO NOTHING"#,
+        )
+        .bind(company_id)
+        .bind(*slug)
+        .bind(*display_name)
+        .bind(*ord)
+        .execute(pool)
+        .await;
+    }
+    let rows = sqlx::query_as::<_, IssueLabelRow>(
+        r#"SELECT id, company_id, slug, display_name, description, sort_order, created_at::text, updated_at::text
+           FROM company_issue_labels WHERE company_id = $1 ORDER BY sort_order, display_name"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(json!({ "labels": rows })))
 }
 
 #[derive(Deserialize, Default)]

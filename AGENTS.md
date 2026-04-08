@@ -14,3 +14,7 @@ Cursor loads the Hermes pointer from **`.cursor/rules/hermes-skills.mdc`**.
 ## Company OS — intelligence layer vs ledger
 
 When working on **`hsm_console`**, Postgres Company OS, or DRIs: canonical graph and integration patterns are in **`docs/company-os/world-model-and-intelligence.md`**. For DRI / “composer vs ledger vs edge” alignment (external intelligence services, governance, escalation), see **`docs/company-os/intelligence-layer-dri-alignment.md`**.
+
+## Eval and meta-harness
+
+Canonical guide: **`docs/EVAL_AND_META_HARNESS.md`** — `hsm-eval` vs `hsm_meta_harness` vs `hsm_outer_loop`, artifact paths, smoke recipes. Promoted **`HsmRunnerConfig`** / `best_config.json` applies to **eval binaries** until explicitly wired into the live agent runtime.

@@ -2,7 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  Fragment,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import {
   BookOpen,
   Bot,
@@ -18,6 +27,7 @@ import {
   PanelRightClose,
   ShieldCheck,
   Store,
+  type LucideIcon,
 } from "lucide-react";
 import {
   Breadcrumb,
@@ -48,21 +58,39 @@ import { Separator } from "@/app/components/ui/separator";
 import { cn } from "@/app/lib/utils";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 import { WorkspaceRightRail } from "@/app/components/console/WorkspaceRightRail";
+import { WorkspaceProjectsNav } from "@/app/components/console/WorkspaceProjectsNav";
 import { WorkspaceHubLinks } from "@/app/components/workspace/WorkspaceHubLinks";
 
-const nav = [
-  { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/workspace/agents", label: "Agents", icon: Bot },
-  { href: "/workspace/issues", label: "Issues", icon: FolderKanban },
-  { href: "/workspace/approvals", label: "Approvals", icon: ShieldCheck },
-  { href: "/workspace/costs", label: "Costs", icon: CircleDollarSign },
-  { href: "/workspace/graph", label: "Graph", icon: Network },
-  { href: "/workspace/architecture", label: "Architecture", icon: Layers },
-  { href: "/workspace/intelligence", label: "Intelligence", icon: BrainCircuit },
-  { href: "/workspace/marketplace", label: "Marketplace", icon: Store },
-  { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen },
-  { href: "/workspace/my-work", label: "My Work", icon: ClipboardList },
-] as const;
+type NavItem = { href: string; label: string; icon: LucideIcon; title: string };
+
+const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
+  {
+    heading: "Work",
+    items: [
+      { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard, title: "Overview and queues" },
+      { href: "/workspace/issues", label: "Issues", icon: FolderKanban, title: "Tasks and filters" },
+      { href: "/workspace/approvals", label: "Approvals", icon: ShieldCheck, title: "Human and policy gates" },
+      { href: "/workspace/my-work", label: "My work", icon: ClipboardList, title: "Your queue" },
+    ],
+  },
+  {
+    heading: "Team & procedures",
+    items: [
+      { href: "/workspace/agents", label: "Agents", icon: Bot, title: "Roster, files, memory, skills" },
+      { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen, title: "SOPs and templates" },
+      { href: "/workspace/marketplace", label: "Marketplace", icon: Store, title: "Install company packs" },
+    ],
+  },
+  {
+    heading: "Insights",
+    items: [
+      { href: "/workspace/intelligence", label: "Intelligence", icon: BrainCircuit, title: "Goals, feed, summary" },
+      { href: "/workspace/costs", label: "Costs", icon: CircleDollarSign, title: "Spend" },
+      { href: "/workspace/graph", label: "Graph", icon: Network, title: "Hypergraph views" },
+      { href: "/workspace/architecture", label: "Architecture", icon: Layers, title: "System blueprint" },
+    ],
+  },
+];
 
 type Crumb = { label: string; href: string | null };
 
@@ -239,20 +267,32 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             <span className="pc-sidebar-eyebrow">Workspace</span>
           </Link>
         </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain p-2">
-          {nav.map(({ href, label, icon: Icon }) => {
-            const active = pathname === href || (href !== "/workspace/dashboard" && pathname?.startsWith(href));
-            return (
-              <Link
-                key={href}
-                href={href}
-                className={cn("nd-ws-nav-link", active ? "nd-ws-nav-link--active" : "nd-ws-nav-link--idle")}
-              >
-                <Icon className="size-4 shrink-0 opacity-90" strokeWidth={1.5} aria-hidden />
-                {label}
-              </Link>
-            );
-          })}
+        <nav className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain p-2" aria-label="Workspace">
+          {NAV_SECTIONS.map((section) => (
+            <Fragment key={section.heading}>
+              <div className="nd-ws-nav-section-label">{section.heading}</div>
+              {section.items.map(({ href, label, icon: Icon, title }) => {
+                const active =
+                  pathname === href ||
+                  (href !== "/workspace/dashboard" && pathname?.startsWith(href)) ||
+                  (href === "/workspace/agents" && /^\/workspace\/agents\//i.test(pathname ?? ""));
+                return (
+                  <Link
+                    key={href}
+                    href={href}
+                    title={title}
+                    className={cn("nd-ws-nav-link", active ? "nd-ws-nav-link--active" : "nd-ws-nav-link--idle")}
+                  >
+                    <Icon className="size-4 shrink-0 opacity-90" strokeWidth={1.5} aria-hidden />
+                    {label}
+                  </Link>
+                );
+              })}
+            </Fragment>
+          ))}
+          <div className="mt-1 border-t border-[#222222] pt-2">
+            <WorkspaceProjectsNav />
+          </div>
           <Separator className="my-2 bg-[#222222]" />
           <Link
             href="/"
@@ -345,22 +385,31 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
 
-      <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen} title="Command palette" description="Navigate workspace">
-        <CommandInput placeholder="Search…" className="font-mono text-sm" />
+      <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen} title="Command palette" description="Jump to workspace">
+        <CommandInput placeholder="Search pages…" className="font-mono text-sm" />
         <CommandList>
           <CommandEmpty>No results.</CommandEmpty>
-          <CommandGroup heading="Navigate">
+          <CommandGroup heading="Work">
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/dashboard"))}>Dashboard</CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/agents"))}>Agents</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/issues"))}>Issues</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/approvals"))}>Approvals</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/my-work"))}>My work</CommandItem>
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Team & procedures">
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/agents"))}>Agents</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/playbooks"))}>Playbooks</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/marketplace"))}>Marketplace</CommandItem>
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Insights">
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/intelligence"))}>Intelligence</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/costs"))}>Costs</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/graph"))}>Graph</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/architecture"))}>Architecture</CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/intelligence"))}>Intelligence</CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/marketplace"))}>Marketplace</CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/playbooks"))}>Playbooks</CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/my-work"))}>My Work</CommandItem>
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Other">
             <CommandItem onSelect={() => runCommand(() => router.push("/"))}>Legacy console</CommandItem>
           </CommandGroup>
           <CommandSeparator />

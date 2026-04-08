@@ -6,6 +6,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { MessageSquare, Pause, Play } from "lucide-react";
 import { AgentInstructionsSkillsPanel } from "@/app/components/console/AgentInstructionsSkillsPanel";
 import { AgentScopedMemoryPanel } from "@/app/components/console/AgentScopedMemoryPanel";
+import { AgentOperatorChatPanel } from "@/app/components/console/AgentOperatorChatPanel";
 import { AgentWorkspacePanel } from "@/app/components/console/AgentWorkspacePanel";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
@@ -53,7 +54,7 @@ function AgentDetailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const agentId = typeof params.agentId === "string" ? params.agentId : "";
-  const { apiBase, companyId, setPropertiesSelection, postgresOk } = useWorkspace();
+  const { apiBase, companyId, companies, setPropertiesSelection, postgresOk } = useWorkspace();
   const { data: agents = [], isLoading, error } = useCompanyAgents(apiBase, companyId);
 
   const validId = useMemo(() => UUID_RE.test(agentId), [agentId]);
@@ -102,6 +103,7 @@ function AgentDetailContent() {
   }
 
   const displayName = humanizeAgentName(agent.name);
+  const issueKeyPrefix = (companies.find((c) => c.id === companyId)?.issue_key_prefix ?? "HSM").toUpperCase();
 
   const statusTone =
     agent.status === "active" || agent.status === "idle"
@@ -163,12 +165,13 @@ function AgentDetailContent() {
           <TabsTrigger value="runs">Runs</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="workspace" className="mt-4">
+        <TabsContent value="workspace" className="mt-6 scroll-mt-2 pt-2 sm:mt-8 sm:pt-3">
           <AgentWorkspacePanel
             apiBase={apiBase}
             companyId={companyId}
             agentPackName={agent.name}
             assigneeDisplayName={displayName}
+            issueKeyPrefix={issueKeyPrefix}
           />
         </TabsContent>
 
@@ -232,20 +235,13 @@ function AgentDetailContent() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="chat" className="mt-4">
-          <Card className="border-admin-border">
-            <CardHeader>
-              <CardTitle className="text-base">Chat</CardTitle>
-              <CardDescription>Operator messaging for this agent.</CardDescription>
-            </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              <p>
-                Select this agent in the workspace right rail to use the in-console thread UI, or route through
-                your configured gateway. Full Paperclip-style chat shell parity is not embedded on this page
-                yet.
-              </p>
-            </CardContent>
-          </Card>
+        <TabsContent value="chat" className="mt-6 scroll-mt-2 pt-2 sm:mt-8 sm:pt-3">
+          <AgentOperatorChatPanel
+            apiBase={apiBase}
+            companyId={companyId}
+            agentId={agent.id}
+            agentDisplayName={displayName}
+          />
         </TabsContent>
 
         <TabsContent value="configuration" className="mt-4">
@@ -283,8 +279,19 @@ function AgentDetailContent() {
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground">
               <p>
-                Task run snapshots show on each issue in <Link href="/workspace/issues">Issues</Link> when the
-                API attaches run data. There is no separate per-agent run timeline in company-console yet.
+                Task ids and run status for this agent are listed on the{" "}
+                <button
+                  type="button"
+                  className="text-primary underline-offset-4 hover:underline"
+                  onClick={() => setTab("workspace")}
+                >
+                  Workspace
+                </button>{" "}
+                tab. Open an issue from{" "}
+                <Link href="/workspace/issues" className="text-primary underline-offset-4 hover:underline">
+                  Issues
+                </Link>{" "}
+                for full run logs when the API attaches them.
               </p>
             </CardContent>
           </Card>

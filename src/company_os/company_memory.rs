@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::console::ConsoleState;
 
+use super::company_memory_hybrid as hybrid;
 use super::memory_summaries::derive_summary_l0_l1;
 use super::no_db;
 
@@ -65,6 +66,35 @@ struct MemoryListQuery {
     q: Option<String>,
 }
 
+fn hybrid_search_env_enabled() -> bool {
+    match std::env::var("HSM_MEMORY_HYBRID") {
+        Ok(s) => {
+            let t = s.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "no" || t == "off")
+        }
+        Err(_) => true,
+    }
+}
+
+async fn fetch_memory_rows_ordered(
+    pool: &sqlx::PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<CompanyMemoryRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    sqlx::query_as::<_, CompanyMemoryRow>(
+        r#"SELECT e.id, e.company_id, e.scope, e.company_agent_id, e.title, e.body, e.tags, e.source,
+                  e.summary_l0, e.summary_l1, e.kind, e.created_at::text, e.updated_at::text
+           FROM company_memory_entries e
+           JOIN unnest($1::uuid[]) WITH ORDINALITY AS u(id, ord) ON e.id = u.id
+           ORDER BY u.ord"#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+}
+
 /// Unified list: optional full-text + substring (`ILIKE`) on title/body/summaries; `kind` tie-break.
 async fn list_memory(
     State(st): State<ConsoleState>,
@@ -108,6 +138,35 @@ async fn list_memory(
     } else {
         format!("%{}%", q_search.replace('%', "\\%").replace('_', "\\_"))
     };
+
+    if !q_search.is_empty() && hybrid_search_env_enabled() {
+        match hybrid::hybrid_search_memory_ids(pool, company_id, &q_search, mode_key, agent_bind).await {
+            Ok((ids, meta)) if !ids.is_empty() => {
+                let rows = fetch_memory_rows_ordered(pool, &ids).await.map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                })?;
+                return Ok(Json(json!({
+                    "entries": rows,
+                    "scope_filter": mode,
+                    "search": {
+                        "mode": meta.mode,
+                        "channels": meta.channels,
+                        "reranked": meta.reranked,
+                        "expansion_terms": meta.expansion_terms,
+                    }
+                })));
+            }
+            Ok((_empty, _meta)) => {
+                tracing::debug!(target: "hsm.company_memory", "hybrid fusion returned no ids; falling back to fts");
+            }
+            Err(e) => {
+                tracing::warn!(target: "hsm.company_memory", ?e, "hybrid memory search failed; using fts fallback");
+            }
+        }
+    }
 
     let rows: Vec<CompanyMemoryRow> = sqlx::query_as::<_, CompanyMemoryRow>(
         r#"SELECT id, company_id, scope, company_agent_id, title, body, tags, source,
@@ -303,6 +362,14 @@ async fn create_memory(
         )
     })?;
 
+    let pool_e = pool.clone();
+    let mid = row.id;
+    let t = row.title.clone();
+    let b = row.body.clone();
+    tokio::spawn(async move {
+        hybrid::embed_row_after_write(pool_e, mid, t, b).await;
+    });
+
     Ok((StatusCode::CREATED, Json(json!({ "entry": row }))))
 }
 
@@ -393,6 +460,15 @@ async fn patch_memory(
             Json(json!({ "error": "memory entry not found" })),
         ));
     };
+    if body.title.is_some() || body.body.is_some() {
+        let pool_e = pool.clone();
+        let mid = memory_id;
+        let t = row.title.clone();
+        let b = row.body.clone();
+        tokio::spawn(async move {
+            hybrid::embed_row_after_write(pool_e, mid, t, b).await;
+        });
+    }
     Ok(Json(json!({ "entry": row })))
 }
 

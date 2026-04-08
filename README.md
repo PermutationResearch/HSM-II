@@ -168,6 +168,16 @@ cargo run --bin hypergraphd
 #### Company console API (embedded in `personal_agent`)
 `personal_agent start` listens on **`HSM_API_PORT`** (default **3000**) for the world/Honcho/Paperclip demo REST API and, unless **`HSM_EMBED_CONSOLE_API=0`**, also on **`HSM_CONSOLE_PORT`** (default **3847**) for the same **`/api/company/*`** and **`/api/console/*`** routes as **`hsm_console`**, using one shared in-process Paperclip layer and optional **`HSM_COMPANY_OS_DATABASE_URL`**. Repo-root **`.env`** is loaded on startup (like `hsm_console`). For **`web/company-console`**, set **`NEXT_PUBLIC_API_BASE=http://127.0.0.1:3847`** (or your port). Use **`HSM_EMBED_CONSOLE_API=0`** if you run **`hsm_console`** as a separate process.
 
+#### In-repo eval and meta-harness (`hsm-eval`, `hsm_meta_harness`, `hsm_outer_loop`)
+
+Use **`hsm-eval`** for a single comparative run (HSM-II vs baseline on benchmark tasks), **`hsm_meta_harness`** to search over harness configuration candidates, and **`hsm_outer_loop`** to index/query archived runs and to drive **external** benchmark batches (see below). **Where artifacts go**, **when to use which tool**, and the **contract** for promoted harness JSON (eval-side today; not auto-loaded by `personal_agent`) are documented in **[`docs/EVAL_AND_META_HARNESS.md`](docs/EVAL_AND_META_HARNESS.md)**.
+
+Smoke (requires the same LLM env as the rest of the repo, e.g. Ollama or API keys):
+
+```bash
+cargo run --bin hsm-eval -- --suite memory --limit 2 --verbose
+```
+
 #### External Rust Harnesses
 `hsm_outer_loop` can now build and run external Rust harnesses from JSON specs, including checked-out side projects such as `claw-code`.
 

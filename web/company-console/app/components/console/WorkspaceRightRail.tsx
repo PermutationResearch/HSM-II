@@ -310,6 +310,11 @@ export function WorkspaceRightRail() {
 
       setDraft("");
       await refreshWorkspace();
+      if (propertiesSelection?.kind === "agent" && companyId) {
+        void qc.invalidateQueries({
+          queryKey: ["hsm", "operator-thread", apiBase, companyId, propertiesSelection.id],
+        });
+      }
     } catch (e) {
       setSendErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -322,6 +327,8 @@ export function WorkspaceRightRail() {
     draft,
     focusedPersona,
     persistNotes,
+    propertiesSelection,
+    qc,
     refreshWorkspace,
     tasks,
   ]);

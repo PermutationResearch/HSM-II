@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
+use crate::architecture_blueprint::embedded_blueprint;
 use crate::harness::{
     run_anti_sycophancy_loop, run_council_socratic_with_anti_sycophancy, AntiSycophancyConfig,
 };
@@ -131,10 +132,19 @@ struct AntiSycophancyBody {
     max_rounds: Option<u32>,
 }
 
+async fn get_architecture() -> Json<Value> {
+    // Same JSON shape as `GET /api/architecture` on the world API; `runtime` is null here (no mounted world).
+    Json(json!({
+        "blueprint": embedded_blueprint(),
+        "runtime": null
+    }))
+}
+
 pub fn console_router(state: ConsoleState) -> Router {
     Router::new()
         .route("/", get(root_landing))
         .route("/api/health", get(health))
+        .route("/api/architecture", get(get_architecture))
         .route("/api/console/trail", get(get_trail))
         .route("/api/console/memory-files", get(get_memory_files))
         .route("/api/console/stats", get(get_stats))
@@ -185,6 +195,7 @@ async fn root_landing() -> Html<&'static str> {
   <p>JSON endpoints for the dashboard. Use the links below or open the Next.js UI.</p>
   <ul>
     <li><a href="/api/health"><code>GET /api/health</code></a> — quick check</li>
+    <li><a href="/api/architecture"><code>GET /api/architecture</code></a> — embedded HSM-II blueprint (same as world API; <code>runtime</code> null here)</li>
     <li><a href="/api/company/health"><code>GET /api/company/health</code></a> — Company OS / Postgres (requires <code>HSM_COMPANY_OS_DATABASE_URL</code>)</li>
     <li><a href="/api/console/stats"><code>GET /api/console/stats</code></a> — sample JSON</li>
   </ul>

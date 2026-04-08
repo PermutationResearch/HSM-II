@@ -683,7 +683,8 @@ export default function ConsolePage() {
     setCoWorkspaceTab("inbox");
   }, [coSel]);
 
-  const workspaceLabel = coCompanies.find((c) => c.id === coSel)?.display_name ?? "Workspace";
+  const coSelectedRow = coCompanies.find((c) => c.id === coSel);
+  const workspaceLabel = coSelectedRow?.display_name ?? "Workspace";
   const workspaceInitial = workspaceLabel.replace(/\s+/g, "").slice(0, 1) || "W";
 
   const sidebarAgents = useMemo(() => {
@@ -1595,6 +1596,8 @@ export default function ConsolePage() {
                       <SopComposerPanel
                         apiBase={api}
                         companyId={coSel}
+                        contextMarkdown={coSelectedRow?.context_markdown}
+                        hsmiiHome={coSelectedRow?.hsmii_home}
                         referenceExamples={sopReferenceExamples}
                         onCustomSopsChanged={setCustomSops}
                         onApplied={async () => {
@@ -2073,6 +2076,8 @@ export default function ConsolePage() {
                 <SopComposerPanel
                   apiBase={api}
                   companyId={coSel}
+                  contextMarkdown={coSelectedRow?.context_markdown}
+                  hsmiiHome={coSelectedRow?.hsmii_home}
                   referenceExamples={sopReferenceExamples}
                   onCustomSopsChanged={setCustomSops}
                   onApplied={async () => {

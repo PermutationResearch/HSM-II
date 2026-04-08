@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { Dashboard, type DashboardDrillDown } from "@/ui/src/pages/Dashboard";
+import { WorkspaceQuickStart } from "@/app/components/workspace/WorkspaceQuickStart";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 
 export default function WorkspaceDashboardPage() {
@@ -58,7 +59,9 @@ export default function WorkspaceDashboardPage() {
   }
 
   return (
-    <Dashboard
+    <>
+      <WorkspaceQuickStart />
+      <Dashboard
       apiBase={apiBase}
       companyId={companyId}
       companies={companies.map((c) => ({
@@ -73,5 +76,6 @@ export default function WorkspaceDashboardPage() {
       layout="admin"
       onDrillDown={handleDrillDown}
     />
+    </>
   );
 }

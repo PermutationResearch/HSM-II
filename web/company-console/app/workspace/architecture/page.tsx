@@ -71,12 +71,26 @@ export default function WorkspaceArchitecturePage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="pc-page-eyebrow">Single source of truth</p>
+          <p className="pc-page-eyebrow">Platform blueprint</p>
           <h1 className="pc-page-title">Architecture</h1>
           <p className="pc-page-desc">
-            Live JSON from <code className="rounded bg-white/5 px-1 font-mono text-[11px]">GET /api/architecture</code>
-            (embedded <code className="rounded bg-white/5 px-1 font-mono text-[11px]">architecture/hsm-ii-blueprint.ron</code>
-            ).             Narrative + Mermaid flows: repo root <code className="rounded bg-white/5 px-1 font-mono text-[11px]">ARCHITECTURE.md</code>. For task hyperedges use{" "}
+            <strong className="font-medium text-foreground/90">HSM-II (platform)</strong> — single source of truth is the
+            repo file{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">architecture/hsm-ii-blueprint.ron</code>, embedded
+            in the binary and exposed as{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">GET /api/architecture</code> on both{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">hsm_console</code> (blueprint only) and the world
+            API (optional <code className="rounded bg-white/5 px-1 font-mono text-[11px]">runtime</code> counts when a world
+            is mounted). Human narrative + Mermaid:{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">ARCHITECTURE.md</code> /{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[11px]">ARCHITECTURE.generated.md</code>.
+          </p>
+          <p className="mt-2 max-w-3xl text-xs leading-relaxed text-muted-foreground">
+            <strong className="font-medium text-foreground/85">Per company</strong> is a different layer: operators define how{" "}
+            <em>this</em> workspace runs via pack files under <code className="font-mono text-[11px]">hsmii_home</code> (e.g.{" "}
+            <code className="font-mono text-[11px]">AGENTS.md</code>, <code className="font-mono text-[11px]">visions.md</code>
+            ), <span className="font-mono text-[11px]">Shared context</span> on the company, goals/tasks in Company OS — not
+            the global RON. Task hyperedges:{" "}
             <Link href="/workspace/graph" className="text-primary underline-offset-4 hover:underline">
               Graph
             </Link>
@@ -93,10 +107,21 @@ export default function WorkspaceArchitecturePage() {
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive-foreground">
           {err}
           <p className="mt-2 text-xs text-muted-foreground">
-            Start the HSM API on the configured base URL, or run{" "}
-            <code className="rounded bg-white/5 px-1 font-mono text-[10px]">cargo run --bin hsm_archviz</code> locally for
-            Markdown.
+            Confirm <code className="rounded bg-white/5 px-1 font-mono text-[10px]">NEXT_PUBLIC_API_BASE</code> points at{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[10px]">hsm_console</code> (or world API). Rebuild/restart
+            the console binary if you still see 404. For Markdown locally:{" "}
+            <code className="rounded bg-white/5 px-1 font-mono text-[10px]">cargo run --bin hsm_archviz</code>.
           </p>
+        </div>
+      ) : null}
+
+      {data && !data.runtime ? (
+        <div className="rounded-lg border border-border/80 bg-muted/20 p-3 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground/90">Runtime overlay</span> is omitted on the company-console API
+          (no hypergraph world mounted). Point <code className="font-mono text-[10px]">NEXT_PUBLIC_API_BASE</code> at a
+          running world API (e.g. <code className="font-mono text-[10px]">personal_agent</code> on{" "}
+          <code className="font-mono text-[10px]">HSM_API_PORT</code>) if you need live belief / tick counts alongside the
+          same blueprint.
         </div>
       ) : null}
 

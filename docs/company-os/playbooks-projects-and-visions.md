@@ -35,7 +35,8 @@ Agent-scoped memory remains **private to that workforce row** in `llm-context`; 
 ## Practical habit
 
 1. When adding or changing a playbook, ask: **which project** owns it, and **one line** in the doc that ties to **`visions.md`** (“Supports vision §…”).  
-2. For company-wide announcements, prefer **`scope: shared`** memory or a **`broadcast`** entry plus a **single task** or **retro issue** that links the run or decision—still tagged to a project when the work is owned there.
+2. For company-wide announcements, prefer **`scope: shared`** memory or a **`broadcast`** entry plus a **single task** or **retro issue** that links the run or decision—still tagged to a project when the work is owned there.  
+3. In **Company Console → Playbooks**, the **Vision alignment** panel loads **`visions.md`** from the company **`hsmii_home`**, merges **Shared context** (`context_markdown` from the API), and runs a **lexical overlap** hint on the draft playbook (not semantic QA). Set **`hsmii_home`** and/or fill Shared context on the main console so the panel has text to compare against.
 
 See also:
 

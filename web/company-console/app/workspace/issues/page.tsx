@@ -1,26 +1,24 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card";
-import { Input } from "@/app/components/ui/input";
+import { WorkspaceNewIssueForm } from "@/app/components/console/WorkspaceNewIssueForm";
 import { ScrollArea } from "@/app/components/ui/scroll-area";
 import { Skeleton } from "@/app/components/ui/skeleton";
-import { Textarea } from "@/app/components/ui/textarea";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 import { capabilityRefsFromTask, workspaceAttachmentPathsFromTask } from "@/app/components/TaskListPanel";
 import { taskToPcIssue } from "@/app/lib/hsm-api-adapter";
 import type { HsmTaskRow } from "@/app/lib/hsm-api-types";
-import { useCompanyTasks } from "@/app/lib/hsm-queries";
+import { useCompanyAgents, useCompanyTasks } from "@/app/lib/hsm-queries";
 import {
   buildIssueSpecFromPlan,
   buildIssueTitleFromPlan,
   isDoneTask,
   isPlanTask,
-  specificationWithWorkspacePaths,
   truncatePath,
 } from "@/app/lib/workspace-issue";
 
@@ -64,6 +62,11 @@ function taskMatchesQuery(task: HsmTaskRow, sp: URLSearchParams): boolean {
     if (!needs) return false;
   }
 
+  const project = sp.get("project");
+  if (project && project !== "") {
+    if (task.project_id !== project) return false;
+  }
+
   return true;
 }
 
@@ -75,31 +78,27 @@ function IssuesContent() {
   const prefix = (company?.issue_key_prefix ?? "HSM").toUpperCase();
 
   const { data: tasks = [], isLoading, error } = useCompanyTasks(apiBase, companyId);
+  const { data: agentsRaw = [] } = useCompanyAgents(apiBase, companyId);
 
-  const [newTitle, setNewTitle] = useState("");
-  const [newSpec, setNewSpec] = useState("");
-  const [draftWorkspacePaths, setDraftWorkspacePaths] = useState<string[]>([]);
-  const [pathDraft, setPathDraft] = useState("");
-  const [newOwnerPersona, setNewOwnerPersona] = useState("");
-  const [newIsPlan, setNewIsPlan] = useState(false);
+  const firstAgent = useMemo(() => {
+    const active = agentsRaw.filter((a) => (a.status ?? "").toLowerCase() !== "terminated");
+    return active.sort((a, b) => a.name.localeCompare(b.name))[0];
+  }, [agentsRaw]);
 
+  const assigneePersona = firstAgent?.name ?? "";
+  const assigneeDisplayName =
+    firstAgent?.title ?? firstAgent?.name ?? company?.display_name ?? "Agent";
+
+  /** Build child task from an approved plan row (inline “Build”). */
   const createTask = useMutation({
-    mutationFn: async (overrides?: { title?: string; specification?: string; parentTaskId?: string }) => {
-      const title = (overrides?.title ?? newTitle).trim();
+    mutationFn: async (overrides: { title: string; specification?: string | null; parentTaskId?: string }) => {
+      const title = overrides.title.trim();
       if (!title) throw new Error("Title is required.");
-      const paths = overrides ? [] : draftWorkspacePaths.map((p) => p.trim()).filter(Boolean);
-      const specification = overrides?.specification ?? specificationWithWorkspacePaths(newSpec, paths);
       const body: Record<string, unknown> = {
         title,
-        specification: specification || null,
-        workspace_attachment_paths: paths.length ? paths : undefined,
+        specification: overrides.specification ?? null,
       };
-      const op = overrides ? undefined : newOwnerPersona.trim();
-      if (op) body.owner_persona = op;
-      if (overrides?.parentTaskId) body.parent_task_id = overrides.parentTaskId;
-      if (!overrides && newIsPlan) {
-        body.capability_refs = [{ kind: "mode", ref: "plan" }];
-      }
+      if (overrides.parentTaskId) body.parent_task_id = overrides.parentTaskId;
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/tasks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -109,30 +108,11 @@ function IssuesContent() {
       if (!r.ok) throw new Error(j.error ?? `${r.status}`);
       return j;
     },
-    onSuccess: (_data, overrides) => {
-      if (!overrides) {
-        setNewTitle("");
-        setNewSpec("");
-        setDraftWorkspacePaths([]);
-        setPathDraft("");
-        setNewOwnerPersona("");
-        setNewIsPlan(false);
-      }
+    onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["hsm", "tasks", apiBase, companyId] });
       void qc.invalidateQueries({ queryKey: ["hsm", "intelligence", apiBase, companyId] });
     },
   });
-
-  function attachWorkspacePath() {
-    const p = pathDraft.trim();
-    if (!p) return;
-    setDraftWorkspacePaths((prev) => (prev.includes(p) ? prev : [...prev, p]));
-    setPathDraft("");
-  }
-
-  function removeDraftPath(path: string) {
-    setDraftWorkspacePaths((prev) => prev.filter((x) => x !== path));
-  }
 
   const filtered = useMemo(() => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -141,7 +121,8 @@ function IssuesContent() {
       sp.has("priority") ||
       sp.has("state") ||
       sp.has("filter") ||
-      sp.has("view");
+      sp.has("view") ||
+      sp.has("project");
     if (!hasFilters) return tasks;
     return tasks.filter((t) => taskMatchesQuery(t, sp));
   }, [tasks, searchParams]);
@@ -184,8 +165,12 @@ function IssuesContent() {
         <p className="pc-page-eyebrow">Company OS</p>
         <h1 className="pc-page-title">Issues</h1>
         <p className="pc-page-desc">
-          Company OS tasks from <span className="font-mono text-xs">GET …/tasks</span> ({prefix}-N keys). Capability
-          chips are <span className="font-mono text-xs">capability_refs</span> on each row.
+          Open work for this company: each row is a task with a short id like{" "}
+          <span className="font-mono text-xs">
+            {prefix}-42
+          </span>{" "}
+          (your company prefix plus a number). Tags under a title are skills, labels, plan vs executable work, reviewers,
+          and similar — they tell agents and automation how to treat the task.
         </p>
         {filterHint}
       </div>
@@ -194,126 +179,19 @@ function IssuesContent() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">New issue</CardTitle>
           <CardDescription>
-            Create a task via <span className="font-mono text-xs">POST …/tasks</span>. Attach workspace paths
-            (relative to company <span className="font-mono text-xs">hsmii_home</span>) — each becomes a{" "}
-            <span className="font-mono text-xs">Workspace file:</span> line in the spec and an entry in{" "}
-            <span className="font-mono text-xs">workspace_attachment_paths</span>.
+            Create a task: plan vs task, project, priority, labels, who reviews, optional repeat cadence, and file paths
+            under the company workspace. Attached paths are added to the description and linked on the task.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {draftWorkspacePaths.length > 0 ? (
-            <div
-              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:border-amber-400/35 dark:bg-amber-400/10 dark:text-amber-100"
-              role="status"
-            >
-              <span className="font-medium">Workspace file attached</span>
-              <span className="mt-0.5 block font-mono text-[11px] opacity-90">
-                {draftWorkspacePaths.length === 1
-                  ? truncatePath(draftWorkspacePaths[0]!)
-                  : `${draftWorkspacePaths.length} paths · ${truncatePath(draftWorkspacePaths[0]!)}`}
-              </span>
-            </div>
-          ) : null}
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
-            <div className="space-y-1">
-              <label className="text-xs text-muted-foreground" htmlFor="issue-ws-path">
-                Attach from workspace
-              </label>
-              <Input
-                id="issue-ws-path"
-                className="font-mono text-xs"
-                placeholder="workspace/content/drafts/…"
-                value={pathDraft}
-                onChange={(e) => setPathDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    attachWorkspacePath();
-                  }
-                }}
-              />
-            </div>
-            <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={attachWorkspacePath}>
-              Attach path
-            </Button>
-          </div>
-          {draftWorkspacePaths.length > 0 ? (
-            <div className="flex flex-wrap gap-1">
-              {draftWorkspacePaths.map((p) => (
-                <span
-                  key={p}
-                  className="inline-flex max-w-full items-center gap-1 rounded-md border border-amber-500/40 bg-background/60 px-2 py-0.5 font-mono text-[10px]"
-                  title={p}
-                >
-                  <span className="truncate">{truncatePath(p, 40)}</span>
-                  <button
-                    type="button"
-                    className="shrink-0 text-muted-foreground hover:text-foreground"
-                    aria-label={`Remove path ${p}`}
-                    onClick={() => removeDraftPath(p)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : null}
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground" htmlFor="issue-title">
-              Title
-            </label>
-            <Input
-              id="issue-title"
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              placeholder="Short summary"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground" htmlFor="issue-spec">
-              Specification
-            </label>
-            <Textarea
-              id="issue-spec"
-              className="min-h-[100px] font-mono text-xs"
-              value={newSpec}
-              onChange={(e) => setNewSpec(e.target.value)}
-              placeholder="Context, acceptance criteria, links…"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground" htmlFor="issue-owner">
-              Assignee / owner_persona (optional)
-            </label>
-            <Input
-              id="issue-owner"
-              className="font-mono text-xs"
-              value={newOwnerPersona}
-              onChange={(e) => setNewOwnerPersona(e.target.value)}
-              placeholder="e.g. engineering_lead"
-            />
-          </div>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={newIsPlan}
-              onChange={(e) => setNewIsPlan(e.target.checked)}
-              className="size-3.5 rounded border-muted-foreground"
-            />
-            Plan mode — once approved, click <strong>Build</strong> to create an implementation issue
-          </label>
-          {createTask.isError ? (
-            <p className="text-sm text-destructive">
-              {createTask.error instanceof Error ? createTask.error.message : String(createTask.error)}
-            </p>
-          ) : null}
-          <Button
-            type="button"
-            disabled={!newTitle.trim() || createTask.isPending}
-            onClick={() => createTask.mutate(undefined)}
-          >
-            {createTask.isPending ? "Creating…" : "Create issue"}
-          </Button>
+          <WorkspaceNewIssueForm
+            apiBase={apiBase}
+            companyId={companyId}
+            assigneeDisplayName={assigneeDisplayName}
+            assigneePersona={assigneePersona}
+            idPrefix="issues-issue"
+            showAttachBanner={false}
+          />
         </CardContent>
       </Card>
 

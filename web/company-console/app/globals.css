@@ -193,6 +193,10 @@ body {
   .nd-ws-nav-link--idle {
     @apply text-[#999999] hover:bg-white/[0.04] hover:text-[#e8e8e8];
   }
+
+  .nd-ws-nav-section-label {
+    @apply px-2 pb-1 pt-3 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-[#555555] first:pt-1;
+  }
 }
 
 /* ── react-grid-layout: pointer + transform placement (RGL adds .cssTransforms when using transformStrategy) ── */

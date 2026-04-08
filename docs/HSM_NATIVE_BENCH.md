@@ -130,6 +130,8 @@ The **`runs/`** tree is **gitignored**; benchmark outputs still live on disk for
 - `runs/eval_20260331_165239/full/comparison_report.json` — mixed outcome vs keyword metrics.
 - `runs/eval_full_fixed/full/comparison_report.json` — treat as **invalid** if both variants show `error_rate: 1.0`.
 
+See **[`EVAL_AND_META_HARNESS.md`](./EVAL_AND_META_HARNESS.md)** for `hsm-eval` vs `hsm_meta_harness` vs `hsm_outer_loop` and where chat-eval artifacts go.
+
 **LongMemEval raw outputs (predictions + traces, not SMB):**
 
 - e.g. `runs/longmemeval/baseline_oracle_gpt54_limit50.jsonl`, `runs/longmemeval/hsm_oracle_gpt54_limit50_fullhistoryplusmemory.jsonl` — scoring summaries may be missing; aggregates live in your eval pipeline if you add them.
