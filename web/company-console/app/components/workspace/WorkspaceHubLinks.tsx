@@ -27,6 +27,7 @@ const GROUPS: HubGroup[] = [
     blurb: "Agents, SOPs, and packs",
     links: [
       { href: "/workspace/agents", label: "Agents", hint: "Roster agents, workspace files, memory, skills" },
+      { href: "/workspace/credentials", label: "Credentials", hint: "Company API keys, connectors, and MCP-ready service auth" },
       { href: "/workspace/playbooks", label: "Playbooks", hint: "Author SOPs and implement as tasks" },
       { href: "/workspace/marketplace", label: "Marketplace", hint: "Add or install company packs from catalog" },
     ],

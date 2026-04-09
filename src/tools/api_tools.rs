@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::{object_schema, Tool, ToolOutput};
+use crate::tools::connector_runtime::{auth_header, enforce_policy};
+use crate::tools::security::validate_outbound_url;
 
 // ============================================================================
 // HTTP Request Tool
@@ -46,6 +48,7 @@ impl Tool for HttpRequestTool {
             ("headers", "JSON object of headers to send", false),
             ("body", "Request body (for POST/PUT/PATCH)", false),
             ("params", "Query parameters as JSON object", false),
+            ("connector_ref", "Optional connector reference for auth/policy injection", false),
         ])
     }
 
@@ -54,6 +57,10 @@ impl Tool for HttpRequestTool {
         if url.is_empty() {
             return ToolOutput::error("URL is required");
         }
+        let url = match validate_outbound_url(url) {
+            Ok(u) => u,
+            Err(e) => return ToolOutput::error(format!("Blocked by SSRF guard: {e}")),
+        };
 
         let method_str = params
             .get("method")
@@ -71,6 +78,19 @@ impl Tool for HttpRequestTool {
         };
 
         let mut request = self.client.request(method, url);
+        if let Some(conn_ref) = params.get("connector_ref").and_then(|v| v.as_str()) {
+            let host = request
+                .try_clone()
+                .and_then(|r| r.build().ok())
+                .and_then(|r| r.url().host_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            if let Err(e) = enforce_policy(conn_ref, method_str, &host) {
+                return ToolOutput::error(format!("Connector policy blocked request: {e}"));
+            }
+            if let Some((name, value)) = auth_header(conn_ref) {
+                request = request.header(name, value);
+            }
+        }
 
         // Add headers
         if let Some(headers) = params.get("headers").and_then(|v| v.as_object()) {
@@ -182,6 +202,7 @@ impl Tool for WebhookSendTool {
             ("content", "Message content", true),
             ("username", "Override username (optional)", false),
             ("avatar_url", "Override avatar URL (optional)", false),
+            ("connector_ref", "Optional connector reference for auth/policy injection", false),
         ])
     }
 
@@ -192,9 +213,21 @@ impl Tool for WebhookSendTool {
         if url.is_empty() || content.is_empty() {
             return ToolOutput::error("URL and content are required");
         }
+        let url = match validate_outbound_url(url) {
+            Ok(u) => u,
+            Err(e) => return ToolOutput::error(format!("Blocked by SSRF guard: {e}")),
+        };
+
+        if let Some(conn_ref) = params.get("connector_ref").and_then(|v| v.as_str()) {
+            let host = url.host_str().unwrap_or_default();
+            if let Err(e) = enforce_policy(conn_ref, "POST", host) {
+                return ToolOutput::error(format!("Connector policy blocked webhook: {e}"));
+            }
+        }
 
         // Detect webhook type and format payload
-        let payload = if url.contains("discord") || url.contains("slack") {
+        let url_text = url.as_str().to_ascii_lowercase();
+        let payload = if url_text.contains("discord") || url_text.contains("slack") {
             let mut p = serde_json::json!({
                 "content": content,
             });
@@ -213,7 +246,13 @@ impl Tool for WebhookSendTool {
             })
         };
 
-        match self.client.post(url).json(&payload).send().await {
+        let mut req = self.client.post(url).json(&payload);
+        if let Some(conn_ref) = params.get("connector_ref").and_then(|v| v.as_str()) {
+            if let Some((name, value)) = auth_header(conn_ref) {
+                req = req.header(name, value);
+            }
+        }
+        match req.send().await {
             Ok(response) => {
                 if response.status().is_success() {
                     ToolOutput::success("Webhook sent successfully".to_string())

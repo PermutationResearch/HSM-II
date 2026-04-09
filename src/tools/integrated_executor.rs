@@ -161,6 +161,25 @@ impl IntegratedToolExecutor {
             }
         }
 
+        crate::runtime_control::publish_completion(
+            crate::runtime_control::CompletionEvent::background_completion(
+                task_key,
+                result.output.success,
+                if result.output.success {
+                    format!("task {task_key} completed")
+                } else {
+                    format!(
+                        "task {task_key} failed: {}",
+                        result
+                            .output
+                            .error
+                            .as_deref()
+                            .unwrap_or("unknown error")
+                    )
+                },
+            ),
+        );
+
         result
     }
 

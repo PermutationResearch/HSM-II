@@ -17,6 +17,7 @@ use crate::console::ConsoleState;
 use super::next_task_display_number_tx;
 use super::normalize_capability_refs;
 use super::no_db;
+use super::self_improvement;
 use super::TaskRow;
 use super::workspace_attachment_paths_json;
 
@@ -460,6 +461,22 @@ async fn patch_agent_run(
             Json(json!({ "error": "run not found" })),
         ));
     };
+    if matches!(row.status.as_str(), "error" | "cancelled") || finished {
+        let _ = self_improvement::record_failure_event(
+            pool,
+            company_id,
+            self_improvement::FailureInput {
+                run_id: Some(row.id),
+                task_id: row.task_id,
+                company_agent_id: row.company_agent_id,
+                status: &row.status,
+                summary: row.summary.as_deref(),
+                meta: Some(&row.meta.0),
+                source: "run_terminal",
+            },
+        )
+        .await;
+    }
     Ok(Json(json!({ "run": row })))
 }
 
@@ -542,6 +559,37 @@ async fn post_run_feedback(
         )
     })?;
 
+    if kind == "blocker" {
+        let run_ctx: Option<(Option<Uuid>, Option<Uuid>, String, Option<String>, SqlxJson<Value>)> =
+            sqlx::query_as(
+                r#"SELECT task_id, company_agent_id, status, summary, meta
+                   FROM agent_runs WHERE id = $1 AND company_id = $2"#,
+            )
+            .bind(run_id)
+            .bind(company_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+        if let Some((task_id, company_agent_id, status, summary, meta)) = run_ctx {
+            let synth = format!("blocker feedback: {}", text);
+            let _ = self_improvement::record_failure_event(
+                pool,
+                company_id,
+                self_improvement::FailureInput {
+                    run_id: Some(run_id),
+                    task_id,
+                    company_agent_id,
+                    status: &status,
+                    summary: Some(summary.as_deref().unwrap_or(&synth)),
+                    meta: Some(&meta.0),
+                    source: "feedback_blocker",
+                },
+            )
+            .await;
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(json!({ "event": row }))))
 }
 
@@ -607,8 +655,12 @@ async fn post_promote_feedback_to_task(
     let priority = body.priority.unwrap_or(0);
 
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, owner_persona, parent_task_id, spawned_by_rule_id, display_number, priority)
-           VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9)
+        r#"INSERT INTO tasks
+           (company_id, primary_goal_id, project_id, goal_ancestry, title, specification,
+            workspace_attachment_paths, capability_refs, owner_persona, parent_task_id,
+            spawned_by_rule_id, display_number, priority,
+            source_run_id, source_feedback_event_id)
+           VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9, $10, $11)
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
                      owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
@@ -621,6 +673,8 @@ async fn post_promote_feedback_to_task(
     .bind(&body.owner_persona)
     .bind(display_n)
     .bind(priority)
+    .bind(run_id)
+    .bind(event_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {

@@ -19,7 +19,9 @@ mod llm_stream;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, Request, StatusCode},
+    middleware::Next,
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -331,6 +333,50 @@ fn now_ts() -> u64 {
         .as_secs()
 }
 
+fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
+async fn require_api_auth(
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let require_auth = std::env::var("HSM_API_REQUIRE_AUTH")
+        .ok()
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        })
+        .unwrap_or(false);
+    if !require_auth || request.uri().path() == "/api/health" {
+        return Ok(next.run(request).await);
+    }
+    let expected = std::env::var("HSM_API_BEARER_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !constant_time_eq_bytes(token.as_bytes(), expected.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
 // ── Router Factory ─────────────────────────────────────────────────────────
 
 /// Build the complete API router with shared state.
@@ -421,6 +467,7 @@ pub fn api_router(state: ApiState) -> Router {
         .merge(honcho_routes)
         .merge(paperclip_routes)
         .merge(appliance_routes)
+        .layer(axum::middleware::from_fn(require_api_auth))
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import { AgentInstructionsSkillsPanel } from "@/app/components/console/AgentInst
 import { AgentScopedMemoryPanel } from "@/app/components/console/AgentScopedMemoryPanel";
 import { AgentOperatorChatPanel } from "@/app/components/console/AgentOperatorChatPanel";
 import { AgentWorkspacePanel } from "@/app/components/console/AgentWorkspacePanel";
+import { AgentRunsPanel } from "@/app/components/console/AgentRunsPanel";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card";
@@ -272,29 +273,11 @@ function AgentDetailContent() {
         </TabsContent>
 
         <TabsContent value="runs" className="mt-4">
-          <Card className="border-admin-border">
-            <CardHeader>
-              <CardTitle className="text-base">Runs</CardTitle>
-              <CardDescription>Automation and task execution trails.</CardDescription>
-            </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              <p>
-                Task ids and run status for this agent are listed on the{" "}
-                <button
-                  type="button"
-                  className="text-primary underline-offset-4 hover:underline"
-                  onClick={() => setTab("workspace")}
-                >
-                  Workspace
-                </button>{" "}
-                tab. Open an issue from{" "}
-                <Link href="/workspace/issues" className="text-primary underline-offset-4 hover:underline">
-                  Issues
-                </Link>{" "}
-                for full run logs when the API attaches them.
-              </p>
-            </CardContent>
-          </Card>
+          <AgentRunsPanel
+            apiBase={apiBase}
+            companyId={companyId}
+            agentId={agent.id}
+          />
         </TabsContent>
       </Tabs>
     </div>

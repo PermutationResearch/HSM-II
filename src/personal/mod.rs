@@ -27,6 +27,7 @@ pub mod kairos;
 pub mod memory;
 pub mod ops_config;
 pub mod outbound;
+pub mod pairing_store;
 pub mod path_attachments;
 pub mod persona;
 pub mod prompt_assembly;
@@ -55,6 +56,7 @@ pub use memory::{MemoryFact, MemoryMd, PersonalMemory, Project, UserMd};
 pub use ops_config::{
     load_ops_config, resolve_ops_config_path, OperationsConfig, OPS_SCHEMA_VERSION,
 };
+pub use pairing_store::PairingStore;
 pub use persona::{Capability, Persona, Voice};
 pub use task_trail::TaskTrail;
 

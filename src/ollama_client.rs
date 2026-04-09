@@ -472,6 +472,11 @@ impl OllamaClient {
         &self.config.model
     }
 
+    /// Set the active model at runtime (used by `/model` control plane command).
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.config.model = model.into();
+    }
+
     /// Generate text with latency budget enforcement
     /// Tries local Ollama first (model may be installed locally). Falls back to cloud API only if Ollama fails.
     pub async fn generate(&self, prompt: &str) -> LlmResult {

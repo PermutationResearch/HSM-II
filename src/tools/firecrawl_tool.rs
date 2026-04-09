@@ -13,6 +13,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use super::{object_schema, Tool, ToolOutput};
+use crate::tools::security::validate_outbound_url;
 
 const DEFAULT_BASE: &str = "https://api.firecrawl.dev/v1";
 const MAX_RESULT_CHARS: usize = 120_000;
@@ -143,6 +144,9 @@ impl Tool for FirecrawlScrapeTool {
         }
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolOutput::error("url must start with http:// or https://");
+        }
+        if let Err(e) = validate_outbound_url(url) {
+            return ToolOutput::error(format!("Blocked by SSRF guard: {e}"));
         }
 
         let formats = Self::parse_formats(&params);

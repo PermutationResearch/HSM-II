@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { File, Folder, FolderPlus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Eye, File, Folder, FolderPlus, PencilLine, Trash2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { companyOsUrl } from "@/app/lib/company-api-url";
 import { AgentWorkspaceTaskHistory } from "@/app/components/console/AgentWorkspaceTaskHistory";
 import { WorkspaceNewIssueDialog } from "@/app/components/console/WorkspaceNewIssueDialog";
 import { Button } from "@/app/components/ui/button";
+import { Input } from "@/app/components/ui/input";
 import { ScrollArea } from "@/app/components/ui/scroll-area";
 import { Skeleton } from "@/app/components/ui/skeleton";
 import { Textarea } from "@/app/components/ui/textarea";
@@ -35,6 +38,15 @@ function formatBytes(n: number | null | undefined): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isMarkdownPath(path: string | null): boolean {
+  return !!path && /\.md$/i.test(path);
+}
+
+function isTextRenderable(path: string | null): boolean {
+  if (!path) return false;
+  return /\.(md|txt|json|ts|tsx|js|jsx|rs|py|toml|yaml|yml|html|css|sql)$/i.test(path);
 }
 
 /** File path must live under `agents/<pack>/…` (not the folder itself). Case-insensitive so roster `ceo` matches on-disk `CEO`. */
@@ -124,6 +136,9 @@ export function AgentWorkspacePanel({
   const [fileError, setFileError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [issueOpen, setIssueOpen] = useState(false);
+  const [readerMode, setReaderMode] = useState<"preview" | "edit">("preview");
+  const [workspaceMode, setWorkspaceMode] = useState<"review" | "manage">("review");
+  const [filterQuery, setFilterQuery] = useState("");
   const autoDescendTried = useRef(false);
 
   useEffect(() => {
@@ -133,6 +148,9 @@ export function AgentWorkspacePanel({
     setBaselineContent("");
     setFileError(null);
     setSaveState("idle");
+    setReaderMode("preview");
+    setWorkspaceMode("review");
+    setFilterQuery("");
     autoDescendTried.current = false;
   }, [rootPrefix]);
 
@@ -158,7 +176,15 @@ export function AgentWorkspacePanel({
       }
       setHsmiiHomeHint(typeof j.hsmii_home === "string" ? j.hsmii_home : null);
       const raw = Array.isArray(j.entries) ? j.entries : [];
-      setEntries(raw.map(normalizeListEntry).filter((x): x is WorkspaceListEntry => x !== null));
+      const normalized = raw.map(normalizeListEntry).filter((x): x is WorkspaceListEntry => x !== null);
+      normalized.sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+        const ta = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+        const tb = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+        if (ta !== tb) return tb - ta;
+        return a.name.localeCompare(b.name);
+      });
+      setEntries(normalized);
     } catch (e) {
       setEntries([]);
       setListError(e instanceof Error ? e.message : String(e));
@@ -207,6 +233,7 @@ export function AgentWorkspacePanel({
       setFileLoading(true);
       setFileError(null);
       setSaveState("idle");
+      setReaderMode(isMarkdownPath(relPath) ? "preview" : "edit");
       try {
         const r = await fetch(
           companyOsUrl(
@@ -357,6 +384,17 @@ export function AgentWorkspacePanel({
   }, [openFilePath, deleteFileAtPath]);
 
   const folderLabel = browsePath === rootPrefix ? "workspace" : browsePath.replace(/^.*\//, "") || browsePath;
+  const selectedFileName = openFilePath?.split("/").pop() ?? null;
+  const canPreview = isTextRenderable(openFilePath);
+  const filteredEntries = useMemo(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((e) => e.name.toLowerCase().includes(q) || e.path.toLowerCase().includes(q));
+  }, [entries, filterQuery]);
+  const fileMeta = useMemo(
+    () => entries.find((entry) => entry.path === openFilePath) ?? null,
+    [entries, openFilePath],
+  );
 
   return (
     <div className="space-y-6">
@@ -376,6 +414,14 @@ export function AgentWorkspacePanel({
         assigneeDisplayName={assigneeDisplayName}
         assigneePersona={agentPackName}
       />
+
+      <div className="rounded-2xl border border-admin-border bg-card/40 px-4 py-3">
+        <p className="text-sm font-semibold text-foreground">Agent drive</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Files created by this agent are stored under <span className="font-mono text-foreground">{rootPrefix}</span>.
+          Use review mode for a clean read-only document viewer.
+        </p>
+      </div>
 
       {hsmiiHomeHint ? (
         <p className="font-mono text-[10px] text-muted-foreground truncate" title={hsmiiHomeHint}>
@@ -397,6 +443,25 @@ export function AgentWorkspacePanel({
           <span className="truncate text-xs text-muted-foreground">({browsePath})</span>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={workspaceMode === "review" ? "default" : "outline"}
+            onClick={() => {
+              setWorkspaceMode("review");
+              setReaderMode("preview");
+            }}
+          >
+            Review mode
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={workspaceMode === "manage" ? "default" : "outline"}
+            onClick={() => setWorkspaceMode("manage")}
+          >
+            Manage mode
+          </Button>
           <Button type="button" variant="secondary" size="sm" onClick={goUp} disabled={browsePath === rootPrefix}>
             Up
           </Button>
@@ -406,30 +471,41 @@ export function AgentWorkspacePanel({
           <Button type="button" variant="outline" size="sm" onClick={() => void loadList()} disabled={listLoading}>
             Refresh
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled
-            title="Binary upload is not implemented in company-console yet"
-          >
-            Upload
-          </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => void newFolder()}>
-            <FolderPlus className="mr-1 h-3.5 w-3.5" aria-hidden />
-            New folder
-          </Button>
-          <Button type="button" size="sm" onClick={() => void newFile()}>
-            New file
-          </Button>
+          {workspaceMode === "manage" ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Binary upload is not implemented in company-console yet"
+              >
+                Upload
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => void newFolder()}>
+                <FolderPlus className="mr-1 h-3.5 w-3.5" aria-hidden />
+                New folder
+              </Button>
+              <Button type="button" size="sm" onClick={() => void newFile()}>
+                New file
+              </Button>
+            </>
+          ) : null}
         </div>
       </div>
 
+      <Input
+        value={filterQuery}
+        onChange={(ev) => setFilterQuery(ev.target.value)}
+        placeholder="Filter files by name or path…"
+        className="max-w-md font-mono text-xs"
+      />
+
       {listError ? <p className="text-sm text-destructive">{listError}</p> : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div className="rounded-md border border-admin-border">
-          <div className="flex gap-2 border-b border-admin-border bg-muted/40 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+        <div className="rounded-2xl border border-admin-border bg-black/10">
+          <div className="flex gap-2 border-b border-admin-border bg-muted/30 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             <div className="grid min-w-0 flex-1 grid-cols-[1fr_88px_100px] gap-2">
               <span>Name</span>
               <span className="text-right">Size</span>
@@ -445,7 +521,7 @@ export function AgentWorkspacePanel({
                 <Skeleton className="h-8 w-full" />
                 <Skeleton className="h-8 w-full" />
               </div>
-            ) : entries.length === 0 ? (
+            ) : filteredEntries.length === 0 ? (
               <div className="space-y-2 p-4 text-sm text-muted-foreground">
                 <p className="font-medium text-foreground">No files here yet</p>
                 <ul className="list-inside list-disc space-y-1 text-xs">
@@ -466,7 +542,7 @@ export function AgentWorkspacePanel({
               </div>
             ) : (
               <ul>
-                {entries.map((e) => (
+                {filteredEntries.map((e) => (
                   <li
                     key={e.path}
                     className="flex items-stretch gap-2 border-b border-admin-border/60 px-3 py-2 last:border-b-0"
@@ -499,7 +575,7 @@ export function AgentWorkspacePanel({
                       <span className="font-mono text-[11px] text-muted-foreground">{timeAgo(e.modified_at)}</span>
                     </button>
                     <div className="flex w-10 shrink-0 items-center justify-center">
-                      {e.kind === "file" ? (
+                      {workspaceMode === "manage" && e.kind === "file" ? (
                         <Button
                           type="button"
                           variant="ghost"
@@ -524,17 +600,55 @@ export function AgentWorkspacePanel({
           </ScrollArea>
         </div>
 
-        <div className="flex min-h-[280px] flex-col gap-2">
+        <div className="flex min-h-[420px] flex-col gap-3">
           {openFilePath ? (
             <>
-              <p className="font-mono text-[10px] text-muted-foreground break-all">{openFilePath}</p>
+              <div className="rounded-2xl border border-admin-border bg-black/10 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="inline-flex items-center gap-2 rounded-full border border-admin-border bg-card px-3 py-1.5">
+                      <File className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="max-w-[260px] truncate font-medium text-foreground">{selectedFileName}</span>
+                    </div>
+                    <p className="mt-2 break-all font-mono text-[10px] text-muted-foreground">{openFilePath}</p>
+                    <div className="mt-2 flex flex-wrap gap-3 font-mono text-[10px] text-muted-foreground">
+                      <span>{fileMeta ? formatBytes(fileMeta.size_bytes) : "—"}</span>
+                      <span>{fileMeta?.modified_at ? timeAgo(fileMeta.modified_at) : "—"}</span>
+                      <span>{dirty ? "Unsaved changes" : "Saved to disk"}</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={readerMode === "preview" ? "default" : "outline"}
+                      disabled={!canPreview}
+                      onClick={() => setReaderMode("preview")}
+                    >
+                      <Eye className="mr-1.5 h-3.5 w-3.5" />
+                      Preview
+                    </Button>
+                    {workspaceMode === "manage" ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={readerMode === "edit" ? "default" : "outline"}
+                        onClick={() => setReaderMode("edit")}
+                      >
+                        <PencilLine className="mr-1.5 h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
               {fileLoading ? (
-                <Skeleton className="min-h-[260px] w-full" />
+                <Skeleton className="min-h-[320px] w-full rounded-2xl" />
               ) : fileError ? (
                 <p className="text-sm text-destructive">{fileError}</p>
-              ) : (
+              ) : readerMode === "edit" && workspaceMode === "manage" ? (
                 <Textarea
-                  className="min-h-[260px] flex-1 font-mono text-xs"
+                  className="min-h-[340px] flex-1 rounded-2xl border-admin-border bg-card font-mono text-xs"
                   value={editorContent}
                   onChange={(ev) => {
                     setEditorContent(ev.target.value);
@@ -542,43 +656,73 @@ export function AgentWorkspacePanel({
                   }}
                   spellCheck={false}
                 />
+              ) : (
+                <div className="min-h-[340px] rounded-[28px] border border-[#d7cfbf]/80 bg-[#f8f4ea] shadow-[0_1px_0_rgba(255,255,255,0.55)_inset]">
+                  <div className="border-b border-[#ddd4c4] px-5 py-3">
+                    <p className="text-sm font-semibold text-[#1f1a14]">{selectedFileName}</p>
+                    <p className="mt-1 text-[11px] text-[#6f6658]">
+                      Minimal document viewer for reviewing agent-created files.
+                    </p>
+                  </div>
+                  <ScrollArea className="h-[min(60vh,560px)]">
+                    <div className="px-5 py-5 text-[#211d17]">
+                      {isMarkdownPath(openFilePath) ? (
+                        <article className="prose prose-sm max-w-none prose-headings:text-[#1f1a14] prose-p:text-[#3c352c] prose-strong:text-[#1f1a14] prose-code:text-[#6f3f15] prose-pre:bg-[#ece4d7] prose-pre:text-[#2c241b] prose-li:text-[#3c352c]">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{editorContent}</ReactMarkdown>
+                        </article>
+                      ) : (
+                        <pre className="whitespace-pre-wrap font-sans text-[14px] leading-7 text-[#2f281f]">
+                          {editorContent}
+                        </pre>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
               )}
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={!openFilePath || fileLoading}
-                  title={!openFilePath ? "Select a file in the list first" : undefined}
-                  onClick={() => setIssueOpen(true)}
-                >
-                  Create issue
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="destructive"
-                  disabled={!openFilePath || fileLoading}
-                  title={!openFilePath ? "Select a file first" : "Remove file from disk under hsmii_home"}
-                  onClick={() => void deleteOpenFile()}
-                >
-                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-                  Delete file
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={!openFilePath || fileLoading || saveState === "saving" || !dirty}
-                  onClick={() => void saveFile()}
-                >
-                  {saveState === "saving" ? "Saving…" : "Save"}
-                </Button>
-                {saveState === "saved" ? (
-                  <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>
-                ) : null}
-                {saveState === "error" ? (
-                  <span className="text-xs text-destructive">Save failed</span>
-                ) : null}
+                {workspaceMode === "manage" ? (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={!openFilePath || fileLoading}
+                      title={!openFilePath ? "Select a file in the list first" : undefined}
+                      onClick={() => setIssueOpen(true)}
+                    >
+                      Create issue
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      disabled={!openFilePath || fileLoading}
+                      title={!openFilePath ? "Select a file first" : "Remove file from disk under hsmii_home"}
+                      onClick={() => void deleteOpenFile()}
+                    >
+                      <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                      Delete file
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!openFilePath || fileLoading || saveState === "saving" || !dirty}
+                      onClick={() => void saveFile()}
+                    >
+                      {saveState === "saving" ? "Saving…" : "Save"}
+                    </Button>
+                    {saveState === "saved" ? (
+                      <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>
+                    ) : null}
+                    {saveState === "error" ? (
+                      <span className="text-xs text-destructive">Save failed</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    Review mode is read-only. Switch to Manage mode to edit, delete, or create files.
+                  </span>
+                )}
               </div>
             </>
           ) : (

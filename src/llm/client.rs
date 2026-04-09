@@ -1,10 +1,10 @@
 //! Production LLM Client with Multi-Provider Support
 //!
-//! Supports OpenAI, OpenRouter (OpenAI-compatible), Anthropic, and Ollama with automatic failover,
+//! Supports OpenAI, OpenRouter (OpenAI-compatible), xAI (OpenAI-compatible), Gemini (OpenAI-compatible), Anthropic, and Ollama with automatic failover,
 //! retry logic, and comprehensive observability.
 //!
 //! **Provider order (fallback chain):** set `HSM_LLM_PROVIDER_ORDER` to a comma-separated
-//! list: `openai`, `openrouter`, `anthropic`, `ollama` (case-insensitive). Example:
+//! list: `openai`, `openrouter`, `xai`, `gemini`, `anthropic`, `ollama` (case-insensitive). Example:
 //! `HSM_LLM_PROVIDER_ORDER=ollama,openai` tries local Ollama first, then OpenAI. When unset,
 //! available cloud providers are tried first, then Ollama (always included by default).
 
@@ -49,7 +49,7 @@ fn root_http_err(e: &anyhow::Error) -> Option<&LlmHttpError> {
 /// One configured upstream (OpenAI, OpenRouter, Anthropic, Ollama).
 #[derive(Clone, Debug)]
 struct ProviderSlot {
-    /// Human/log label: `openai`, `openrouter`, `anthropic`, `ollama`.
+    /// Human/log label: `openai`, `openrouter`, `xai`, `gemini`, `anthropic`, `ollama`.
     label: &'static str,
     transport: LlmProvider,
     api_key: String,
@@ -60,6 +60,7 @@ struct ProviderSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LlmProvider {
     OpenAi,
+    Gemini,
     Anthropic,
     Ollama,
 }
@@ -85,6 +86,23 @@ impl LlmProvider {
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
         // OpenRouter uses OpenAI-compatible chat/completions paths.
         Some((LlmProvider::OpenAi, api_key, base_url))
+    }
+
+    fn try_xai() -> Option<(Self, String, String)> {
+        let api_key = std::env::var("XAI_API_KEY").ok()?;
+        let base_url =
+            std::env::var("XAI_BASE_URL").unwrap_or_else(|_| "https://api.x.ai/v1".to_string());
+        // xAI chat endpoint is OpenAI-compatible.
+        Some((LlmProvider::OpenAi, api_key, base_url))
+    }
+
+    fn try_gemini() -> Option<(Self, String, String)> {
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())?;
+        let base_url = std::env::var("GEMINI_BASE_URL")
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+        Some((LlmProvider::Gemini, api_key, base_url))
     }
 
     fn ollama_endpoint() -> (Self, String, String) {
@@ -129,6 +147,20 @@ impl LlmProvider {
                                 warn!("HSM_LLM_PROVIDER_ORDER lists openrouter but OPENROUTER_API_KEY is unset");
                             }
                         }
+                        "xai" => {
+                            if let Some((transport, api_key, base_url)) = Self::try_xai() {
+                                providers.push(ProviderSlot {
+                                    label: "xai",
+                                    transport,
+                                    api_key,
+                                    base_url,
+                                });
+                            } else {
+                                warn!(
+                                    "HSM_LLM_PROVIDER_ORDER lists xai but XAI_API_KEY is unset"
+                                );
+                            }
+                        }
                         "anthropic" => {
                             if let Some((transport, api_key, base_url)) = Self::try_anthropic() {
                                 providers.push(ProviderSlot {
@@ -141,6 +173,18 @@ impl LlmProvider {
                                 warn!("HSM_LLM_PROVIDER_ORDER lists anthropic but ANTHROPIC_API_KEY is unset");
                             }
                         }
+                        "gemini" => {
+                            if let Some((transport, api_key, base_url)) = Self::try_gemini() {
+                                providers.push(ProviderSlot {
+                                    label: "gemini",
+                                    transport,
+                                    api_key,
+                                    base_url,
+                                });
+                            } else {
+                                warn!("HSM_LLM_PROVIDER_ORDER lists gemini but GEMINI_API_KEY/GOOGLE_API_KEY is unset");
+                            }
+                        }
                         "ollama" => {
                             let (transport, api_key, base_url) = Self::ollama_endpoint();
                             providers.push(ProviderSlot {
@@ -150,7 +194,7 @@ impl LlmProvider {
                                 base_url,
                             });
                         }
-                        _ => warn!("HSM_LLM_PROVIDER_ORDER: unknown provider {:?}, expected openai|openrouter|anthropic|ollama", t),
+                        _ => warn!("HSM_LLM_PROVIDER_ORDER: unknown provider {:?}, expected openai|openrouter|xai|gemini|anthropic|ollama", t),
                     }
                 }
                 if !providers.is_empty() {
@@ -172,6 +216,22 @@ impl LlmProvider {
         if let Some((transport, api_key, base_url)) = Self::try_openrouter() {
             providers.push(ProviderSlot {
                 label: "openrouter",
+                transport,
+                api_key,
+                base_url,
+            });
+        }
+        if let Some((transport, api_key, base_url)) = Self::try_xai() {
+            providers.push(ProviderSlot {
+                label: "xai",
+                transport,
+                api_key,
+                base_url,
+            });
+        }
+        if let Some((transport, api_key, base_url)) = Self::try_gemini() {
+            providers.push(ProviderSlot {
+                label: "gemini",
                 transport,
                 api_key,
                 base_url,
@@ -217,6 +277,34 @@ impl Default for LlmRequest {
             top_p: Some(0.9),
             stream: false,
         }
+    }
+}
+
+/// Resolve runtime model by workflow + risk band.
+///
+/// Policy source order:
+/// 1) `HSM_MODEL_ROUTING_JSON` (JSON object with `low|medium|high` model ids)
+/// 2) built-in defaults
+pub fn resolve_risk_based_model(
+    current_model: &str,
+    _workflow_pack: &str,
+    risk_band: &str,
+) -> (String, &'static str) {
+    if let Ok(raw) = std::env::var("HSM_MODEL_ROUTING_JSON") {
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            let key = risk_band.trim().to_ascii_lowercase();
+            if let Some(model) = v.get(&key).and_then(|x| x.as_str()).map(str::trim) {
+                if !model.is_empty() {
+                    return (model.to_string(), "env_policy");
+                }
+            }
+        }
+    }
+    match risk_band.trim().to_ascii_lowercase().as_str() {
+        "low" => ("mimo-v2-pro".to_string(), "builtin"),
+        "medium" => ("gpt-4o-mini".to_string(), "builtin"),
+        "high" => (current_model.to_string(), "builtin"),
+        _ => (current_model.to_string(), "builtin"),
     }
 }
 
@@ -361,6 +449,23 @@ pub struct MetricsSnapshot {
 }
 
 impl LlmClient {
+    fn infer_context_window(model: &str) -> &'static str {
+        let m = model.to_ascii_lowercase();
+        if m.contains("gemini-2.5-pro") {
+            "1M"
+        } else if m.contains("gemini-2.5-flash") || m.contains("gemini-1.5") {
+            "1M"
+        } else if m.contains("gpt-4o") || m.contains("gpt-4") {
+            "128k"
+        } else if m.contains("claude") {
+            "200k"
+        } else if m.contains("mimo") {
+            "256k"
+        } else {
+            "auto"
+        }
+    }
+
     /// Create new LLM client from environment variables
     pub fn new() -> Result<Self> {
         let providers = LlmProvider::slots_from_env();
@@ -460,6 +565,7 @@ impl LlmClient {
                     info!(
                         provider = %slot.label,
                         model = %response.model,
+                        context_window = %Self::infer_context_window(&response.model),
                         latency_ms = latency_ms,
                         tokens = tokens,
                         "LLM request succeeded"
@@ -470,6 +576,7 @@ impl LlmClient {
                         json!({
                             "provider": slot.label,
                             "model": response.model,
+                            "context_window": Self::infer_context_window(&response.model),
                             "latency_ms": latency_ms,
                             "total_tokens": tokens,
                         }),
@@ -594,9 +701,7 @@ impl LlmClient {
                                 + Send,
                         >,
                     > = match slot.transport {
-                        LlmProvider::OpenAi => {
-                            crate::llm::streaming::openai_sse_stream(response, LlmProvider::OpenAi)
-                        }
+                        LlmProvider::OpenAi | LlmProvider::Gemini => crate::llm::streaming::openai_sse_stream(response, slot.transport.clone()),
                         LlmProvider::Anthropic => {
                             crate::llm::streaming::anthropic_sse_stream(response)
                         }
@@ -647,28 +752,55 @@ impl LlmClient {
     ) -> Result<Response> {
         let _ = provider_label;
         match provider {
-            LlmProvider::OpenAi => {
+            LlmProvider::OpenAi | LlmProvider::Gemini => {
                 let url = format!("{}/chat/completions", base_url);
                 let model = Self::openai_compatible_model_id(request.model.as_str(), base_url);
+                let mut messages = request
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "role": m.role,
+                            "content": m.content
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if provider_label.eq_ignore_ascii_case("xai") {
+                    if let Ok(prefill) = std::env::var("HSM_XAI_THINKING_PREFILL") {
+                        let trimmed = prefill.trim();
+                        if !trimmed.is_empty() {
+                            messages.push(json!({
+                                "role": "assistant",
+                                "content": trimmed,
+                            }));
+                        }
+                    }
+                }
                 let body = json!({
                     "model": model,
-                    "messages": request.messages.iter().map(|m| json!({
-                        "role": m.role,
-                        "content": m.content
-                    })).collect::<Vec<_>>(),
+                    "messages": messages,
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens,
                     "top_p": request.top_p,
                     "stream": true,
                 });
-                self.http_stream
+                let mut req = self
+                    .http_stream
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(anyhow::Error::from)
+                    .header("Content-Type", "application/json");
+                if provider_label.eq_ignore_ascii_case("xai")
+                    && std::env::var("HSM_XAI_PROMPT_CACHE").ok().as_deref() == Some("1")
+                {
+                    req = req.header("x-ai-prompt-cache", "true");
+                    if let Ok(cache_key) = std::env::var("XAI_PROMPT_CACHE_KEY") {
+                        let trimmed = cache_key.trim();
+                        if !trimmed.is_empty() {
+                            req = req.header("x-ai-prompt-cache-key", trimmed);
+                        }
+                    }
+                }
+                req.json(&body).send().await.map_err(anyhow::Error::from)
             }
             LlmProvider::Anthropic => {
                 let url = format!("{}/messages", base_url);
@@ -757,7 +889,7 @@ impl LlmClient {
             }
 
             match self
-                .send_request(request.clone(), provider, api_key, base_url)
+                .send_request(request.clone(), provider, provider_label, api_key, base_url)
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -799,11 +931,15 @@ impl LlmClient {
         &self,
         request: LlmRequest,
         provider: &LlmProvider,
+        provider_label: &str,
         api_key: &str,
         base_url: &str,
     ) -> Result<LlmResponse> {
         match provider {
-            LlmProvider::OpenAi => self.send_openai_request(request, api_key, base_url).await,
+            LlmProvider::OpenAi | LlmProvider::Gemini => {
+                self.send_openai_request(request, api_key, base_url, provider_label)
+                    .await
+            }
             LlmProvider::Anthropic => {
                 self.send_anthropic_request(request, api_key, base_url)
                     .await
@@ -832,30 +968,58 @@ impl LlmClient {
         request: LlmRequest,
         api_key: &str,
         base_url: &str,
+        provider_label: &str,
     ) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", base_url);
         let model = Self::openai_compatible_model_id(request.model.as_str(), base_url);
+        let mut messages = request
+            .messages
+            .iter()
+            .map(|m| {
+                json!({
+                    "role": m.role,
+                    "content": m.content
+                })
+            })
+            .collect::<Vec<_>>();
+        if provider_label.eq_ignore_ascii_case("xai") {
+            if let Ok(prefill) = std::env::var("HSM_XAI_THINKING_PREFILL") {
+                let trimmed = prefill.trim();
+                if !trimmed.is_empty() {
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": trimmed
+                    }));
+                }
+            }
+        }
 
         let body = json!({
             "model": model,
-            "messages": request.messages.iter().map(|m| json!({
-                "role": m.role,
-                "content": m.content
-            })).collect::<Vec<_>>(),
+            "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "top_p": request.top_p,
             "stream": request.stream,
         });
 
-        let response = self
+        let mut req = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json");
+        if provider_label.eq_ignore_ascii_case("xai")
+            && std::env::var("HSM_XAI_PROMPT_CACHE").ok().as_deref() == Some("1")
+        {
+            req = req.header("x-ai-prompt-cache", "true");
+            if let Ok(cache_key) = std::env::var("XAI_PROMPT_CACHE_KEY") {
+                let trimmed = cache_key.trim();
+                if !trimmed.is_empty() {
+                    req = req.header("x-ai-prompt-cache-key", trimmed);
+                }
+            }
+        }
+        let response = req.json(&body).send().await?;
 
         self.handle_response(response, LlmProvider::OpenAi).await
     }
@@ -966,13 +1130,13 @@ impl LlmClient {
         let json: Value = response.json().await?;
 
         match provider {
-            LlmProvider::OpenAi => self.parse_openai_response(json),
+            LlmProvider::OpenAi | LlmProvider::Gemini => self.parse_openai_response(json, provider),
             LlmProvider::Anthropic => self.parse_anthropic_response(json),
             LlmProvider::Ollama => self.parse_ollama_response(json),
         }
     }
 
-    fn parse_openai_response(&self, json: Value) -> Result<LlmResponse> {
+    fn parse_openai_response(&self, json: Value, provider: LlmProvider) -> Result<LlmResponse> {
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
@@ -990,7 +1154,7 @@ impl LlmClient {
             content,
             model,
             usage,
-            provider: LlmProvider::OpenAi,
+            provider,
             latency_ms: 0,
         })
     }
@@ -1080,6 +1244,7 @@ impl LlmClient {
         for slot in &self.providers {
             let result = match &slot.transport {
                 LlmProvider::OpenAi => self.check_openai(&slot.api_key, &slot.base_url).await,
+                LlmProvider::Gemini => self.check_openai(&slot.api_key, &slot.base_url).await,
                 LlmProvider::Anthropic => self.check_anthropic(&slot.api_key, &slot.base_url).await,
                 LlmProvider::Ollama => self.check_ollama(&slot.base_url).await,
             };

@@ -42,6 +42,7 @@ use crate::{
         CouncilEvidence, CouncilEvidenceKind, CouncilFactory, Decision, ModeConfig, RalphVerdict,
         StigmergicCouncilContext,
     },
+    llm::client::resolve_risk_based_model,
     ollama_client::{OllamaClient, OllamaConfig},
     personal::{
         gateway::{Message, Platform},
@@ -82,6 +83,132 @@ const MAX_SKILL_MD_PROMPT_ENTRIES: usize = 40;
 /// Max characters per skill blurb line in that index.
 const MAX_SKILL_MD_LINE_CHARS: usize = 120;
 const DEFAULT_TOOL_PROMPT_CAP: usize = 24;
+
+#[derive(Clone, Copy)]
+struct RuntimeModelOption {
+    slug: &'static str,
+    model_id: &'static str,
+    provider: &'static str,
+    context_window: &'static str,
+    pricing: &'static str,
+    free_tier: bool,
+}
+
+const RUNTIME_MODEL_OPTIONS: &[RuntimeModelOption] = &[
+    RuntimeModelOption {
+        slug: "llama3.2",
+        model_id: "llama3.2",
+        provider: "ollama",
+        context_window: "128k",
+        pricing: "local/private",
+        free_tier: true,
+    },
+    RuntimeModelOption {
+        slug: "gpt-4o-mini",
+        model_id: "gpt-4o-mini",
+        provider: "openai",
+        context_window: "128k",
+        pricing: "paid",
+        free_tier: false,
+    },
+    RuntimeModelOption {
+        slug: "gemini-2.5-flash",
+        model_id: "gemini-2.5-flash",
+        provider: "gemini",
+        context_window: "auto-detected",
+        pricing: "paid",
+        free_tier: false,
+    },
+    RuntimeModelOption {
+        slug: "mimo-v2-pro",
+        model_id: "mimo-v2-pro",
+        provider: "xiaomi",
+        context_window: "256k",
+        pricing: "free-tier auxiliary",
+        free_tier: true,
+    },
+];
+
+fn resolve_runtime_model_alias(alias: &str) -> Option<&'static RuntimeModelOption> {
+    let q = alias.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    RUNTIME_MODEL_OPTIONS.iter().find(|m| {
+        m.slug.eq_ignore_ascii_case(&q)
+            || m.model_id.eq_ignore_ascii_case(&q)
+            || m.slug.contains(&q)
+            || m.model_id.contains(&q)
+    })
+}
+
+fn format_runtime_model_list(current: &str, platform: Platform) -> String {
+    let mut out = String::from("## Runtime Models\n\n");
+    for m in RUNTIME_MODEL_OPTIONS {
+        let current_flag = if current.eq_ignore_ascii_case(m.model_id) {
+            "▶ "
+        } else {
+            "  "
+        };
+        let tier = if m.free_tier { "free" } else { "paid" };
+        out.push_str(&format!(
+            "{}**{}** (`{}`)\n  - provider: {}\n  - context: {}\n  - tier: {} ({})\n\n",
+            current_flag, m.slug, m.model_id, m.provider, m.context_window, tier, m.pricing
+        ));
+    }
+    out.push_str("Use `/model <name>` to switch.\n");
+    if matches!(platform, Platform::Telegram | Platform::Discord) {
+        out.push_str(
+            "\nQuick picks:\n`/model llama3.2`  `/model gpt-4o-mini`  `/model gemini-2.5-flash`  `/model mimo-v2-pro`\n",
+        );
+    }
+    out
+}
+
+fn detect_workflow_pack(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("email") || m.contains("inbox") || m.contains("reply") {
+        return "email_ops";
+    }
+    if m.contains("ads") || m.contains("campaign") || m.contains("growth") {
+        return "growth_campaigns";
+    }
+    if m.contains("invoice") || m.contains("refund") || m.contains("payment") {
+        return "finance_ops";
+    }
+    if m.contains("support") || m.contains("ticket") {
+        return "support_triage";
+    }
+    "general_ops"
+}
+
+fn detect_risk_band(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("wire")
+        || m.contains("bank")
+        || m.contains("refund")
+        || m.contains("legal")
+        || m.contains("delete")
+        || m.contains("credential")
+        || m.contains("password")
+    {
+        return "high";
+    }
+    if m.contains("billing") || m.contains("payment") || m.contains("escalat") {
+        return "medium";
+    }
+    "low"
+}
+
+fn model_routing_enabled() -> bool {
+    std::env::var("HSM_MODEL_ROUTING_AUTO")
+        .ok()
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        })
+        .unwrap_or(true)
+}
 
 fn approx_tokens_from_chars(chars: usize) -> usize {
     chars.div_ceil(4)
@@ -1190,6 +1317,59 @@ impl EnhancedPersonalAgent {
                 Err(_) => "Skills catalog is temporarily unavailable.".to_string(),
             };
             return Ok(content);
+        }
+        if trimmed_msg == "/model" || trimmed_msg.starts_with("/model ") {
+            let arg = trimmed_msg.strip_prefix("/model").map(str::trim).unwrap_or("");
+            if arg.is_empty() {
+                return Ok(format!(
+                    "## Current Runtime Model\n\n`{}`\n\n{}",
+                    self.llm.model(),
+                    format_runtime_model_list(self.llm.model(), msg.platform)
+                ));
+            }
+            if arg.eq_ignore_ascii_case("list") {
+                return Ok(format_runtime_model_list(self.llm.model(), msg.platform));
+            }
+            if arg.eq_ignore_ascii_case("policy") {
+                let current = self.llm.model().to_string();
+                let low = resolve_risk_based_model(&current, "general_ops", "low").0;
+                let medium = resolve_risk_based_model(&current, "general_ops", "medium").0;
+                let high = resolve_risk_based_model(&current, "general_ops", "high").0;
+                return Ok(format!(
+                    "## Model Routing Policy\n\n- auto: `{}`\n- low risk: `{}`\n- medium risk: `{}`\n- high risk: `{}`",
+                    model_routing_enabled(),
+                    low,
+                    medium,
+                    high
+                ));
+            }
+            let Some(opt) = resolve_runtime_model_alias(arg) else {
+                return Ok(format!(
+                    "Unknown model `{}`.\n\n{}",
+                    arg,
+                    format_runtime_model_list(self.llm.model(), msg.platform)
+                ));
+            };
+            self.llm.set_model(opt.model_id.to_string());
+            if opt.slug == "mimo-v2-pro" {
+                return Ok(format!(
+                    "Switched model to `{}` (provider: {}).\n\nMiMo v2 Pro is gated as an **auxiliary free-tier** runtime lane.",
+                    opt.model_id, opt.provider
+                ));
+            }
+            return Ok(format!(
+                "Switched model to `{}` (provider: {}, context: {}).",
+                opt.model_id, opt.provider, opt.context_window
+            ));
+        }
+        if model_routing_enabled() {
+            let workflow = detect_workflow_pack(trimmed_msg);
+            let risk = detect_risk_band(trimmed_msg);
+            let current = self.llm.model().to_string();
+            let (next_model, _policy_source) = resolve_risk_based_model(&current, workflow, risk);
+            if !next_model.eq_ignore_ascii_case(&current) {
+                self.llm.set_model(next_model);
+            }
         }
 
         let start_time = Instant::now();

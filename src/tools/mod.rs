@@ -7,6 +7,7 @@
 //! - firecrawl_scrape - Firecrawl API (markdown/html; needs FIRECRAWL_API_KEY)
 //! - browser_navigate, browser_wait, browser_click, browser_type, browser_screenshot
 //! - browser_get_text, browser_close
+//! - browser_use_run (Browser Use provider bridge)
 //!
 //! ## File Operations (10 tools)
 //! - read_file, write_file, edit_file, file_info
@@ -48,11 +49,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod bash_policy;
+pub mod connector_runtime;
 pub mod file_tools;
 pub mod harness_gate;
 pub mod integrated_executor;
 pub mod registry;
 pub mod scored_tool_router;
+pub mod security;
 pub mod shell_tools;
 pub mod tool_permissions;
 pub use harness_gate::HarnessPolicyGate;
@@ -65,6 +68,7 @@ pub mod web_search;
 // New comprehensive tool modules
 pub mod api_tools;
 pub mod browser_tools;
+pub mod browser_use_tool;
 pub mod calculation_tools;
 pub mod email_tools;
 pub mod git_tools;
@@ -88,6 +92,7 @@ pub use browser_tools::{
     BrowserClickTool, BrowserCloseTool, BrowserGetTextTool, BrowserNavigateTool,
     BrowserScreenshotTool, BrowserTypeTool, BrowserWaitTool,
 };
+pub use browser_use_tool::BrowserUseRunTool;
 
 // Git tools
 pub use git_tools::{
@@ -304,6 +309,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(BrowserScreenshotTool::new()));
     registry.register(Arc::new(BrowserGetTextTool::new()));
     registry.register(Arc::new(BrowserCloseTool::new()));
+    registry.register(Arc::new(BrowserUseRunTool::new()));
 
     // Git tools
     registry.register(Arc::new(GitStatusTool::new()));

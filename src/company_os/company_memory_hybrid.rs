@@ -1,32 +1,18 @@
-//! Hybrid company memory search: parallel FTS + embedding + recency, RRF fusion, optional HTTP rerank, optional query expansion.
-//! Mirrors [`crate::memory`] RRF (`reciprocal_rank_fusion` with weighted channels).
+//! Hybrid company memory search: chunk-level FTS + pgvector + graph + temporal + recency.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::company_memory::expand_via_graph;
+
 const RRF_K: f64 = 60.0;
-const DEFAULT_EMBED_DIM: usize = 768;
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || b.is_empty() || a.len() != b.len() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
-}
-
 fn env_bool(key: &str, default: bool) -> bool {
     match std::env::var(key) {
         Ok(s) => {
@@ -97,13 +83,19 @@ pub async fn ollama_embed_text(client: &Client, text: &str) -> anyhow::Result<Ve
     Ok(out)
 }
 
-fn json_vec_f32(v: &Value) -> Option<Vec<f32>> {
-    let arr = v.as_array()?;
-    let mut out = Vec::with_capacity(arr.len());
-    for x in arr {
-        out.push(x.as_f64()? as f32);
-    }
-    (!out.is_empty()).then_some(out)
+fn vector_literal(emb: &[f32]) -> String {
+    let values = emb
+        .iter()
+        .map(|v| {
+            if v.is_finite() {
+                format!("{v}")
+            } else {
+                "0".to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
 }
 
 pub async fn store_embedding_json(pool: &PgPool, memory_id: Uuid, emb: &[f32]) -> Result<(), sqlx::Error> {
@@ -113,6 +105,44 @@ pub async fn store_embedding_json(pool: &PgPool, memory_id: Uuid, emb: &[f32]) -
     )
     .bind(memory_id)
     .bind(j)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn store_embedding_vec(
+    pool: &PgPool,
+    memory_id: Uuid,
+    emb: &[f32],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE company_memory_entries
+           SET embedding_vec = $2::vector,
+               updated_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(memory_id)
+    .bind(vector_literal(emb))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn store_chunk_embedding(
+    pool: &PgPool,
+    chunk_id: Uuid,
+    emb: &[f32],
+) -> Result<(), sqlx::Error> {
+    let j = serde_json::to_value(emb).unwrap_or(json!([]));
+    sqlx::query(
+        r#"UPDATE memory_chunks
+           SET embedding_json = $2::jsonb,
+               embedding_vec = $3::vector
+           WHERE id = $1"#,
+    )
+    .bind(chunk_id)
+    .bind(j)
+    .bind(vector_literal(emb))
     .execute(pool)
     .await?;
     Ok(())
@@ -142,9 +172,35 @@ pub async fn embed_row_after_write(pool: PgPool, memory_id: Uuid, title: String,
             if let Err(e) = store_embedding_json(&pool, memory_id, &emb).await {
                 tracing::warn!(target: "hsm.company_memory", %memory_id, ?e, "store embedding failed");
             }
+            if let Err(e) = store_embedding_vec(&pool, memory_id, &emb).await {
+                tracing::warn!(target: "hsm.company_memory", %memory_id, ?e, "store vector embedding failed");
+            }
         }
         Err(e) => {
             tracing::debug!(target: "hsm.company_memory", %memory_id, ?e, "ollama embed skipped or failed");
+        }
+    }
+}
+
+pub async fn embed_chunks_after_write(pool: PgPool, chunks: Vec<(Uuid, String)>) {
+    if !env_bool("HSM_MEMORY_EMBED_ENABLED", true) || chunks.is_empty() {
+        return;
+    }
+    let client = Client::new();
+    for (chunk_id, text) in chunks {
+        let t = text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        match ollama_embed_text(&client, t).await {
+            Ok(emb) => {
+                if let Err(e) = store_chunk_embedding(&pool, chunk_id, &emb).await {
+                    tracing::warn!(target: "hsm.company_memory", %chunk_id, ?e, "store chunk embedding failed");
+                }
+            }
+            Err(e) => {
+                tracing::debug!(target: "hsm.company_memory", %chunk_id, ?e, "chunk embed skipped or failed");
+            }
         }
     }
 }
@@ -162,15 +218,55 @@ pub fn reciprocal_rank_fusion_weighted(channels: &[Vec<Uuid>], weights: &[f64], 
     v.into_iter().take(out).map(|x| x.0).collect()
 }
 
-#[derive(sqlx::FromRow)]
-struct IdRow {
-    id: Uuid,
+#[derive(Debug, Clone)]
+pub struct HybridSearchOptions {
+    pub mode_key: String,
+    pub agent_bind: Uuid,
+    pub latest_only: bool,
+    pub entity_type: Option<String>,
+    pub entity_id: Option<String>,
+    pub valid_at: Option<DateTime<Utc>>,
+    pub document_date_from: Option<DateTime<Utc>>,
+    pub document_date_to: Option<DateTime<Utc>>,
+    pub event_date_from: Option<DateTime<Utc>>,
+    pub event_date_to: Option<DateTime<Utc>>,
+    pub limit: usize,
 }
 
-#[derive(sqlx::FromRow)]
-struct IdEmbRow {
-    id: Uuid,
-    embedding_json: Option<Value>,
+impl HybridSearchOptions {
+    pub fn for_scope(mode_key: &str, agent_bind: Uuid) -> Self {
+        Self {
+            mode_key: mode_key.to_string(),
+            agent_bind,
+            latest_only: false,
+            entity_type: None,
+            entity_id: None,
+            valid_at: None,
+            document_date_from: None,
+            document_date_to: None,
+            event_date_from: None,
+            event_date_to: None,
+            limit: 200,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SupportingChunk {
+    pub chunk_id: Uuid,
+    pub chunk_index: i32,
+    pub text: String,
+    pub modality: String,
+    pub source_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HybridMatch {
+    pub id: Uuid,
+    pub matched_via: Vec<String>,
+    pub supporting_chunks: Vec<SupportingChunk>,
+    pub lineage_summary: Option<String>,
+    pub latest_version_only: bool,
 }
 
 async fn query_expansion_terms(client: &Client, query: &str) -> Vec<String> {
@@ -229,61 +325,78 @@ async fn fts_ranked_ids(
     pool: &PgPool,
     company_id: Uuid,
     q_search: &str,
-    mode_key: &str,
-    agent_bind: Uuid,
+    options: &HybridSearchOptions,
     like_pat: &str,
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<IdRow> = sqlx::query_as(
-        r#"SELECT id FROM company_memory_entries
-           WHERE company_id = $1
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"SELECT c.memory_id
+           FROM memory_chunks c
+           JOIN company_memory_entries e ON e.id = c.memory_id
+           WHERE c.company_id = $1
              AND CASE $4::text
                WHEN 'all' THEN true
-               WHEN 'shared' THEN scope = 'shared'
-               WHEN 'agent' THEN scope = 'agent' AND company_agent_id = $5
+               WHEN 'shared' THEN e.scope = 'shared'
+               WHEN 'agent' THEN e.scope = 'agent' AND e.company_agent_id = $5
                ELSE false
              END
+             AND ($6::bool = false OR e.is_latest = true)
+             AND ($7::text IS NULL OR COALESCE(c.entity_type, e.entity_type) = $7)
+             AND ($8::text IS NULL OR COALESCE(c.entity_id, e.entity_id) = $8)
+             AND ($9::timestamptz IS NULL OR COALESCE(c.valid_from, e.valid_from) IS NULL OR COALESCE(c.valid_from, e.valid_from) <= $9)
+             AND ($9::timestamptz IS NULL OR COALESCE(c.valid_to, e.valid_to) IS NULL OR COALESCE(c.valid_to, e.valid_to) >= $9)
+             AND ($10::timestamptz IS NULL OR COALESCE(c.document_date, e.document_date) >= $10)
+             AND ($11::timestamptz IS NULL OR COALESCE(c.document_date, e.document_date) <= $11)
+             AND ($12::timestamptz IS NULL OR COALESCE(c.event_date, e.event_date) >= $12)
+             AND ($13::timestamptz IS NULL OR COALESCE(c.event_date, e.event_date) <= $13)
              AND (
                to_tsvector(
                     'english',
-                    coalesce(title, '') || ' ' || coalesce(body, '') || ' ' || coalesce(summary_l1, '') || ' ' || coalesce(summary_l0, '')
+                    coalesce(c.text, '') || ' ' || coalesce(c.summary_l1, '') || ' ' || coalesce(c.summary_l0, '')
                   ) @@ plainto_tsquery('english', trim($2::text))
-               OR title ILIKE $3 ESCAPE '\'
-               OR body ILIKE $3 ESCAPE '\'
-               OR COALESCE(summary_l1, '') ILIKE $3 ESCAPE '\'
-               OR COALESCE(summary_l0, '') ILIKE $3 ESCAPE '\'
+               OR c.text ILIKE $3 ESCAPE '\'
+               OR COALESCE(c.summary_l1, '') ILIKE $3 ESCAPE '\'
+               OR COALESCE(c.summary_l0, '') ILIKE $3 ESCAPE '\'
              )
-           ORDER BY
-             ts_rank_cd(
-                    to_tsvector(
-                      'english',
-                      coalesce(title, '') || ' ' || coalesce(body, '') || ' ' || coalesce(summary_l1, '') || ' ' || coalesce(summary_l0, '')
-                    ),
-                    plainto_tsquery('english', trim($2::text))
-                  ) DESC,
-             CASE WHEN kind = 'broadcast' THEN 0 ELSE 1 END,
-             updated_at DESC
-           LIMIT $6"#,
+           GROUP BY c.memory_id
+           ORDER BY MAX(
+               ts_rank_cd(
+                   to_tsvector(
+                       'english',
+                       coalesce(c.text, '') || ' ' || coalesce(c.summary_l1, '') || ' ' || coalesce(c.summary_l0, '')
+                   ),
+                   plainto_tsquery('english', trim($2::text))
+               )
+           ) DESC,
+           MAX(e.updated_at) DESC
+           LIMIT $14"#,
     )
     .bind(company_id)
     .bind(q_search)
     .bind(like_pat)
-    .bind(mode_key)
-    .bind(agent_bind)
+    .bind(&options.mode_key)
+    .bind(options.agent_bind)
+    .bind(options.latest_only)
+    .bind(options.entity_type.as_deref())
+    .bind(options.entity_id.as_deref())
+    .bind(options.valid_at)
+    .bind(options.document_date_from)
+    .bind(options.document_date_to)
+    .bind(options.event_date_from)
+    .bind(options.event_date_to)
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|r| r.id).collect())
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 async fn recency_ranked_ids(
     pool: &PgPool,
     company_id: Uuid,
-    mode_key: &str,
-    agent_bind: Uuid,
+    options: &HybridSearchOptions,
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<IdRow> = sqlx::query_as(
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
         r#"SELECT id FROM company_memory_entries
            WHERE company_id = $1
              AND CASE $2::text
@@ -292,54 +405,137 @@ async fn recency_ranked_ids(
                WHEN 'agent' THEN scope = 'agent' AND company_agent_id = $3
                ELSE false
              END
+             AND ($4::bool = false OR is_latest = true)
+             AND ($5::text IS NULL OR entity_type = $5)
+             AND ($6::text IS NULL OR entity_id = $6)
+             AND ($7::timestamptz IS NULL OR valid_from IS NULL OR valid_from <= $7)
+             AND ($7::timestamptz IS NULL OR valid_to IS NULL OR valid_to >= $7)
+             AND ($8::timestamptz IS NULL OR document_date >= $8)
+             AND ($9::timestamptz IS NULL OR document_date <= $9)
+             AND ($10::timestamptz IS NULL OR event_date >= $10)
+             AND ($11::timestamptz IS NULL OR event_date <= $11)
            ORDER BY updated_at DESC
-           LIMIT $4"#,
+           LIMIT $12"#,
     )
     .bind(company_id)
-    .bind(mode_key)
-    .bind(agent_bind)
+    .bind(&options.mode_key)
+    .bind(options.agent_bind)
+    .bind(options.latest_only)
+    .bind(options.entity_type.as_deref())
+    .bind(options.entity_id.as_deref())
+    .bind(options.valid_at)
+    .bind(options.document_date_from)
+    .bind(options.document_date_to)
+    .bind(options.event_date_from)
+    .bind(options.event_date_to)
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|r| r.id).collect())
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+async fn temporal_ranked_ids(
+    pool: &PgPool,
+    company_id: Uuid,
+    options: &HybridSearchOptions,
+    limit: i64,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let anchor = options
+        .valid_at
+        .or(options.event_date_to)
+        .or(options.event_date_from)
+        .or(options.document_date_to)
+        .or(options.document_date_from)
+        .unwrap_or_else(Utc::now);
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"SELECT id
+           FROM company_memory_entries
+           WHERE company_id = $1
+             AND CASE $2::text
+               WHEN 'all' THEN true
+               WHEN 'shared' THEN scope = 'shared'
+               WHEN 'agent' THEN scope = 'agent' AND company_agent_id = $3
+               ELSE false
+             END
+             AND ($4::bool = false OR is_latest = true)
+             AND ($5::text IS NULL OR entity_type = $5)
+             AND ($6::text IS NULL OR entity_id = $6)
+             AND ($7::timestamptz IS NULL OR valid_from IS NULL OR valid_from <= $7)
+             AND ($7::timestamptz IS NULL OR valid_to IS NULL OR valid_to >= $7)
+             AND ($8::timestamptz IS NULL OR document_date >= $8)
+             AND ($9::timestamptz IS NULL OR document_date <= $9)
+             AND ($10::timestamptz IS NULL OR event_date >= $10)
+             AND ($11::timestamptz IS NULL OR event_date <= $11)
+           ORDER BY ABS(EXTRACT(EPOCH FROM (COALESCE(event_date, document_date, updated_at) - $12::timestamptz))) ASC,
+                    updated_at DESC
+           LIMIT $13"#,
+    )
+    .bind(company_id)
+    .bind(&options.mode_key)
+    .bind(options.agent_bind)
+    .bind(options.latest_only)
+    .bind(options.entity_type.as_deref())
+    .bind(options.entity_id.as_deref())
+    .bind(options.valid_at)
+    .bind(options.document_date_from)
+    .bind(options.document_date_to)
+    .bind(options.event_date_from)
+    .bind(options.event_date_to)
+    .bind(anchor)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 async fn vector_ranked_ids(
     pool: &PgPool,
     company_id: Uuid,
     query_emb: &[f32],
-    mode_key: &str,
-    agent_bind: Uuid,
+    options: &HybridSearchOptions,
     limit: usize,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<IdEmbRow> = sqlx::query_as(
-        r#"SELECT id, embedding_json FROM company_memory_entries
-           WHERE company_id = $1
-             AND embedding_json IS NOT NULL
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"SELECT c.memory_id
+           FROM memory_chunks c
+           JOIN company_memory_entries e ON e.id = c.memory_id
+           WHERE c.company_id = $1
+             AND c.embedding_vec IS NOT NULL
              AND CASE $2::text
                WHEN 'all' THEN true
-               WHEN 'shared' THEN scope = 'shared'
-               WHEN 'agent' THEN scope = 'agent' AND company_agent_id = $3
+               WHEN 'shared' THEN e.scope = 'shared'
+               WHEN 'agent' THEN e.scope = 'agent' AND e.company_agent_id = $3
                ELSE false
-             END"#,
+             END
+             AND ($4::bool = false OR e.is_latest = true)
+             AND ($5::text IS NULL OR COALESCE(c.entity_type, e.entity_type) = $5)
+             AND ($6::text IS NULL OR COALESCE(c.entity_id, e.entity_id) = $6)
+             AND ($7::timestamptz IS NULL OR COALESCE(c.valid_from, e.valid_from) IS NULL OR COALESCE(c.valid_from, e.valid_from) <= $7)
+             AND ($7::timestamptz IS NULL OR COALESCE(c.valid_to, e.valid_to) IS NULL OR COALESCE(c.valid_to, e.valid_to) >= $7)
+             AND ($8::timestamptz IS NULL OR COALESCE(c.document_date, e.document_date) >= $8)
+             AND ($9::timestamptz IS NULL OR COALESCE(c.document_date, e.document_date) <= $9)
+             AND ($10::timestamptz IS NULL OR COALESCE(c.event_date, e.event_date) >= $10)
+             AND ($11::timestamptz IS NULL OR COALESCE(c.event_date, e.event_date) <= $11)
+           GROUP BY c.memory_id
+           ORDER BY MIN(c.embedding_vec <=> $12::vector) ASC
+           LIMIT $13"#,
     )
     .bind(company_id)
-    .bind(mode_key)
-    .bind(agent_bind)
+    .bind(&options.mode_key)
+    .bind(options.agent_bind)
+    .bind(options.latest_only)
+    .bind(options.entity_type.as_deref())
+    .bind(options.entity_id.as_deref())
+    .bind(options.valid_at)
+    .bind(options.document_date_from)
+    .bind(options.document_date_to)
+    .bind(options.event_date_from)
+    .bind(options.event_date_to)
+    .bind(vector_literal(query_emb))
+    .bind(limit as i64)
     .fetch_all(pool)
     .await?;
-
-    let mut scored: Vec<(Uuid, f32)> = Vec::new();
-    for r in rows {
-        if let Some(j) = r.embedding_json.as_ref().and_then(json_vec_f32) {
-            if j.len() == query_emb.len() || (j.len() == DEFAULT_EMBED_DIM && query_emb.len() == DEFAULT_EMBED_DIM) {
-                let s = cosine_similarity(query_emb, &j);
-                scored.push((r.id, s));
-            }
-        }
-    }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(scored.into_iter().take(limit).map(|x| x.0).collect())
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 #[derive(Deserialize)]
@@ -401,14 +597,66 @@ pub struct HybridMeta {
     pub expansion_terms: usize,
 }
 
-/// Parallel: multiple FTS (query expansion) + query embedding + recency; then vector ANN in-process; RRF; optional reranker HTTP.
-pub async fn hybrid_search_memory_ids(
+async fn fetch_supporting_chunks(
+    pool: &PgPool,
+    company_id: Uuid,
+    memory_id: Uuid,
+) -> Result<Vec<SupportingChunk>, sqlx::Error> {
+    let rows: Vec<(Uuid, i32, String, String, Option<String>)> = sqlx::query_as(
+        r#"SELECT c.id, c.chunk_index, COALESCE(c.redacted_text, c.text), c.modality, a.source_uri
+           FROM memory_chunks c
+           LEFT JOIN memory_artifacts a ON a.id = c.artifact_id
+           WHERE c.company_id = $1 AND c.memory_id = $2
+           ORDER BY c.chunk_index
+           LIMIT 3"#,
+    )
+    .bind(company_id)
+    .bind(memory_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(chunk_id, chunk_index, text, modality, source_label)| SupportingChunk {
+            chunk_id,
+            chunk_index,
+            text: text.chars().take(320).collect(),
+            modality,
+            source_label,
+        })
+        .collect())
+}
+
+async fn fetch_lineage_summary(
+    pool: &PgPool,
+    company_id: Uuid,
+    memory_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(i32, bool, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT version, is_latest, supersedes_memory_id
+           FROM company_memory_entries
+           WHERE company_id = $1 AND id = $2"#,
+    )
+    .bind(company_id)
+    .bind(memory_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(version, is_latest, supersedes)| {
+        if supersedes.is_some() {
+            format!("v{version}{}", if is_latest { " (latest)" } else { "" })
+        } else if is_latest {
+            "v1 (latest)".to_string()
+        } else {
+            format!("v{version}")
+        }
+    }))
+}
+
+pub async fn hybrid_search_memory_debug(
     pool: &PgPool,
     company_id: Uuid,
     q_search: &str,
-    mode_key: &str,
-    agent_bind: Uuid,
-) -> Result<(Vec<Uuid>, HybridMeta), sqlx::Error> {
+    options: &HybridSearchOptions,
+) -> Result<(Vec<HybridMatch>, HybridMeta), sqlx::Error> {
     let client = Client::new();
     let client_embed = client.clone();
     let q_owned = q_search.to_string();
@@ -427,7 +675,7 @@ pub async fn hybrid_search_memory_ids(
     let rrf_out: usize = std::env::var("HSM_MEMORY_HYBRID_LIMIT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+        .unwrap_or(options.limit.max(1));
 
     let w_fts: f64 = std::env::var("HSM_MEMORY_RRF_WEIGHT_FTS")
         .ok()
@@ -442,14 +690,24 @@ pub async fn hybrid_search_memory_ids(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.45);
 
+    let w_graph: f64 = std::env::var("HSM_MEMORY_RRF_WEIGHT_GRAPH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.8);
+    let w_temporal: f64 = std::env::var("HSM_MEMORY_RRF_WEIGHT_TEMPORAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.65);
+
     let expansion_terms = query_expansion_terms(&client, q_search).await;
     let exp_n = expansion_terms.len();
 
     let pool_a = pool.clone();
     let pool_b = pool.clone();
-    let mk_fts = mode_key.to_string();
-    let mk_rec = mode_key.to_string();
     let terms = expansion_terms.clone();
+    let opts_fts = options.clone();
+    let opts_rec = options.clone();
+    let opts_temporal = options.clone();
 
     let fts_parallel = async move {
         let mut channels: Vec<Vec<Uuid>> = Vec::new();
@@ -459,7 +717,7 @@ pub async fn hybrid_search_memory_ids(
             } else {
                 format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"))
             };
-            let ids = fts_ranked_ids(&pool_a, company_id, &term, &mk_fts, agent_bind, &like, limit_fts).await?;
+            let ids = fts_ranked_ids(&pool_a, company_id, &term, &opts_fts, &like, limit_fts).await?;
             if !ids.is_empty() {
                 channels.push(ids);
             }
@@ -474,9 +732,12 @@ pub async fn hybrid_search_memory_ids(
         ollama_embed_text(&client_embed, &q_owned).await.ok()
     };
 
-    let rec_parallel = async move { recency_ranked_ids(&pool_b, company_id, &mk_rec, agent_bind, limit_rec).await };
+    let rec_parallel = async move { recency_ranked_ids(&pool_b, company_id, &opts_rec, limit_rec).await };
+    let temporal_parallel =
+        async move { temporal_ranked_ids(pool, company_id, &opts_temporal, limit_rec).await };
 
-    let (fts_channels_result, embed_res, rec_res) = tokio::join!(fts_parallel, embed_parallel, rec_parallel);
+    let (fts_channels_result, embed_res, rec_res, temporal_res) =
+        tokio::join!(fts_parallel, embed_parallel, rec_parallel, temporal_parallel);
 
     let fts_channels: Vec<Vec<Uuid>> = fts_channels_result.unwrap_or_else(|e| {
         tracing::debug!(target: "hsm.company_memory", ?e, "parallel fts channels failed");
@@ -486,9 +747,13 @@ pub async fn hybrid_search_memory_ids(
         tracing::debug!(target: "hsm.company_memory", ?e, "recency channel failed");
         vec![]
     });
+    let temporal_ids: Vec<Uuid> = temporal_res.unwrap_or_else(|e| {
+        tracing::debug!(target: "hsm.company_memory", ?e, "temporal channel failed");
+        vec![]
+    });
 
     let vec_ids: Vec<Uuid> = if let Some(ref emb) = embed_res {
-        vector_ranked_ids(pool, company_id, emb, mode_key, agent_bind, limit_vec).await?
+        vector_ranked_ids(pool, company_id, emb, options, limit_vec).await?
     } else {
         vec![]
     };
@@ -514,12 +779,34 @@ pub async fn hybrid_search_memory_ids(
         weights.push(w_rec);
         names.push("recency".to_string());
     }
+    if !temporal_ids.is_empty() {
+        channels.push(temporal_ids);
+        weights.push(w_temporal);
+        names.push("temporal".to_string());
+    }
 
     let mut fused = if channels.is_empty() {
         vec![]
     } else {
         reciprocal_rank_fusion_weighted(&channels, &weights, rrf_out)
     };
+
+    let seed_ids: Vec<Uuid> = fused.iter().take(12).copied().collect();
+    let graph_ids: Vec<Uuid> = if seed_ids.is_empty() {
+        vec![]
+    } else {
+        expand_via_graph(pool, company_id, &seed_ids, 2)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    if !graph_ids.is_empty() {
+        channels.push(graph_ids);
+        weights.push(w_graph);
+        names.push("graph".to_string());
+        fused = reciprocal_rank_fusion_weighted(&channels, &weights, rrf_out);
+    }
 
     let mut reranked = false;
     if fused.len() > 2 && std::env::var("HSM_MEMORY_RERANK_URL").map(|s| !s.trim().is_empty()).unwrap_or(false) {
@@ -544,14 +831,50 @@ pub async fn hybrid_search_memory_ids(
         }
     }
 
+    let mut matched_via: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for (channel_name, ids) in names.iter().zip(channels.iter()) {
+        let prefix = if channel_name.starts_with("fts_") {
+            "fts".to_string()
+        } else {
+            channel_name.clone()
+        };
+        for id in ids {
+            let entry = matched_via.entry(*id).or_default();
+            if !entry.iter().any(|x| x == &prefix) {
+                entry.push(prefix.clone());
+            }
+        }
+    }
+
     let meta = HybridMeta {
         mode: "hybrid",
         channels: names,
         reranked,
         expansion_terms: exp_n,
     };
+    let latest_only = options.latest_only;
+    let mut matches = Vec::new();
+    for id in fused.iter().take(options.limit.max(1)) {
+        matches.push(HybridMatch {
+            id: *id,
+            matched_via: matched_via.remove(id).unwrap_or_default(),
+            supporting_chunks: fetch_supporting_chunks(pool, company_id, *id).await?,
+            lineage_summary: fetch_lineage_summary(pool, company_id, *id).await?,
+            latest_version_only: latest_only,
+        });
+    }
+    Ok((matches, meta))
+}
 
-    Ok((fused, meta))
+/// Parallel: multiple FTS (query expansion) + pgvector + graph + temporal + recency.
+pub async fn hybrid_search_memory_ids_with_options(
+    pool: &PgPool,
+    company_id: Uuid,
+    q_search: &str,
+    options: &HybridSearchOptions,
+) -> Result<(Vec<Uuid>, HybridMeta), sqlx::Error> {
+    let (matches, meta) = hybrid_search_memory_debug(pool, company_id, q_search, options).await?;
+    Ok((matches.into_iter().map(|m| m.id).collect(), meta))
 }
 
 #[cfg(test)]
@@ -568,5 +891,11 @@ mod tests {
         let fused = reciprocal_rank_fusion_weighted(&[ch1, ch2], &[1.0, 1.0], 10);
         assert!(fused.len() >= 2);
         assert_eq!(fused[0], b);
+    }
+
+    #[test]
+    fn vector_literal_formats_pgvector_input() {
+        let lit = vector_literal(&[0.25, -0.5, 1.0]);
+        assert_eq!(lit, "[0.25,-0.5,1]");
     }
 }

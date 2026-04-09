@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "company-console",
-      "runtimeExecutable": "bash",
-      "runtimeArgs": ["scripts/run-next-with-path.sh", "dev", "-p", "3050"],
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
       "port": 3050
     }
   ]

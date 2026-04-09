@@ -61,6 +61,7 @@ pub mod pi_ai_compat;
 pub mod pi_tools;
 pub mod real;
 pub mod reward;
+pub mod runtime_control;
 pub mod social_memory;
 pub mod stigmergic_policy;
 pub mod vault;

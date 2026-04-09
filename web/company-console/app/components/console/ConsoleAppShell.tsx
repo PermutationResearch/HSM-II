@@ -27,6 +27,7 @@ import {
   PanelLeftOpen,
   PanelRight,
   PanelRightClose,
+  PlugZap,
   ShieldCheck,
   Store,
   type LucideIcon,
@@ -79,6 +80,7 @@ const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
     heading: "Team & procedures",
     items: [
       { href: "/workspace/agents", label: "Agents", icon: Bot, title: "Roster, files, memory, skills" },
+      { href: "/workspace/credentials", label: "Credentials", icon: PlugZap, title: "Company API keys and connectors" },
       { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen, title: "SOPs and templates" },
       { href: "/workspace/marketplace", label: "Marketplace", icon: Store, title: "Install company packs" },
     ],
@@ -128,6 +130,7 @@ function breadcrumbsForPath(pathname: string): Crumb[] {
     ];
   }
   if (pathname.startsWith("/workspace/agents")) return [root, { label: "Agents", href: null }];
+  if (pathname.startsWith("/workspace/credentials")) return [root, { label: "Credentials", href: null }];
   if (pathname.startsWith("/workspace/issues")) return [root, { label: "Issues", href: null }];
   if (pathname.startsWith("/workspace/approvals")) return [root, { label: "Approvals", href: null }];
   if (pathname.startsWith("/workspace/costs")) return [root, { label: "Costs", href: null }];
@@ -396,6 +399,14 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             <Bot className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
             <span className="sr-only">Agents</span>
           </Link>
+          <Link
+            href="/workspace/credentials"
+            title="Credentials"
+            className="mt-1 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
+          >
+            <PlugZap className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Credentials</span>
+          </Link>
         </aside>
       )}
 
@@ -492,6 +503,7 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
           <CommandSeparator />
           <CommandGroup heading="Team & procedures">
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/agents"))}>Agents</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/credentials"))}>Credentials</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/playbooks"))}>Playbooks</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/marketplace"))}>Marketplace</CommandItem>
           </CommandGroup>

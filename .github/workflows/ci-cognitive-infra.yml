@@ -32,10 +32,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [openai, anthropic, ollama]
+        provider: [openai, anthropic, xai, ollama]
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
       # Optional: set secret OLLAMA_URL (or a reachable proxy URL) to enable ollama matrix lane.
       OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
       OLLAMA_MODEL: ${{ secrets.OLLAMA_MODEL }}
@@ -62,6 +63,15 @@ jobs:
                 exit 0
               fi
               export DEFAULT_LLM_MODEL="claude-3-5-sonnet-20241022"
+              SMOKE_RUN_LLM=1 bash scripts/smoke_e2e.sh
+              ;;
+            xai)
+              if [[ -z "${XAI_API_KEY:-}" ]]; then
+                echo "skip xai lane: XAI_API_KEY not configured"
+                exit 0
+              fi
+              export HSM_LLM_PROVIDER_ORDER="xai"
+              export DEFAULT_LLM_MODEL="grok-2-latest"
               SMOKE_RUN_LLM=1 bash scripts/smoke_e2e.sh
               ;;
             ollama)

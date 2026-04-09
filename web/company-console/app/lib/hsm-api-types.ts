@@ -87,15 +87,180 @@ export type HsmCompanyMemoryEntry = {
   updated_at: string;
 };
 
+export type HsmMemoryArtifact = {
+  id: string;
+  company_id: string;
+  memory_id?: string | null;
+  media_type: string;
+  source_type: string;
+  source_uri?: string | null;
+  storage_uri?: string | null;
+  title?: string | null;
+  checksum?: string | null;
+  size_bytes?: number | null;
+  extraction_status:
+    | "queued"
+    | "extracting"
+    | "chunked"
+    | "summarized"
+    | "indexed"
+    | "retry_waiting"
+    | "failed"
+    | "dead_letter";
+  extraction_provider?: string | null;
+  retry_count: number;
+  last_error?: string | null;
+  document_date?: string | null;
+  event_date?: string | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  contains_pii: boolean;
+  redacted_text?: string | null;
+  extracted_text?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HsmMemoryChunk = {
+  id: string;
+  artifact_id: string;
+  memory_id?: string | null;
+  chunk_index: number;
+  text: string;
+  summary_l0?: string | null;
+  summary_l1?: string | null;
+  token_count: number;
+  modality: string;
+  page_number?: number | null;
+  time_start_ms?: number | null;
+  time_end_ms?: number | null;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  document_date?: string | null;
+  event_date?: string | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  source_range?: Record<string, unknown>;
+  contains_pii: boolean;
+  redacted_text?: string | null;
+};
+
+export type HsmMemoryMatch = {
+  id: string;
+  matched_via: string[];
+  supporting_chunks: Array<{
+    chunk_id: string;
+    chunk_index: number;
+    text: string;
+    modality: string;
+    source_label?: string | null;
+  }>;
+  lineage_summary?: string | null;
+  latest_version_only: boolean;
+};
+
+export type HsmMemoryInspect = {
+  memory: HsmCompanyMemoryEntry & {
+    supersedes_memory_id?: string | null;
+    is_latest: boolean;
+    version: number;
+    document_date?: string | null;
+    event_date?: string | null;
+    valid_from?: string | null;
+    valid_to?: string | null;
+    entity_type?: string | null;
+    entity_id?: string | null;
+    source_type?: string | null;
+    source_uri?: string | null;
+    chunk_id?: string | null;
+    source_range?: Record<string, unknown> | null;
+    contains_pii: boolean;
+    redacted_body?: string | null;
+    primary_artifact_id?: string | null;
+    source_artifact_count: number;
+    chunk_count: number;
+  };
+  artifacts: HsmMemoryArtifact[];
+  chunks: HsmMemoryChunk[];
+  lineage: Array<{
+    id: string;
+    version: number;
+    is_latest: boolean;
+    supersedes_memory_id?: string | null;
+  }>;
+};
+
 export type HsmCompanyAgentRow = {
   id: string;
   company_id: string;
   name: string;
   role: string;
   title?: string | null;
+  capabilities?: string | null;
+  reports_to?: string | null;
+  adapter_type?: string | null;
+  adapter_config?: unknown;
+  briefing?: string | null;
   status: string;
   budget_monthly_cents?: number | null;
   sort_order?: number;
+};
+
+export type HsmCompanyCredential = {
+  id: string;
+  company_id: string;
+  provider_key: string;
+  label: string;
+  env_var?: string | null;
+  masked_preview: string;
+  notes?: string | null;
+  status: "connected" | "missing" | "error";
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HsmSkillBankEntry = {
+  id?: string;
+  company_id?: string;
+  slug: string;
+  name: string;
+  description: string;
+  body?: string;
+  skill_path?: string;
+  source?: string;
+  updated_at?: string;
+  linked_agents?: string[];
+  linked_agent_count?: number;
+  company_count?: number;
+  company_names?: string[];
+};
+
+export type HsmBrowserProviderStatus = {
+  key: string;
+  label: string;
+  kind: string;
+  configured: boolean;
+  credential_preview?: string | null;
+  api_base: string;
+  prompt_cache_enabled?: boolean;
+  thinking_prefill_enabled?: boolean;
+};
+
+export type HsmThreadSession = {
+  id: string;
+  company_id: string;
+  session_key: string;
+  title: string;
+  participants: string[];
+  state: Record<string, unknown>;
+  is_active: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 /** `GET /api/company/companies/:id/spend/summary` */
@@ -113,6 +278,17 @@ export type HsmGoalRow = {
   title: string;
   description: string | null;
   status: string;
+  created_at: string;
+};
+
+/** `intelligence_signals` table row */
+export type HsmSignalRow = {
+  id: string;
+  kind: string;
+  description: string;
+  severity: number;
+  composition_success: boolean | null;
+  escalated_to: string | null;
   created_at: string;
 };
 
@@ -143,7 +319,57 @@ export type HsmIntelligenceSummary = {
   workforce: { agents_non_terminated: number };
   spend: { total_usd: number };
   workflow_feed: HsmWorkflowFeedEvent[];
+  signals?: {
+    recent: HsmSignalRow[];
+    by_kind_7d: Record<string, number>;
+  };
   error?: string;
+};
+
+/** `GET /api/company/companies/:id/self-improvement/summary` */
+export type HsmSelfImprovementSummary = {
+  total_failures_7d: number;
+  repeat_failure_rate_7d: number;
+  first_pass_success_rate_7d: number;
+  proposals_created_7d: number;
+  proposals_applied_7d: number;
+  rollback_rate_7d: number;
+  avg_recovery_hours_7d?: number | null;
+};
+
+export type HsmSelfImprovementProposal = {
+  id: string;
+  failure_event_id?: string | null;
+  proposal_type: string;
+  target_surface: string;
+  patch_kind: string;
+  rationale: string;
+  status:
+    | "proposed"
+    | "replay_passed"
+    | "replay_failed"
+    | "applied"
+    | "rejected"
+    | "rolled_back";
+  auto_apply_eligible: boolean;
+  replay_passed?: boolean | null;
+  replay_report?: Record<string, unknown> | null;
+  applied_at?: string | null;
+  created_at: string;
+};
+
+/** `GET .../promotions` — store promotion audit row */
+export type HsmStorePromotion = {
+  id: string;
+  company_id: string;
+  source_store: "roodb" | "ladybug" | "sqlite";
+  source_id: string;
+  source_snapshot: Record<string, unknown>;
+  target_table: string;
+  target_id?: string | null;
+  promoted_by: string;
+  status: "promoted" | "rolled_back" | "superseded";
+  created_at: string;
 };
 
 /** `GET .../agents/:agentId/inventory` — company skill row without body */
@@ -189,6 +415,7 @@ export type HsmAgentInventory = {
 /** `GET /api/company/companies/:id/ops/overview` */
 export type HsmCompanyOpsOverview = {
   company: HsmCompanyRow;
+  profile?: HsmCompanyProfile | null;
   ops_config: {
     loaded: boolean;
     path?: string | null;
@@ -245,5 +472,123 @@ export type HsmCompanyOpsOverview = {
     avg_hidden_tools?: number;
     error?: string;
   };
+  roi?: {
+    avg_cycle_time_hours_30d: number;
+    manual_interventions_per_task_7d: number;
+    retries_per_task_7d: number;
+    tasks_closed_per_day_14d: number;
+    tasks_created_7d: number;
+    manual_interventions_7d: number;
+    retries_7d: number;
+  };
+  universality?: {
+    profile_size_tier: string;
+    profile_business_model: string;
+    time_to_first_value_hours?: number | null;
+    setup_completion_rate: number;
+    template_adoption_events_30d: number;
+    cost_per_resolved_operation: number;
+  };
   integration_status: Record<string, unknown>;
+};
+
+export type HsmCompanyConnector = {
+  id: string;
+  company_id: string;
+  connector_key: string;
+  label: string;
+  provider_key: string;
+  base_url?: string | null;
+  auth_mode: string;
+  credential_provider_key?: string | null;
+  policy: Record<string, unknown>;
+  status: string;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  last_error?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HsmConnectorTemplate = {
+  key: string;
+  label: string;
+  category: string;
+  provider_key: string;
+  auth_mode: string;
+  recommendation?: "must_have" | "optional" | "deferred" | string;
+};
+
+export type HsmEmailOperatorQueueItem = {
+  id: string;
+  company_id: string;
+  connector_key?: string | null;
+  mailbox: string;
+  thread_id?: string | null;
+  message_id?: string | null;
+  from_address: string;
+  subject: string;
+  body_text: string;
+  suggested_reply?: string | null;
+  suggested_by_agent?: string | null;
+  status: string;
+  owner_decision?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  sent_at?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HsmCompanyProfile = {
+  company_id: string;
+  industry: string;
+  business_model: string;
+  channel_mix: unknown;
+  compliance_level: string;
+  size_tier: "solo" | "team" | "org" | string;
+  inferred: boolean;
+  profile_source: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HsmWorkflowPack = {
+  key: string;
+  label: string;
+  default_risk: "low" | "medium" | "high" | string;
+  automation_limit: string;
+};
+
+export type HsmOperatorInbox = {
+  company_id: string;
+  profile: HsmCompanyProfile;
+  lanes: Array<{
+    id: string;
+    label: string;
+    item_kinds: string[];
+    sla?: string;
+  }>;
+  counts: {
+    tasks: number;
+    emails: number;
+    failures: number;
+    total: number;
+  };
+  items: Array<{
+    kind: "task" | "email" | "failure" | string;
+    id: string;
+    title: string;
+    state: string;
+    priority: number;
+    mailbox?: string;
+    from_address?: string;
+    body_text?: string;
+    suggested_reply?: string | null;
+    confidence?: number;
+    [key: string]: unknown;
+  }>;
 };

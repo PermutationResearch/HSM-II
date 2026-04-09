@@ -168,6 +168,7 @@ impl ToolRegistry {
     pub async fn execute(&mut self, call: ToolCall) -> ToolCallResult {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
+        crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "start");
 
         let env_merged: Option<crate::harness::HarnessRunEnvelope> = call
             .harness_run
@@ -188,6 +189,15 @@ impl ToolRegistry {
                     warn!("task trail append tool_denied failed: {}", e);
                 }
             }
+            crate::runtime_control::publish_completion(
+                crate::runtime_control::CompletionEvent::tool_completion(
+                    &call.name,
+                    &call.call_id,
+                    false,
+                    format!("blocked by policy: {reason}"),
+                ),
+            );
+            crate::runtime_control::mark_runtime_idle();
             return ToolCallResult {
                 call,
                 output: ToolOutput::error(format!("Tool blocked by policy: {reason}")),
@@ -217,6 +227,15 @@ impl ToolRegistry {
                 match appr.evaluate_or_queue(&key, &summary) {
                     Ok(crate::harness::ApprovalOutcome::Allow) => {}
                     Ok(crate::harness::ApprovalOutcome::Deny) => {
+                        crate::runtime_control::publish_completion(
+                            crate::runtime_control::CompletionEvent::tool_completion(
+                                &call.name,
+                                &call.call_id,
+                                false,
+                                "tool denied by approval store".to_string(),
+                            ),
+                        );
+                        crate::runtime_control::mark_runtime_idle();
                         return ToolCallResult {
                             call,
                             output: ToolOutput::error("Tool denied by approval store".to_string()),
@@ -225,6 +244,15 @@ impl ToolRegistry {
                         };
                     }
                     Err(e) => {
+                        crate::runtime_control::publish_completion(
+                            crate::runtime_control::CompletionEvent::tool_completion(
+                                &call.name,
+                                &call.call_id,
+                                false,
+                                e.to_string(),
+                            ),
+                        );
+                        crate::runtime_control::mark_runtime_idle();
                         return ToolCallResult {
                             call,
                             output: ToolOutput::error(e.to_string()),
@@ -290,6 +318,22 @@ impl ToolRegistry {
             warn!("Tool not found: {}", call.name);
             ToolOutput::error(format!("Tool '{}' not found", call.name))
         };
+
+        crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "finish");
+        crate::runtime_control::publish_completion(crate::runtime_control::CompletionEvent::tool_completion(
+            &call.name,
+            &call.call_id,
+            output.success,
+            if output.success {
+                "tool completed".to_string()
+            } else {
+                output
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "tool failed".to_string())
+            },
+        ));
+        crate::runtime_control::mark_runtime_idle();
 
         ToolCallResult {
             call,
@@ -454,6 +498,7 @@ mod tests {
         assert!(registry.has("firecrawl_scrape"), "firecrawl_scrape missing");
         assert!(registry.has("browser_navigate"), "browser_navigate missing");
         assert!(registry.has("browser_wait"), "browser_wait missing");
+        assert!(registry.has("browser_use_run"), "browser_use_run missing");
         assert!(registry.has("git_status"), "git_status missing");
         assert!(registry.has("calculator"), "calculator missing");
         assert!(registry.has("system_info"), "system_info missing");

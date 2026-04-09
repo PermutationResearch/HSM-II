@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode},
     response::Html,
     routing::{get, post},
     Json, Router,
@@ -165,8 +165,29 @@ pub fn console_router(state: ConsoleState) -> Router {
             post(post_council_socratic).layer(DefaultBodyLimit::max(COUNCIL_SOCRATIC_MAX_BYTES)),
         )
         .merge(crate::company_os::router())
-        .layer(CorsLayer::permissive())
+        .layer(console_cors_layer())
         .with_state(state)
+}
+
+fn console_cors_layer() -> CorsLayer {
+    let origins_raw = std::env::var("HSM_CONSOLE_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://127.0.0.1:3001,http://localhost:3001".to_string());
+    let origins = origins_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    let methods = [Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS];
+    if origins.iter().any(|s| *s == "*") {
+        return CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(methods);
+    }
+    let parsed = origins
+        .into_iter()
+        .filter_map(|s| s.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    CorsLayer::new().allow_origin(parsed).allow_methods(methods)
 }
 
 /// Browser-friendly hint: this process is an API; the Next.js UI runs on another port.

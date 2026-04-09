@@ -12,17 +12,25 @@ mod agents;
 mod bundle;
 mod company_memory;
 mod company_memory_hybrid;
+pub mod intelligence_signals;
 pub mod markdown_toc;
+mod memory_engine;
 mod memory_summaries;
 pub mod onboarding_contracts;
 mod paperclip_import;
-mod paperclip_sync;
+pub mod paperclip_sync;
+pub mod self_improvement;
 mod spend;
+mod store_promotion;
+mod workspace_catalog;
 mod workspace_files;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderMap, StatusCode},
+    middleware::Next,
+    response::Response,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -31,11 +39,12 @@ use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use futures_util::stream;
 pub use spend::spawn_record_llm_spend;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json as SqlxJson;
 use sqlx::{PgPool, Postgres, Transaction};
-use std::path::Path as StdPath;
+use std::path::{Path as StdPath, PathBuf};
 use uuid::Uuid;
 
 use self::onboarding_contracts::{
@@ -59,7 +68,15 @@ pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
     if url.is_empty() {
         return Ok(None);
     }
-    let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
+    let max_conns = std::env::var("HSM_COMPANY_OS_DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(20);
+    let pool = PgPoolOptions::new()
+        .max_connections(max_conns)
+        .connect(url)
+        .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(Some(pool))
 }
@@ -68,8 +85,13 @@ pub fn router() -> Router<ConsoleState> {
     Router::new()
         .merge(agents::router())
         .merge(agent_runs::router())
+        .merge(intelligence_signals::router())
+        .merge(self_improvement::router())
+        .merge(store_promotion::router())
+        .merge(workspace_catalog::router())
         .merge(workspace_files::router())
         .merge(company_memory::router())
+        .merge(memory_engine::router())
         .route("/api/company/health", get(company_health))
         .route("/api/company/import", post(import_company_bundle))
         .route(
@@ -197,6 +219,20 @@ pub fn router() -> Router<ConsoleState> {
             post(review_task_handoff),
         )
         .route(
+            "/api/company/task-handoffs/:handoff_id/actions/token",
+            post(issue_handoff_action_token),
+        )
+        .route(
+            "/api/company/task-handoffs/actions/verify",
+            post(verify_handoff_action_token),
+        )
+        .route("/api/company/runtime/activity", get(get_runtime_activity))
+        .route("/api/company/runtime/events/stream", get(stream_runtime_events))
+        .route(
+            "/api/company/runtime/portability-matrix",
+            get(runtime_portability_matrix),
+        )
+        .route(
             "/api/company/companies/:company_id/improvement-runs",
             get(list_improvement_runs).post(create_improvement_run),
         )
@@ -261,6 +297,56 @@ pub fn router() -> Router<ConsoleState> {
             "/api/company/tasks/:task_id/stigmergic-note",
             post(post_task_stigmergic_note),
         )
+        .layer(axum::middleware::from_fn(require_company_api_auth))
+}
+
+fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut v = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        v |= x ^ y;
+    }
+    v == 0
+}
+
+async fn require_company_api_auth(
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let insecure_bypass = std::env::var("HSM_COMPANY_API_ALLOW_NO_AUTH")
+        .ok()
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        })
+        .unwrap_or(false);
+    let Some(expected) = std::env::var("HSM_COMPANY_API_BEARER_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        if insecure_bypass {
+            return Ok(next.run(request).await);
+        }
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if request.uri().path() == "/api/company/health" {
+        return Ok(next.run(request).await);
+    }
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !constant_time_eq_bytes(token.as_bytes(), expected.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 fn hash_idem_payload(v: &Value) -> String {
@@ -307,6 +393,7 @@ async fn automation_tick(pool: &PgPool) -> Result<(), sqlx::Error> {
     enqueue_sla_escalation_jobs(pool).await?;
     process_due_automation_jobs(pool).await?;
     run_auto_revert_checks(pool).await?;
+    let _ = self_improvement::maybe_run_weekly_nudges(pool).await;
     Ok(())
 }
 
@@ -351,12 +438,15 @@ async fn process_due_automation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
 
     for (job_id, company_id, kind, payload, attempts, max_attempts) in jobs {
-        let _ = sqlx::query(
-            "UPDATE automation_jobs SET status = 'running', updated_at = NOW() WHERE id = $1",
+        let claimed: Option<i64> = sqlx::query_scalar(
+            "UPDATE automation_jobs SET status = 'running', updated_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING 1",
         )
         .bind(job_id)
-        .execute(pool)
-        .await;
+        .fetch_optional(pool)
+        .await?;
+        if claimed != Some(1) {
+            continue;
+        }
 
         let run_res = match kind.as_str() {
             "sla_escalation" => run_sla_escalation_job(pool, company_id, &payload.0).await,
@@ -1887,6 +1977,15 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/dri-assignments", "summary": "List / create org-level DRI assignments" },
         { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/dri-assignments/{row_id}", "summary": "Update or delete a DRI assignment row" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills", "summary": "Imported skill templates saved from pack skills/<slug>/SKILL.md files" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills/bank", "summary": "Skill bank: current company skills, agent-linked usage, and recommended skills used in other companies" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills/agentskills/export", "summary": "Export company skill bank in agentskills.io-compatible bundle format with provenance" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/skills/agentskills/import", "summary": "Import agentskills.io-compatible bundle with overwrite/dry-run controls and provenance preservation" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/migrations/legacy-agent-data", "summary": "Migrate legacy agent data (skills, memories, allowlists) with dry-run first pattern" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/skills/bootstrap/prune", "summary": "Disable or prune auto-bootstrapped Hermes packs by provenance source/pack" },
+        { "scope": "company", "methods": ["GET", "PUT", "DELETE"], "path": "/api/company/companies/{company_id}/credentials", "summary": "Store masked company credentials for operator-connected services and MCP-style tools" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/browser/providers", "summary": "Cloud-browser and provider status surface (Firecrawl, Browserbase, Browser Use, xAI)" },
+        { "scope": "company", "methods": ["GET", "PUT"], "path": "/api/company/companies/{company_id}/thread-sessions", "summary": "List or upsert shared thread sessions for multi-operator context handoff" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/thread-sessions/{session_key}/join", "summary": "Join shared thread session participant list" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/yc-bench-profile", "summary": "Deterministic YC-Bench controller profile derived from company context, workforce agents, and imported skills" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/export", "summary": "Export bundle JSON" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/spend/summary", "summary": "Spend rollup" },
@@ -1908,6 +2007,16 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/export.md", "summary": "Export shared memories as SHARED_MEMORY_INDEX.md markdown" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/{memory_id}/delete", "summary": "Delete memory entry (POST alias when DELETE is blocked)" },
         { "scope": "company", "methods": ["PATCH", "DELETE"], "path": "/api/company/companies/{company_id}/memory/{memory_id}", "summary": "Update or delete memory entry" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/ingest/web", "summary": "Queue web ingest into memory_artifacts + memory_chunks + canonical company_memory_entries" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/ingest/file", "summary": "Queue file ingest (text, markdown, json, csv, html, pdf with extracted_text override)" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/ingest/audio", "summary": "Queue audio transcript ingest into multimodal memory substrate" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/ingest/image", "summary": "Queue image OCR/caption ingest into multimodal memory substrate" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/artifacts", "summary": "List artifact ingest jobs and statuses (queued, extracting, chunked, indexed, retry_waiting, dead_letter)" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/artifacts/{artifact_id}", "summary": "Inspect one artifact plus its chunks" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/memory/artifacts/{artifact_id}/retry", "summary": "Retry failed or dead-letter artifact ingest" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/{memory_id}/inspect", "summary": "Memory inspector: canonical node + artifacts + chunks + lineage" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/retrieval-debug?q=", "summary": "Run chunk-level retrieval with graph/time filters and matched_via debug output" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/memory/metrics", "summary": "Memory ingest and retrieval-readiness metrics" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/tasks", "summary": "List / create tasks (optional capability_refs[])" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/tasks/queue", "summary": "Filtered task queue (tabs)" },
         { "scope": "company", "methods": ["GET", "POST"], "path": "/api/company/companies/{company_id}/spawn-rules", "summary": "Spawn rules" },
@@ -1929,9 +2038,18 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/run-telemetry", "summary": "Append run snapshot / log tail" },
         { "scope": "task", "methods": ["POST"], "path": "/api/company/tasks/{task_id}/stigmergic-note", "summary": "Append task handoff note (context_notes); shown in llm-context" },
         { "scope": "task", "methods": ["GET"], "path": "/api/company/tasks/{task_id}/llm-context", "summary": "LLM: company context + vision alignment (YC-Bench strategy snapshot) + shared memories + task spec/attachments + agent profile" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/promote/roodb-skills", "summary": "Promote RooDB skills into company_memory_entries with provenance audit" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/promote/ladybug-bundle", "summary": "Import Ladybug beliefs/skills bundle into company_memory_entries" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/promote/rollback/{promotion_id}", "summary": "Rollback a promotion (deletes target row, marks rolled_back)" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/promotions", "summary": "List store promotion audit trail (RooDB/Ladybug → Postgres)" },
         { "scope": "global", "methods": ["GET"], "path": "/api/company/health", "summary": "Postgres connectivity" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/import", "summary": "Import company bundle" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/{handoff_id}/review", "summary": "Review handoff" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/{handoff_id}/actions/token", "summary": "Issue signed approval action tokens for chat buttons" },
+        { "scope": "global", "methods": ["POST"], "path": "/api/company/task-handoffs/actions/verify", "summary": "Verify signed approval action and apply handoff decision" },
+        { "scope": "global", "methods": ["GET"], "path": "/api/company/runtime/activity", "summary": "Runtime activity heartbeat for smart inactivity timeouts" },
+        { "scope": "global", "methods": ["GET"], "path": "/api/company/runtime/events/stream", "summary": "SSE stream for background completion notifications" },
+        { "scope": "global", "methods": ["GET"], "path": "/api/company/runtime/portability-matrix", "summary": "Terminal backend portability matrix (local/docker/ssh/daytona/modal/singularity) with hibernation hints" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/improvement-runs/{run_id}/decision", "summary": "Decision on improvement run" },
         { "scope": "global", "methods": ["POST"], "path": "/api/company/go-live-checklist/{item_id}/complete", "summary": "Complete checklist item" }
     ])
@@ -2089,7 +2207,15 @@ async fn create_company(
     .fetch_one(pool)
     .await;
     match row {
-        Ok(c) => Ok((StatusCode::CREATED, Json(json!({ "company": c })))),
+        Ok(c) => {
+            let bootstrap_imported = bootstrap_company_skills(pool, c.id, &c.slug, &c.display_name, None)
+                .await
+                .unwrap_or(0);
+            Ok((
+                StatusCode::CREATED,
+                Json(json!({ "company": c, "bootstrap": { "imported": bootstrap_imported } })),
+            ))
+        }
         Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("23505") => Err((
             StatusCode::CONFLICT,
             Json(json!({ "error": "slug already exists" })),
@@ -2219,6 +2345,183 @@ pub(super) fn derive_issue_key_prefix(slug: &str) -> String {
     } else {
         "TSK".to_string()
     }
+}
+
+fn repo_root_guess() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn collect_skill_markdowns(root: &StdPath, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_skill_markdowns(&p, out);
+            continue;
+        }
+        let is_skill = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("SKILL.md"))
+            .unwrap_or(false);
+        if is_skill {
+            out.push(p);
+        }
+    }
+}
+
+fn skill_slug_from_path(path: &StdPath) -> String {
+    let mut parts = Vec::new();
+    for c in path.components() {
+        let s = c.as_os_str().to_string_lossy();
+        if s == "hermes-main" {
+            parts.clear();
+            continue;
+        }
+        if s.eq_ignore_ascii_case("SKILL.md") {
+            break;
+        }
+        parts.push(s.to_string());
+    }
+    parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase()
+}
+
+fn title_desc_from_body(slug: &str, body: &str) -> (String, String) {
+    let title = body
+        .lines()
+        .find_map(|line| line.strip_prefix("# ").map(str::trim).filter(|s| !s.is_empty()))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            slug.split('/')
+                .last()
+                .unwrap_or("Hermes Skill")
+                .replace('-', " ")
+        });
+    let description = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or("Bootstrapped Hermes skill")
+        .to_string();
+    (title, description)
+}
+
+fn business_model_from_hints(slug: &str, display_name: &str, vertical: Option<&str>) -> String {
+    let combined = format!(
+        "{} {} {}",
+        slug.to_ascii_lowercase(),
+        display_name.to_ascii_lowercase(),
+        vertical.unwrap_or("").to_ascii_lowercase()
+    );
+    if combined.contains("commerce") || combined.contains("ecom") || combined.contains("shop") {
+        return "commerce".to_string();
+    }
+    if combined.contains("content") || combined.contains("creator") || combined.contains("media") {
+        return "content".to_string();
+    }
+    if combined.contains("saas") || combined.contains("software") {
+        return "saas".to_string();
+    }
+    "services".to_string()
+}
+
+fn bootstrap_pack_for_skill(slug: &str, business_model: &str) -> Option<&'static str> {
+    let category = slug.split('/').next().unwrap_or("");
+    let core = [
+        "mcp",
+        "email",
+        "research",
+        "productivity",
+        "software-development",
+    ];
+    if core.contains(&category) {
+        return Some("core");
+    }
+    if (business_model == "commerce" || business_model == "content")
+        && category == "social-media"
+    {
+        return Some("growth");
+    }
+    if (business_model == "commerce" || business_model == "content")
+        && (category == "media"
+            || (category == "creative"
+                && (slug.contains("video") || slug.contains("youtube"))))
+    {
+        return Some("video");
+    }
+    None
+}
+
+async fn bootstrap_company_skills(
+    pool: &PgPool,
+    company_id: Uuid,
+    company_slug: &str,
+    display_name: &str,
+    vertical_hint: Option<&str>,
+) -> Result<usize, sqlx::Error> {
+    let business_model = business_model_from_hints(company_slug, display_name, vertical_hint);
+    let root = repo_root_guess().join(".claude/skills/hermes-main");
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let mut files = Vec::new();
+    collect_skill_markdowns(&root, &mut files);
+    let mut imported = 0usize;
+    for path in files {
+        let slug = skill_slug_from_path(&path);
+        if slug.is_empty() {
+            continue;
+        }
+        let Some(pack) = bootstrap_pack_for_skill(&slug, &business_model) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (name, description) = title_desc_from_body(&slug, &raw);
+        let source = format!("hermes_bootstrap:{pack}");
+        sqlx::query(
+            r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (company_id, slug) DO UPDATE
+               SET name = EXCLUDED.name,
+                   description = EXCLUDED.description,
+                   body = EXCLUDED.body,
+                   skill_path = EXCLUDED.skill_path,
+                   source = EXCLUDED.source,
+                   updated_at = NOW()"#,
+        )
+        .bind(company_id)
+        .bind(&slug)
+        .bind(name)
+        .bind(description)
+        .bind(raw)
+        .bind(path.to_string_lossy().to_string())
+        .bind(source)
+        .execute(pool)
+        .await?;
+        imported += 1;
+    }
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, 'skills_bootstrap', 'bootstrap_hermes_skills', 'company', $2, $3, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(company_id.to_string())
+    .bind(SqlxJson(json!({
+        "business_model": business_model,
+        "imported_count": imported
+    })))
+    .execute(pool)
+    .await;
+    Ok(imported)
 }
 
 pub(super) async fn next_task_display_number_tx(
@@ -4337,16 +4640,96 @@ struct ReviewTaskHandoffBody {
     notes: String,
 }
 
-async fn review_task_handoff(
-    State(st): State<ConsoleState>,
-    Path(handoff_id): Path<Uuid>,
-    Json(body): Json<ReviewTaskHandoffBody>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Some(ref pool) = st.company_db else {
-        return Err(no_db());
-    };
-    let decision = body.decision.trim().to_ascii_lowercase();
-    let next = match decision.as_str() {
+#[derive(Deserialize, Serialize)]
+struct HandoffActionTokenPayload {
+    handoff_id: Uuid,
+    company_id: Uuid,
+    reviewer: String,
+    exp: i64,
+    nonce: String,
+}
+
+#[derive(Deserialize)]
+struct IssueHandoffActionTokenBody {
+    reviewer: String,
+    #[serde(default)]
+    expires_minutes: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct VerifyHandoffActionTokenBody {
+    payload: HandoffActionTokenPayload,
+    decision: String,
+    signature: String,
+    #[serde(default)]
+    notes: String,
+}
+
+fn approval_action_secret() -> Option<String> {
+    std::env::var("HSM_APPROVAL_ACTION_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn sign_handoff_action(
+    secret: &str,
+    payload: &HandoffActionTokenPayload,
+    decision: &str,
+) -> Result<String, String> {
+    let payload_json = serde_json::to_string(payload).map_err(|e| format!("serialize payload: {e}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(b"|");
+    hasher.update(payload_json.as_bytes());
+    hasher.update(b"|");
+    hasher.update(decision.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut v = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        v |= x ^ y;
+    }
+    v == 0
+}
+
+async fn audit_security_action(
+    pool: &PgPool,
+    company_id: Uuid,
+    actor: &str,
+    action: &str,
+    subject_type: &str,
+    subject_id: &str,
+    payload: Value,
+) {
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, $2, $3, $4, $5, $6, 'high')"#,
+    )
+    .bind(company_id)
+    .bind(actor)
+    .bind(action)
+    .bind(subject_type)
+    .bind(subject_id)
+    .bind(SqlxJson(payload))
+    .execute(pool)
+    .await;
+}
+
+async fn apply_handoff_review(
+    pool: &PgPool,
+    handoff_id: Uuid,
+    expected_company_id: Option<Uuid>,
+    decision: &str,
+    reviewer: &str,
+    notes: &str,
+) -> Result<TaskHandoffRow, (StatusCode, Json<Value>)> {
+    let next = match decision {
         "accept" | "accepted" => "accepted",
         "reject" | "rejected" => "rejected",
         _ => {
@@ -4360,13 +4743,16 @@ async fn review_task_handoff(
         r#"UPDATE task_handoffs
            SET status = $2, reviewed_at = NOW(), reviewed_by = $3, notes = COALESCE(NULLIF($4,''), notes)
            WHERE id = $1
+             AND status = 'pending_review'
+             AND ($5::uuid IS NULL OR company_id = $5)
            RETURNING id, company_id, task_id, from_agent, to_agent, handoff_contract, review_contract, status, notes,
                      created_at::text, reviewed_at, reviewed_by"#,
     )
     .bind(handoff_id)
     .bind(next)
-    .bind(body.reviewer.trim())
-    .bind(body.notes.trim())
+    .bind(reviewer.trim())
+    .bind(notes.trim())
+    .bind(expected_company_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
@@ -4376,7 +4762,263 @@ async fn review_task_handoff(
             Json(json!({"error":"handoff not found"})),
         ));
     };
+    Ok(h)
+}
+
+async fn issue_handoff_action_token(
+    State(st): State<ConsoleState>,
+    Path(handoff_id): Path<Uuid>,
+    Json(body): Json<IssueHandoffActionTokenBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.reviewer.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"reviewer is required"})),
+        ));
+    }
+    let secret = approval_action_secret().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({"error":"HSM_APPROVAL_ACTION_SECRET is not configured"})),
+        )
+    })?;
+    let exists: Option<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT id, company_id FROM task_handoffs WHERE id = $1")
+        .bind(handoff_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let Some((_hid, company_id)) = exists else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"handoff not found"})),
+        ));
+    };
+    let mins = body.expires_minutes.unwrap_or(30).clamp(1, 240);
+    let payload = HandoffActionTokenPayload {
+        handoff_id,
+        company_id,
+        reviewer: body.reviewer.trim().to_string(),
+        exp: (Utc::now() + chrono::Duration::minutes(mins)).timestamp(),
+        nonce: Uuid::new_v4().to_string(),
+    };
+    let accept_signature = sign_handoff_action(&secret, &payload, "accept").map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e})),
+        )
+    })?;
+    let reject_signature = sign_handoff_action(&secret, &payload, "reject").map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e})),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "payload": payload,
+        "actions": [
+            { "decision": "accept", "signature": accept_signature },
+            { "decision": "reject", "signature": reject_signature }
+        ],
+        "expires_minutes": mins
+    })))
+}
+
+async fn verify_handoff_action_token(
+    State(st): State<ConsoleState>,
+    Json(body): Json<VerifyHandoffActionTokenBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if Utc::now().timestamp() > body.payload.exp {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error":"action token expired"}))));
+    }
+    let decision = body.decision.trim().to_ascii_lowercase();
+    if decision != "accept" && decision != "reject" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"decision must be accept|reject"})),
+        ));
+    }
+    let secret = approval_action_secret().ok_or_else(|| {
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({"error":"HSM_APPROVAL_ACTION_SECRET is not configured"})),
+        )
+    })?;
+    let expected = sign_handoff_action(&secret, &body.payload, &decision).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e})),
+        )
+    })?;
+    if !constant_time_eq(body.signature.trim(), &expected) {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error":"invalid action signature"}))));
+    }
+    let claimed: Option<i64> = sqlx::query_scalar(
+        r#"INSERT INTO handoff_action_nonces (nonce, handoff_id, company_id, used_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (nonce) DO NOTHING
+           RETURNING 1"#,
+    )
+    .bind(body.payload.nonce.trim())
+    .bind(body.payload.handoff_id)
+    .bind(body.payload.company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    if claimed.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error":"approval action already used"})),
+        ));
+    }
+    let row = apply_handoff_review(
+        pool,
+        body.payload.handoff_id,
+        Some(body.payload.company_id),
+        &decision,
+        &body.payload.reviewer,
+        &body.notes,
+    )
+    .await?;
+    audit_security_action(
+        pool,
+        row.company_id,
+        &body.payload.reviewer,
+        "handoff_review_verified",
+        "task_handoff",
+        &row.id.to_string(),
+        json!({
+            "decision": decision,
+            "verified": true,
+            "task_id": row.task_id,
+        }),
+    )
+    .await;
+    Ok(Json(json!({ "handoff": row, "verified": true })))
+}
+
+async fn review_task_handoff(
+    State(st): State<ConsoleState>,
+    Path(handoff_id): Path<Uuid>,
+    Json(body): Json<ReviewTaskHandoffBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let decision = body.decision.trim().to_ascii_lowercase();
+    let h = apply_handoff_review(pool, handoff_id, None, &decision, &body.reviewer, &body.notes).await?;
+    audit_security_action(
+        pool,
+        h.company_id,
+        body.reviewer.trim(),
+        "handoff_review",
+        "task_handoff",
+        &h.id.to_string(),
+        json!({
+            "decision": decision,
+            "verified": false,
+            "task_id": h.task_id,
+        }),
+    )
+    .await;
     Ok(Json(json!({ "handoff": h })))
+}
+
+async fn get_runtime_activity() -> Json<Value> {
+    let snap = crate::runtime_control::activity_snapshot();
+    Json(json!({
+        "activity": snap,
+        "idle_for_ms": crate::runtime_control::idle_for_ms(),
+    }))
+}
+
+async fn stream_runtime_events() -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = crate::runtime_control::subscribe_completions();
+    let out = stream::unfold(rx, |mut rx| async move {
+        let evt = match rx.recv().await {
+            Ok(v) => v,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                crate::runtime_control::CompletionEvent {
+                    event_type: "lagged".to_string(),
+                    task_key: None,
+                    tool_name: None,
+                    call_id: None,
+                    success: false,
+                    message: "runtime event stream lagged".to_string(),
+                    ts_ms: Utc::now().timestamp_millis(),
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        };
+        let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".to_string());
+        Some((Ok(Event::default().data(json)), rx))
+    });
+    Sse::new(out).keep_alive(KeepAlive::default())
+}
+
+async fn runtime_portability_matrix() -> Json<Value> {
+    Json(json!({
+        "backends": [
+            {
+                "key": "local",
+                "status": "available",
+                "isolation": "host process",
+                "hibernation": "manual",
+                "notes": "Best for local iteration and debugging."
+            },
+            {
+                "key": "docker",
+                "status": "available",
+                "isolation": "container",
+                "hibernation": "manual",
+                "notes": "Strong baseline isolation for tenant boundaries."
+            },
+            {
+                "key": "ssh",
+                "status": "available",
+                "isolation": "remote host",
+                "hibernation": "host-managed",
+                "notes": "Good for low-cost VPS deployment."
+            },
+            {
+                "key": "daytona",
+                "status": "integratable",
+                "isolation": "workspace runtime",
+                "hibernation": "native",
+                "notes": "Supports near-idle cost profile with resume semantics."
+            },
+            {
+                "key": "modal",
+                "status": "integratable",
+                "isolation": "serverless runtime",
+                "hibernation": "native",
+                "notes": "Good fit for burst compute and idle-to-zero economics."
+            },
+            {
+                "key": "singularity",
+                "status": "integratable",
+                "isolation": "containerized runtime",
+                "hibernation": "host-managed",
+                "notes": "Useful for HPC and controlled enterprise environments."
+            }
+        ],
+        "positioning": {
+            "one_person_company": "Prioritize ssh/daytona/modal to keep idle cost low.",
+            "enterprise": "Prefer docker/singularity with strict policy and audit controls."
+        }
+    }))
 }
 
 #[derive(sqlx::FromRow, Serialize)]
@@ -5330,6 +5972,50 @@ async fn company_intelligence_summary(
         )
     })?;
 
+    // Recent signals from the intelligence layer
+    let signal_counts: Vec<(String, i64)> = sqlx::query_as(
+        r#"SELECT kind, COUNT(*)::bigint
+           FROM intelligence_signals
+           WHERE company_id = $1
+             AND created_at > now() - interval '7 days'
+           GROUP BY kind
+           ORDER BY COUNT(*) DESC"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let recent_signals: Vec<serde_json::Value> = sqlx::query_as::<_, (Uuid, String, String, f32, Option<bool>, Option<String>, String)>(
+        r#"SELECT id, kind, description, severity, composition_success, escalated_to, created_at::text
+           FROM intelligence_signals
+           WHERE company_id = $1
+           ORDER BY created_at DESC
+           LIMIT 30"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, kind, description, severity, success, escalated_to, created_at)| {
+        json!({
+            "id": id,
+            "kind": kind,
+            "description": description,
+            "severity": severity,
+            "composition_success": success,
+            "escalated_to": escalated_to,
+            "created_at": created_at,
+        })
+    })
+    .collect();
+
+    let signal_summary: serde_json::Map<String, serde_json::Value> = signal_counts
+        .into_iter()
+        .map(|(k, v)| (k, json!(v)))
+        .collect();
+
     Ok(Json(json!({
         "company_id": company_id,
         "source": "postgres_company_os",
@@ -5345,6 +6031,10 @@ async fn company_intelligence_summary(
         "workforce": { "agents_non_terminated": workforce_agents },
         "spend": { "total_usd": spend_total },
         "workflow_feed": workflow_feed,
+        "signals": {
+            "recent": recent_signals,
+            "by_kind_7d": signal_summary,
+        },
     })))
 }
 
@@ -6012,6 +6702,27 @@ async fn company_ops_overview(
             Json(json!({ "error": "company not found" })),
         ));
     };
+    let profile: Option<Value> = sqlx::query_scalar(
+        r#"SELECT jsonb_build_object(
+                'company_id', company_id,
+                'industry', industry,
+                'business_model', business_model,
+                'channel_mix', channel_mix,
+                'compliance_level', compliance_level,
+                'size_tier', size_tier,
+                'inferred', inferred,
+                'profile_source', profile_source,
+                'metadata', metadata,
+                'created_at', created_at::text,
+                'updated_at', updated_at::text
+            )
+           FROM company_profiles
+           WHERE company_id = $1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
 
     let goals_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM goals WHERE company_id = $1")
         .bind(company_id)
@@ -6078,6 +6789,100 @@ async fn company_ops_overview(
     .fetch_one(pool)
     .await
     .unwrap_or(0);
+    let avg_cycle_hours_30d: f64 = sqlx::query_scalar(
+        r#"SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0), 0)::float8
+           FROM tasks
+           WHERE company_id = $1
+             AND state IN ('done','closed')
+             AND updated_at >= NOW() - INTERVAL '30 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0.0);
+    let manual_interventions_7d: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM governance_events
+           WHERE company_id = $1
+             AND action IN ('task_requires_human', 'task_policy_decision')
+             AND created_at >= NOW() - INTERVAL '7 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let active_tasks_7d: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM tasks WHERE company_id = $1 AND created_at >= NOW() - INTERVAL '7 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let retries_7d: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM run_failure_events WHERE company_id = $1 AND created_at >= NOW() - INTERVAL '7 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let tasks_closed_14d: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM tasks
+           WHERE company_id = $1
+             AND state IN ('done','closed')
+             AND updated_at >= NOW() - INTERVAL '14 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let profile_size_tier = profile
+        .as_ref()
+        .and_then(|v| v.get("size_tier"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("solo")
+        .to_string();
+    let profile_business_model = profile
+        .as_ref()
+        .and_then(|v| v.get("business_model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("services")
+        .to_string();
+    let connected_connectors: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM company_connectors WHERE company_id = $1",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let template_events_30d: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM company_template_adoption_events
+           WHERE company_id = $1 AND created_at >= NOW() - INTERVAL '30 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let first_completed_hours: Option<f64> = sqlx::query_scalar(
+        r#"SELECT EXTRACT(EPOCH FROM (MIN(updated_at) - MIN(created_at))) / 3600.0
+           FROM tasks
+           WHERE company_id = $1
+             AND state IN ('done','closed')"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .ok()
+    .flatten();
+    let setup_completion_rate = if connected_connectors <= 0 {
+        0.0
+    } else {
+        (connected_connectors as f64 / 6.0).min(1.0)
+    };
+    let cost_per_resolved_operation = if tasks_closed_14d <= 0 {
+        spend_total_usd
+    } else {
+        spend_total_usd / tasks_closed_14d as f64
+    };
     let audit = load_company_audit_summary(company.hsmii_home.as_deref()).await;
     let heartbeat_runtime = if let Some(home_str) = company
         .hsmii_home
@@ -6142,6 +6947,7 @@ async fn company_ops_overview(
             "error": ops.error,
             "summary": ops.summary,
         },
+        "profile": profile,
         "overview": {
             "goals_total": goals_total,
             "tasks_total": tasks_total,
@@ -6172,6 +6978,31 @@ async fn company_ops_overview(
             })).collect::<Vec<_>>(),
         },
         "audit": audit.payload,
+        "roi": {
+            "avg_cycle_time_hours_30d": avg_cycle_hours_30d,
+            "manual_interventions_per_task_7d": if active_tasks_7d <= 0 {
+                0.0
+            } else {
+                manual_interventions_7d as f64 / active_tasks_7d as f64
+            },
+            "retries_per_task_7d": if active_tasks_7d <= 0 {
+                0.0
+            } else {
+                retries_7d as f64 / active_tasks_7d as f64
+            },
+            "tasks_closed_per_day_14d": tasks_closed_14d as f64 / 14.0,
+            "tasks_created_7d": active_tasks_7d,
+            "manual_interventions_7d": manual_interventions_7d,
+            "retries_7d": retries_7d,
+        },
+        "universality": {
+            "profile_size_tier": profile_size_tier,
+            "profile_business_model": profile_business_model,
+            "time_to_first_value_hours": first_completed_hours,
+            "setup_completion_rate": setup_completion_rate,
+            "template_adoption_events_30d": template_events_30d,
+            "cost_per_resolved_operation": cost_per_resolved_operation,
+        },
         "integration_status": {
             "agent_budget_enforcement": {
                 "configured": ops.config.as_ref().map(|c| !c.budgets.is_empty()).unwrap_or(false),
@@ -6204,6 +7035,16 @@ async fn company_ops_overview(
                 "task_trail_available": audit.available,
                 "governance_events_available": true,
                 "spend_events_available": true,
+            },
+            "model_routing_policy": {
+                "auto_enabled": std::env::var("HSM_MODEL_ROUTING_AUTO")
+                    .ok()
+                    .map(|v| {
+                        let s = v.trim().to_ascii_lowercase();
+                        s == "1" || s == "true" || s == "yes" || s == "on"
+                    })
+                    .unwrap_or(true),
+                "policy_source": "llm_risk_routing",
             },
         },
     })))
@@ -6696,6 +7537,7 @@ async fn apply_onboarding_draft(
         return Err(no_db());
     };
     let d = req.draft;
+    let vertical_hint = d.vertical_template.clone();
     let unsatisfied_required = d
         .kpi_gates
         .iter()
@@ -6837,13 +7679,23 @@ async fn apply_onboarding_draft(
             Json(json!({ "error": e.to_string() })),
         )
     })?;
+    let bootstrap_imported = bootstrap_company_skills(
+        pool,
+        company_id,
+        &slug,
+        display_name,
+        Some(vertical_hint.as_str()),
+    )
+    .await
+    .unwrap_or(0);
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "company_id": company_id,
             "slug": slug,
-            "message": "onboarding draft applied"
+            "message": "onboarding draft applied",
+            "bootstrap": { "imported": bootstrap_imported }
         })),
     ))
 }

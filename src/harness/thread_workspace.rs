@@ -9,6 +9,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+use sha2::{Digest, Sha256};
 
 /// Root for workspaces + default skill install target (override with `HSM_APPLIANCE_HOME`).
 pub fn appliance_home() -> PathBuf {
@@ -56,10 +57,13 @@ pub fn sanitize_thread_id(raw: &str) -> String {
         }
     }
     if s.is_empty() {
-        "default".into()
-    } else {
-        s
+        s = "default".into();
     }
+    // Preserve readability while avoiding collisions from normalization.
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{s}-{}", &digest[..10])
 }
 
 /// Ensure workspace + `uploads/` + `artifacts/` exist. Returns the workspace root.
@@ -137,6 +141,11 @@ pub fn resolve_tool_fs_path(user_path: &str) -> Result<PathBuf, String> {
     }
 
     let Some(base) = current_root() else {
+        if env_truthy("HSM_THREAD_WORKSPACE_STRICT") {
+            return Err(
+                "thread workspace strict mode is enabled but no active workspace is set".into(),
+            );
+        }
         return Ok(PathBuf::from(t));
     };
 

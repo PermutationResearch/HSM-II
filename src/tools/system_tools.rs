@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 
 use super::{object_schema, Tool, ToolOutput};
+use crate::tools::security::validate_archive_member_path;
 
 // ============================================================================
 // System Info Tool
@@ -782,6 +783,46 @@ impl ArchiveExtractTool {
     pub fn new() -> Self {
         Self
     }
+
+    async fn preflight_archive_members(
+        archive_path: &std::path::Path,
+        extension: &str,
+    ) -> Result<(), String> {
+        let arch_s = archive_path.to_string_lossy().to_string();
+        let list = match extension {
+            "zip" => tokio::process::Command::new("unzip")
+                .args(["-Z1", arch_s.as_str()])
+                .output()
+                .await
+                .map_err(|e| format!("failed to inspect zip: {e}"))?,
+            "gz" if arch_s.ends_with(".tar.gz") || arch_s.ends_with(".tgz") => {
+                tokio::process::Command::new("tar")
+                    .args(["-tzf", arch_s.as_str()])
+                    .output()
+                    .await
+                    .map_err(|e| format!("failed to inspect tar.gz: {e}"))?
+            }
+            "tar" => tokio::process::Command::new("tar")
+                .args(["-tf", arch_s.as_str()])
+                .output()
+                .await
+                .map_err(|e| format!("failed to inspect tar: {e}"))?,
+            "bz2" => tokio::process::Command::new("tar")
+                .args(["-tjf", arch_s.as_str()])
+                .output()
+                .await
+                .map_err(|e| format!("failed to inspect tar.bz2: {e}"))?,
+            _ => return Ok(()),
+        };
+        if !list.status.success() {
+            return Err("unable to inspect archive entries before extraction".to_string());
+        }
+        let members = String::from_utf8_lossy(&list.stdout);
+        for entry in members.lines() {
+            validate_archive_member_path(entry)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -839,6 +880,10 @@ impl Tool for ArchiveExtractTool {
 
         let arch_s = archive.to_string_lossy();
         let dest_s = destination.to_string_lossy();
+
+        if let Err(e) = Self::preflight_archive_members(archive_path, &extension).await {
+            return ToolOutput::error(format!("Archive traversal guard blocked extraction: {e}"));
+        }
 
         let result = match extension.as_str() {
             "zip" => {

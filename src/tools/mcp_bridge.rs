@@ -13,6 +13,7 @@ use serde_json::{json, Map, Value};
 use tracing::{info, warn};
 
 use super::{Tool, ToolOutput, ToolRegistry};
+use crate::tools::connector_runtime::{auth_header, enforce_policy};
 use crate::coder_assistant::plugin_lifecycle::PluginManager;
 use crate::coder_assistant::schemas::{
     ObjectSchema, ParameterType, ToolProviderKind, ToolProviderRuntime, ToolSchema,
@@ -114,6 +115,7 @@ fn decode_mcp_tool_result(body: &str) -> Result<String, String> {
 /// Single MCP tool backed by HTTP JSON-RPC `tools/call`.
 pub struct McpHttpTool {
     endpoint: String,
+    connector_ref: Option<String>,
     tool_name: String,
     description: String,
     parameters_schema: Value,
@@ -123,6 +125,7 @@ impl McpHttpTool {
     pub fn new(endpoint: impl Into<String>, schema: &ToolSchema) -> Self {
         Self {
             endpoint: endpoint.into(),
+            connector_ref: None,
             tool_name: schema.name.clone(),
             description: schema.description.clone(),
             parameters_schema: coder_tool_schema_to_parameters_json(schema),
@@ -145,10 +148,18 @@ impl McpHttpTool {
         }
         Self {
             endpoint: endpoint.into(),
+            connector_ref: None,
             tool_name: name.into(),
             description: description.into(),
             parameters_schema: params,
         }
+    }
+
+    pub fn with_connector_ref(mut self, connector_ref: Option<String>) -> Self {
+        self.connector_ref = connector_ref
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        self
     }
 }
 
@@ -184,8 +195,22 @@ impl Tool for McpHttpTool {
                 "arguments": params,
             }
         });
-
-        let resp = match client.post(&self.endpoint).json(&request_body).send().await {
+        if let Some(ref connector_ref) = self.connector_ref {
+            let host = reqwest::Url::parse(&self.endpoint)
+                .ok()
+                .and_then(|u| u.host_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            if let Err(e) = enforce_policy(connector_ref, "POST", &host) {
+                return ToolOutput::error(format!("Connector policy blocked MCP call: {e}"));
+            }
+        }
+        let mut req = client.post(&self.endpoint).json(&request_body);
+        if let Some(ref connector_ref) = self.connector_ref {
+            if let Some((name, value)) = auth_header(connector_ref) {
+                req = req.header(name, value);
+            }
+        }
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => return ToolOutput::error(format!("MCP request failed: {e}")),
         };
@@ -333,7 +358,9 @@ pub async fn register_personal_mcp_tools(registry: &mut ToolRegistry) {
                 );
                 continue;
             }
-            registry.register(Arc::new(McpHttpTool::new(&endpoint, tool)));
+            registry.register(Arc::new(
+                McpHttpTool::new(&endpoint, tool).with_connector_ref(Some(manifest.provider.id.clone())),
+            ));
             registered_from_manifest += 1;
         }
 
@@ -347,7 +374,17 @@ pub async fn register_personal_mcp_tools(registry: &mut ToolRegistry) {
                     if registry.has(&name) {
                         continue;
                     }
-                    if let Some(t) = discovered_tool_to_mcp_tool(&endpoint, &item) {
+                    if let Some(t) = discovered_tool_to_mcp_tool(&endpoint, &item).map(|tool| {
+                        Arc::new(
+                            McpHttpTool::from_discovered(
+                                &endpoint,
+                                tool.name().to_string(),
+                                tool.description().to_string(),
+                                tool.parameters_schema(),
+                            )
+                            .with_connector_ref(Some(manifest.provider.id.clone())),
+                        ) as Arc<dyn Tool>
+                    }) {
                         registry.register(t);
                         registered_from_discover += 1;
                     } else {
@@ -356,7 +393,10 @@ pub async fn register_personal_mcp_tools(registry: &mut ToolRegistry) {
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
                         let schema = minimal_schema(&name, desc);
-                        registry.register(Arc::new(McpHttpTool::new(&endpoint, &schema)));
+                        registry.register(Arc::new(
+                            McpHttpTool::new(&endpoint, &schema)
+                                .with_connector_ref(Some(manifest.provider.id.clone())),
+                        ));
                         registered_from_discover += 1;
                     }
                 }

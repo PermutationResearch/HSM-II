@@ -15,6 +15,40 @@ use tracing_subscriber::EnvFilter;
 use hyper_stigmergy::api::{ApiState, SharedState};
 use hyper_stigmergy::hyper_stigmergy::HyperStigmergicMorphogenesis;
 
+fn local_cors_layer() -> tower_http::cors::CorsLayer {
+    let origins_raw = std::env::var("HSM_API_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://127.0.0.1:3001,http://localhost:3001".to_string());
+    let origins = origins_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if origins.iter().any(|s| *s == "*") {
+        return tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+            ]);
+    }
+    let parsed = origins
+        .into_iter()
+        .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "hsm-api", about = "HSM-II REST API server")]
 struct Args {
@@ -68,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Add CORS and tracing middleware
     let app = app
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(local_cors_layer())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;

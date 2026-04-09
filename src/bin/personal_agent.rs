@@ -26,6 +26,35 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
+fn local_cors_layer() -> tower_http::cors::CorsLayer {
+    let origins_raw = std::env::var("HSM_API_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://127.0.0.1:3001,http://localhost:3001".to_string());
+    let origins = origins_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    let methods = [
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PUT,
+        axum::http::Method::DELETE,
+        axum::http::Method::OPTIONS,
+    ];
+    if origins.iter().any(|s| *s == "*") {
+        return tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(methods);
+    }
+    let parsed = origins
+        .into_iter()
+        .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods(methods)
+}
+
 #[derive(Parser)]
 #[command(name = "hsmii")]
 #[command(about = "HSM-II Personal Agent - Your AI companion")]
@@ -359,7 +388,7 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         .unwrap_or(3000);
 
     let app = hyper_stigmergy::api::api_router(api_state)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(local_cors_layer())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{api_port}").parse()?;
@@ -378,7 +407,19 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
     println!("   REST API: http://127.0.0.1:{api_port}");
     println!("   Web UI:   http://127.0.0.1:3001 (run `cd web && npm run dev`)");
 
-    // ── 3b. Embedded company console API (parity with `hsm_console`) ───────
+    // ── 3b. Company OS Postgres pool (shared by console + intelligence heartbeat)
+    let company_db: Option<sqlx::PgPool> = match hyper_stigmergy::company_os::connect_optional().await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Company OS: PostgreSQL unavailable (set HSM_COMPANY_OS_DATABASE_URL)"
+            );
+            None
+        }
+    };
+
+    // ── 3c. Embedded company console API (parity with `hsm_console`) ───────
     if embed_company_console_api_enabled() {
         let console_port: u16 = std::env::var("HSM_CONSOLE_PORT")
             .ok()
@@ -386,25 +427,15 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
             .unwrap_or(3847);
         let console_addr: SocketAddr = format!("127.0.0.1:{console_port}").parse()?;
 
-        let company_db = match hyper_stigmergy::company_os::connect_optional().await {
-            Ok(db) => db,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Company OS: PostgreSQL unavailable — embedded console will serve /api/console/* only (set HSM_COMPANY_OS_DATABASE_URL)"
-                );
-                None
-            }
-        };
         if let Some(ref pool) = company_db {
             hyper_stigmergy::company_os::start_automation_worker(pool.clone());
             info!("Company OS automation worker started (embedded console)");
         }
 
         let console_state =
-            ConsoleState::with_paperclip_layer(home.clone(), company_db, Arc::clone(&intelligence));
+            ConsoleState::with_paperclip_layer(home.clone(), company_db.clone(), Arc::clone(&intelligence));
         let console_app = console_router(console_state)
-            .layer(tower_http::cors::CorsLayer::permissive())
+            .layer(local_cors_layer())
             .layer(tower_http::trace::TraceLayer::new_for_http());
 
         tokio::spawn(async move {
@@ -486,23 +517,63 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
             let agent_clone = Arc::clone(&agent);
             let intelligence_clone = Arc::clone(&intelligence);
             let sync = sync_world.clone();
+            let heartbeat_pool = company_db.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
                     let mut ag = agent_clone.lock().await;
+                    let heartbeat_company_id = if let Some(ref pool) = heartbeat_pool {
+                        if let Ok(raw) = std::env::var("HSM_PRIMARY_COMPANY_ID") {
+                            uuid::Uuid::parse_str(raw.trim()).ok()
+                        } else {
+                            sqlx::query_scalar::<_, uuid::Uuid>(
+                                "SELECT id FROM companies ORDER BY created_at LIMIT 1",
+                            )
+                            .fetch_optional(pool)
+                            .await
+                            .ok()
+                            .flatten()
+                        }
+                    } else {
+                        None
+                    };
 
                     // DKS tick
                     if ag.config.enable_dks {
                         let _ = ag.services.dks.tick();
                     }
 
-                    // Intelligence Layer: scan world for signals, then process them
+                    // Intelligence Layer: build snapshot → scan world → tick → persist
                     {
+                        use hyper_stigmergy::paperclip::intelligence::CompanyOsSnapshot;
+
+                        // 1. Build a Company OS snapshot (Postgres → Paperclip inbound)
+                        let snapshot = if let (Some(ref pool), Some(cid)) =
+                            (heartbeat_pool.as_ref(), heartbeat_company_id)
+                        {
+                            match hyper_stigmergy::company_os::intelligence_signals::build_snapshot(
+                                pool, cid,
+                            )
+                            .await
+                            {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!("intelligence heartbeat: snapshot failed: {e}");
+                                    CompanyOsSnapshot::default()
+                                }
+                            }
+                        } else {
+                            CompanyOsSnapshot::default()
+                        };
+
+                        // 2. Scan world with live snapshot + tick
                         let mut il = intelligence_clone.lock().await;
-                        il.scan_world(ag.world.global_coherence(), ag.world.tick_count);
+                        il.scan_world(ag.world.global_coherence(), ag.world.tick_count, &snapshot);
                         let results = il.tick();
-                        for r in &results {
+
+                        // 3. Log failures + policy/direction post-checks
+                        for (ref sig, ref r) in &results {
                             if !r.success {
                                 info!(
                                     goal_id = ?r.goal_id,
@@ -511,6 +582,119 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
                                     r.message
                                 );
                             }
+                            // 3a. Policy check: if composition created a goal, evaluate policy rules
+                            if r.success {
+                                if let (Some(ref pool), Some(cid)) =
+                                    (heartbeat_pool.as_ref(), heartbeat_company_id)
+                                {
+                                        use hyper_stigmergy::company_os::intelligence_signals::{evaluate_policy, check_direction_alignment, query_dri_memory_context};
+
+                                        let kind_str = format!("{:?}", sig.kind);
+                                        let policy = evaluate_policy(pool, cid, &kind_str, sig.severity).await;
+
+                                        if let Ok(ref pd) = policy {
+                                            if !pd.allowed {
+                                                // Blocked by policy — remove goal from Paperclip
+                                                if let Some(ref gid) = r.goal_id {
+                                                    il.goals.remove(gid);
+                                                    info!(goal_id = %gid, reason = %pd.reason, "intelligence: goal blocked by policy");
+                                                }
+                                            } else if pd.requires_human {
+                                                // Mark goal metadata for requires_human escalation
+                                                if let Some(ref gid) = r.goal_id {
+                                                    if let Some(goal) = il.goals.get_mut(gid) {
+                                                        goal.metadata.insert("requires_human".into(), serde_json::json!(true));
+                                                        goal.metadata.insert("policy_reason".into(), serde_json::json!(pd.reason));
+                                                    }
+                                                    info!(goal_id = %gid, "intelligence: goal requires human approval per policy");
+                                                }
+                                            }
+                                        }
+
+                                        // 3b. Direction alignment check
+                                        if let Some(ref gid) = r.goal_id {
+                                            if let Some(goal) = il.goals.get_mut(gid) {
+                                                if let Ok((aligned, dir_excerpt)) = check_direction_alignment(pool, cid, &goal.title).await {
+                                                    goal.metadata.insert("direction_aligned".into(), serde_json::json!(aligned));
+                                                    if let Some(excerpt) = dir_excerpt {
+                                                        goal.metadata.insert("direction_excerpt".into(), serde_json::json!(excerpt));
+                                                    }
+                                                    if !aligned {
+                                                        info!(goal_id = %gid, title = %goal.title, "intelligence: goal may not align with company direction");
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // 3c. Memory-driven DRI routing refinement
+                                        if let Some(ref gid) = r.goal_id {
+                                            if let Some(goal) = il.goals.get_mut(gid) {
+                                                let domains: Vec<String> = goal.required_capabilities.clone();
+                                                if let Ok(mem_ctx) = query_dri_memory_context(pool, cid, &domains, 5).await {
+                                                    if !mem_ctx.is_empty() {
+                                                        let hints: Vec<serde_json::Value> = mem_ctx.iter().map(|(t, b)| {
+                                                            serde_json::json!({"title": t, "body": b})
+                                                        }).collect();
+                                                        goal.metadata.insert("dri_memory_context".into(), serde_json::json!(hints));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                }
+                            }
+                        }
+
+                        // 4. Persist signals + sync goals/DRIs to Postgres
+                        if let (Some(ref pool), Some(cid)) =
+                            (heartbeat_pool.as_ref(), heartbeat_company_id)
+                        {
+                                // 4a. Persist signals
+                                let processed: Vec<hyper_stigmergy::company_os::intelligence_signals::ProcessedSignal> =
+                                    results.iter().map(|(sig, cr)| {
+                                        hyper_stigmergy::company_os::intelligence_signals::ProcessedSignal {
+                                            signal: sig.clone(),
+                                            composition_success: Some(cr.success),
+                                            composed_goal_pg_id: None,
+                                            composed_task_pg_id: None,
+                                            escalated_to: cr.escalated_to.clone(),
+                                        }
+                                    }).collect();
+                                if !processed.is_empty() {
+                                    match hyper_stigmergy::company_os::intelligence_signals::persist_signals(pool, cid, &processed).await {
+                                        Ok(n) => {
+                                            if n > 0 {
+                                                info!(count = n, "intelligence: persisted {n} signals to Postgres");
+                                            }
+                                        }
+                                        Err(e) => warn!("intelligence: persist_signals failed: {e}"),
+                                    }
+                                }
+
+                                // 4b. Sync Paperclip goals → Postgres (round-trip via paperclip_goal_id)
+                                let goals: Vec<hyper_stigmergy::paperclip::goal::Goal> =
+                                    il.list_goals().iter().map(|g| (*g).clone()).collect();
+                                if !goals.is_empty() {
+                                    match hyper_stigmergy::company_os::paperclip_sync::sync_paperclip_goals(pool, cid, goals).await {
+                                        Ok(report) => {
+                                            let ins = report.get("inserted").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            let upd = report.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            if ins + upd > 0 {
+                                                info!(inserted = ins, updated = upd, "intelligence: synced goals to Postgres");
+                                            }
+                                        }
+                                        Err(e) => warn!("intelligence: goal sync failed: {e}"),
+                                    }
+                                }
+
+                                // 4c. Sync Paperclip DRIs → Postgres
+                                let dris: Vec<hyper_stigmergy::paperclip::dri::DriEntry> =
+                                    il.dri_registry.all().cloned().collect();
+                                if !dris.is_empty() {
+                                    match hyper_stigmergy::company_os::paperclip_sync::sync_paperclip_dris(pool, cid, dris).await {
+                                        Ok(_) => {}
+                                        Err(e) => warn!("intelligence: DRI sync failed: {e}"),
+                                    }
+                                }
                         }
                     }
 

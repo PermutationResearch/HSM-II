@@ -18,6 +18,38 @@ use super::dri::DriRegistry;
 use super::goal::{EscalationAction, Goal, GoalAssignee, GoalId, GoalPriority, GoalStatus};
 use super::org::OrgBlueprint;
 
+// ── CompanyOsSnapshot ────────────────────────────────────────────────────────
+
+/// Lightweight snapshot of Company OS state passed to `scan_world` each tick.
+/// Gives the Intelligence Layer real inbound signals from the operational world.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CompanyOsSnapshot {
+    /// Open tasks whose `state` is a failure or terminal-error state.
+    pub failed_task_refs: Vec<FailedTaskRef>,
+    /// Agents whose LLM spend has exceeded their monthly budget.
+    pub budget_overruns: Vec<BudgetOverrunRef>,
+    /// Goals in Postgres that have no linked task and are older than N hours.
+    pub unlinked_goal_ids: Vec<String>,
+    /// North-star direction text from `companies.context_markdown` (truncated).
+    pub direction_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FailedTaskRef {
+    pub task_id: String,
+    pub title: String,
+    /// `capability_refs` JSON from task row (e.g. `[{"kind":"skill","ref":"code_review"}]`).
+    pub capability_refs: Vec<serde_json::Value>,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BudgetOverrunRef {
+    pub agent_ref: String,
+    pub budget_cents: i64,
+    pub spend_cents: i64,
+}
+
 // ── Signal ───────────────────────────────────────────────────────────────────
 
 /// A signal from the world model that requires the Intelligence Layer's attention.
@@ -146,8 +178,12 @@ impl IntelligenceLayer {
 
     /// Scan the world state and generate signals for anomalies.
     ///
-    /// Called by the unified runtime's heartbeat loop with the current world state.
-    pub fn scan_world(&mut self, coherence: f64, _tick: u64) {
+    /// Called by the unified runtime's heartbeat loop.
+    /// `snapshot` carries live Company OS state so signals are driven by real work, not
+    /// just in-memory goal/capability state.
+    pub fn scan_world(&mut self, coherence: f64, _tick: u64, snapshot: &CompanyOsSnapshot) {
+        let now = now_secs();
+
         // 1. Coherence drop
         if coherence < self.config.coherence_alert_threshold {
             self.emit_signal(Signal {
@@ -162,12 +198,12 @@ impl IntelligenceLayer {
                     coherence, self.config.coherence_alert_threshold
                 ),
                 severity: 0.8,
-                timestamp: now_secs(),
+                timestamp: now,
                 metadata: HashMap::new(),
             });
         }
 
-        // 2. Stale goals
+        // 2. Stale in-memory goals
         let stale_ids: Vec<GoalId> = self
             .goals
             .values()
@@ -186,7 +222,7 @@ impl IntelligenceLayer {
                 source: "intelligence_layer".into(),
                 description: format!("Goal {} stale", goal_id),
                 severity: 0.5,
-                timestamp: now_secs(),
+                timestamp: now,
                 metadata: HashMap::new(),
             });
         }
@@ -209,13 +245,87 @@ impl IntelligenceLayer {
                     cap.target.reliability * 100.0
                 ),
                 severity: 0.6,
-                timestamp: now_secs(),
+                timestamp: now,
                 metadata: HashMap::new(),
             })
             .collect();
 
         for signal in degraded_signals {
             self.emit_signal(signal);
+        }
+
+        // 4. Inbound from Company OS: task failure patterns → capability signals
+        for failed in &snapshot.failed_task_refs {
+            // Each capability_ref on the failed task is potentially degraded
+            for cap_ref in &failed.capability_refs {
+                let cap_id = cap_ref
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let mut meta = HashMap::new();
+                meta.insert("task_id".to_string(), serde_json::Value::String(failed.task_id.clone()));
+                meta.insert("task_title".to_string(), serde_json::Value::String(failed.title.clone()));
+                if let Some(ref reason) = failed.failure_reason {
+                    meta.insert("failure_reason".to_string(), serde_json::Value::String(reason.clone()));
+                }
+                // Record failure in capability registry if it exists
+                if let Some(cap) = self.capabilities.get_mut(&cap_id) {
+                    cap.metrics.record_failure(0.0, 0);
+                }
+                self.emit_signal(Signal {
+                    id: uuid_v4(),
+                    kind: SignalKind::CapabilityDegraded { capability_id: cap_id.clone() },
+                    source: "company_os_task_feedback".into(),
+                    description: format!(
+                        "Task '{}' failed with capability '{}'{}",
+                        failed.title,
+                        cap_id,
+                        failed.failure_reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default()
+                    ),
+                    severity: 0.65,
+                    timestamp: now,
+                    metadata: meta,
+                });
+            }
+        }
+
+        // 5. Inbound from Company OS: budget overruns
+        for overrun in &snapshot.budget_overruns {
+            let overage = overrun.spend_cents.saturating_sub(overrun.budget_cents);
+            if overage > 0 {
+                self.emit_signal(Signal {
+                    id: uuid_v4(),
+                    kind: SignalKind::BudgetOverrun {
+                        agent_ref: overrun.agent_ref.clone(),
+                        overage_cents: overage,
+                    },
+                    source: "company_os_spend".into(),
+                    description: format!(
+                        "Agent '{}' over budget by ${:.2}",
+                        overrun.agent_ref,
+                        overage as f64 / 100.0
+                    ),
+                    severity: 0.7,
+                    timestamp: now,
+                    metadata: HashMap::new(),
+                });
+            }
+        }
+
+        // 6. Inbound from Company OS: goals with no linked work
+        for goal_id in &snapshot.unlinked_goal_ids {
+            let mut meta = HashMap::new();
+            meta.insert("postgres_goal_id".to_string(), serde_json::Value::String(goal_id.clone()));
+            self.emit_signal(Signal {
+                id: uuid_v4(),
+                kind: SignalKind::GoalStale { goal_id: goal_id.clone() },
+                source: "company_os_goals".into(),
+                description: format!("Postgres goal {} has no linked tasks or in-progress work", goal_id),
+                severity: 0.4,
+                timestamp: now,
+                metadata: meta,
+            });
         }
     }
 
@@ -224,7 +334,7 @@ impl IntelligenceLayer {
     /// Process all pending signals. Returns composition results.
     ///
     /// Called by the unified runtime's heartbeat loop.
-    pub fn tick(&mut self) -> Vec<CompositionResult> {
+    pub fn tick(&mut self) -> Vec<(Signal, CompositionResult)> {
         let signals: Vec<Signal> = self.signal_queue.drain(..).collect();
         let mut results = Vec::new();
 
@@ -232,13 +342,13 @@ impl IntelligenceLayer {
             let result = self.process_signal(&signal);
             self.stats.signals_processed += 1;
 
-            // Archive signal
-            self.signal_history.push(signal);
+            // Archive signal (clone before moving into results)
+            self.signal_history.push(signal.clone());
             if self.signal_history.len() > self.config.signal_history_limit {
                 self.signal_history.remove(0);
             }
 
-            results.push(result);
+            results.push((signal, result));
         }
 
         results

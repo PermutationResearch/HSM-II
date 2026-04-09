@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::personal::gateway::{Message as GatewayMessage, MessageHandler, Platform};
+use crate::personal::gateway::{redact_secrets, sanitize_media_url};
 
 /// Discord bot configuration
 #[derive(Clone, Debug)]
@@ -190,16 +191,30 @@ impl EventHandler for DiscordEventHandler {
             user_name: msg.author.name.clone(),
             content: msg.content.clone(),
             timestamp: chrono::Utc::now(),
-            attachments: vec![],
+            attachments: msg
+                .attachments
+                .iter()
+                .filter_map(|a| {
+                    let safe = sanitize_media_url(&a.url)?;
+                    Some(crate::personal::gateway::Attachment {
+                        id: a.id.to_string(),
+                        filename: a.filename.clone(),
+                        url: safe,
+                        content_type: a.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                        size: a.size as usize,
+                    })
+                })
+                .collect(),
             reply_to: msg.referenced_message.as_ref().map(|m| m.id.to_string()),
         };
 
-        debug!(user = %msg.author.name, content = %msg.content, "Discord message");
+        debug!(user = %msg.author.name, message_id = %msg.id, "Discord message");
 
         match self.inner_handler.handle(gateway_msg).await {
             Ok(response) => {
                 if !response.is_empty() {
-                    let chunks = RealDiscordBot::split_message(&response, 2000);
+                    let safe_response = redact_secrets(&response);
+                    let chunks = RealDiscordBot::split_message(&safe_response, 2000);
                     for chunk in chunks {
                         if let Err(e) = msg.channel_id.say(&_ctx.http, &chunk).await {
                             error!(error = %e, "Failed to send Discord response");

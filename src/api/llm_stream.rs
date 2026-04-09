@@ -30,6 +30,7 @@ pub struct ChatStreamBody {
 fn provider_label(p: &crate::llm::LlmProvider) -> &'static str {
     match p {
         crate::llm::LlmProvider::OpenAi => "openai_compat",
+        crate::llm::LlmProvider::Gemini => "gemini_openai_compat",
         crate::llm::LlmProvider::Anthropic => "anthropic",
         crate::llm::LlmProvider::Ollama => "ollama",
     }

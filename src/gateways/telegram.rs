@@ -9,9 +9,22 @@ use teloxide::prelude::*;
 use teloxide::types::{ParseMode, Update};
 use teloxide::Bot;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::personal::gateway::{Message as GatewayMessage, MessageHandler, Platform};
+use crate::personal::gateway::redact_secrets;
+
+fn looks_like_reaction_emoji(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.len() > 16 {
+        return false;
+    }
+    // Keep simple and safe: no whitespace or command characters, and no alnum words.
+    if t.chars().any(|c| c.is_whitespace() || c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    true
+}
 
 /// Telegram bot configuration
 #[derive(Clone, Debug)]
@@ -65,7 +78,7 @@ impl RealTelegramBot {
         let mut dispatcher = Dispatcher::builder(bot.clone(), dispatch_handler)
             .dependencies(dptree::deps![handler, config])
             .default_handler(|upd| async move {
-                debug!(update = ?upd, "Unhandled update");
+                trace!(kind = ?upd.kind, "Unhandled telegram update");
             })
             .error_handler(LoggingErrorHandler::with_custom_text(
                 "Error in Telegram dispatcher",
@@ -92,9 +105,10 @@ impl RealTelegramBot {
     pub async fn send_message(&self, chat_id: &str, content: &str) -> Result<()> {
         let bot = Bot::new(&self.config.token);
         let chat_id: i64 = chat_id.parse()?;
+        let safe_content = redact_secrets(content);
 
         // Split long messages
-        let chunks = Self::split_message(content, self.config.max_message_length);
+        let chunks = Self::split_message(&safe_content, self.config.max_message_length);
 
         for chunk in chunks {
             match bot
@@ -123,7 +137,8 @@ impl RealTelegramBot {
         content: &str,
         parse_mode: ParseMode,
     ) -> Result<()> {
-        let chunks = Self::split_message(content, 4096);
+        let safe_content = redact_secrets(content);
+        let chunks = Self::split_message(&safe_content, 4096);
 
         for chunk in chunks {
             match bot
@@ -219,7 +234,7 @@ async fn handle_telegram_message(
     let text = match msg.text() {
         Some(t) => t,
         None => {
-            debug!("Non-text message received, ignoring");
+            trace!("Non-text telegram message ignored");
             return Ok(());
         }
     };
@@ -229,6 +244,21 @@ async fn handle_telegram_message(
         .map(|u| u.username.clone().unwrap_or_else(|| u.first_name.clone()))
         .unwrap_or_else(|| "Unknown".to_string());
 
+    let mut content = text.to_string();
+    if msg.reply_to_message().is_some() && looks_like_reaction_emoji(text) {
+        // Productized fallback until native Telegram reaction updates are wired:
+        // reply with an emoji to create a structured reaction event in the agent loop.
+        let reply_id = msg
+            .reply_to_message()
+            .map(|m| m.id.0.to_string())
+            .unwrap_or_default();
+        content = format!(
+            "/reaction emoji={} reply_to={} platform=telegram",
+            text.trim(),
+            reply_id
+        );
+    }
+
     let gateway_msg = GatewayMessage {
         id: msg.id.0.to_string(),
         platform: Platform::Telegram,
@@ -236,7 +266,7 @@ async fn handle_telegram_message(
         channel_name: msg.chat.title().map(|s| s.to_string()),
         user_id: user.map(|u| u.id.0.to_string()).unwrap_or_default(),
         user_name,
-        content: text.to_string(),
+        content,
         timestamp: chrono::Utc::now(),
         attachments: vec![],
         reply_to: msg.reply_to_message().map(|m| m.id.0.to_string()),

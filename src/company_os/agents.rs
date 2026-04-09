@@ -6,6 +6,7 @@ use axum::{
     routing::{get, patch},
     Json, Router,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
@@ -16,7 +17,9 @@ use uuid::Uuid;
 use crate::console::ConsoleState;
 
 use super::company_memory::{fetch_agent_memory_addon, fetch_shared_memory_addon};
+use super::company_memory_hybrid::HybridSearchOptions;
 use super::markdown_toc::heading_outline;
+use super::memory_engine::build_memory_context_addon;
 use super::no_db;
 use super::workspace_files::list_agent_markdown_instructions;
 
@@ -388,6 +391,25 @@ async fn get_agent_inventory(
 }
 
 const OPERATOR_THREAD_DIGEST_MAX: usize = 12_000;
+const OPERATOR_THREAD_DIGEST_MAX_TEMP_RESTRICTED: usize = 7_500;
+
+fn normalize_whitespace_compact(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn temperature_restricted_context_mode() -> bool {
+    if std::env::var("HSM_CONTEXT_COMPACTION_TEMP_RESTRICTED")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return true;
+    }
+    let model = std::env::var("DEFAULT_LLM_MODEL")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    model.contains("o1") || model.contains("o3")
+}
 
 fn normalize_stig_notes_json(v: &Value) -> Vec<Value> {
     let Some(arr) = v.as_array() else {
@@ -417,22 +439,43 @@ fn normalize_stig_notes_json(v: &Value) -> Vec<Value> {
 
 fn build_operator_thread_digest(agent_name: &str, tasks: &[(Uuid, String, Value, String)]) -> String {
     let mut digest = format!("## Operator ↔ {agent_name} — compact thread (for LLM / handoff)\n\n");
+    let temp_restricted = temperature_restricted_context_mode();
+    let note_limit = if temp_restricted { 8 } else { 16 };
+    let text_char_limit = if temp_restricted { 220 } else { 520 };
+    let digest_limit = if temp_restricted {
+        OPERATOR_THREAD_DIGEST_MAX_TEMP_RESTRICTED
+    } else {
+        OPERATOR_THREAD_DIGEST_MAX
+    };
     for (id, title, notes_val, _created) in tasks {
         let notes = normalize_stig_notes_json(notes_val);
         if notes.is_empty() {
             continue;
         }
-        digest.push_str(&format!("### Task: {title} (`{id}`)\n"));
-        for n in notes {
+        digest.push_str(&format!(
+            "### Task: {} (`{id}`)\n",
+            normalize_whitespace_compact(title)
+        ));
+        let mut seen_text = std::collections::HashSet::new();
+        for n in notes.into_iter().take(note_limit) {
             let at = n["at"].as_str().unwrap_or("");
             let actor = n["actor"].as_str().unwrap_or("operator");
-            let text = n["text"].as_str().unwrap_or("");
+            let raw_text = n["text"].as_str().unwrap_or("");
+            let compact = normalize_whitespace_compact(raw_text);
+            if compact.is_empty() {
+                continue;
+            }
+            let dedupe_key = format!("{}|{}", actor.to_ascii_lowercase(), compact.to_ascii_lowercase());
+            if !seen_text.insert(dedupe_key) {
+                continue;
+            }
+            let text = compact.chars().take(text_char_limit).collect::<String>();
             digest.push_str(&format!("- [{at}] {actor}: {text}\n"));
         }
         digest.push('\n');
     }
-    if digest.len() > OPERATOR_THREAD_DIGEST_MAX {
-        let mut t = digest.chars().take(OPERATOR_THREAD_DIGEST_MAX).collect::<String>();
+    if digest.chars().count() > digest_limit {
+        let mut t = digest.chars().take(digest_limit).collect::<String>();
         t.push_str("\n\n…(truncated; narrow tasks or copy per-task notes)");
         t
     } else {
@@ -1165,6 +1208,47 @@ struct TaskLlmContextRow {
     context_notes: SqlxJson<Value>,
 }
 
+fn task_memory_query_text(t: &TaskLlmContextRow) -> String {
+    let mut parts = vec![t.title.trim().to_string()];
+    if let Some(spec) = t
+        .specification
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(spec.chars().take(1200).collect());
+    }
+    if let Value::Array(caps) = &t.capability_refs.0 {
+        let refs = caps
+            .iter()
+            .filter_map(|c| {
+                let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let rf = c.get("ref").and_then(|v| v.as_str()).unwrap_or("");
+                if rf.is_empty() {
+                    None
+                } else {
+                    Some(format!("{kind}:{rf}"))
+                }
+            })
+            .collect::<Vec<_>>();
+        if !refs.is_empty() {
+            parts.push(refs.join(" "));
+        }
+    }
+    if let Value::Array(notes) = &t.context_notes.0 {
+        let tail = notes
+            .iter()
+            .rev()
+            .take(6)
+            .filter_map(|n| n.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>();
+        if !tail.is_empty() {
+            parts.push(tail.join("\n"));
+        }
+    }
+    parts.join("\n")
+}
+
 async fn get_task_llm_context(
     State(st): State<ConsoleState>,
     Path(task_id): Path<Uuid>,
@@ -1225,24 +1309,55 @@ async fn get_task_llm_context(
                 )
             })?;
     let hsmii_home_for_task = hsmii_home.clone();
-    let shared_mem_addon = fetch_shared_memory_addon(pool, t.company_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
-    let mut agent_mem_addon = String::new();
-    if let Some(aid) = profile.agent_id {
-        agent_mem_addon = fetch_agent_memory_addon(pool, t.company_id, aid)
+    let task_memory_query = task_memory_query_text(&t);
+    let mut shared_opts = HybridSearchOptions::for_scope("shared", Uuid::nil());
+    shared_opts.latest_only = true;
+    shared_opts.valid_at = Some(Utc::now());
+    shared_opts.limit = 6;
+    let shared_mem_addon = match build_memory_context_addon(
+        pool,
+        t.company_id,
+        &task_memory_query,
+        &shared_opts,
+        "Company shared memory (graph/time aware)",
+    )
+    .await
+    {
+        Ok(addon) if addon.match_count > 0 => addon.markdown,
+        Ok(_) | Err(_) => fetch_shared_memory_addon(pool, t.company_id)
             .await
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": e.to_string() })),
                 )
-            })?;
+            })?,
+    };
+    let mut agent_mem_addon = String::new();
+    if let Some(aid) = profile.agent_id {
+        let mut agent_opts = HybridSearchOptions::for_scope("agent", aid);
+        agent_opts.latest_only = true;
+        agent_opts.valid_at = Some(Utc::now());
+        agent_opts.limit = 4;
+        agent_mem_addon = match build_memory_context_addon(
+            pool,
+            t.company_id,
+            &task_memory_query,
+            &agent_opts,
+            "Company agent memory (graph/time aware)",
+        )
+        .await
+        {
+            Ok(addon) if addon.match_count > 0 => addon.markdown,
+            Ok(_) | Err(_) => fetch_agent_memory_addon(pool, t.company_id, aid)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                })?,
+        };
     }
     let agent_memory_addon_bytes = agent_mem_addon.len();
     let mut task_addon = format!("## Current task\n\n- **Title:** {}\n", t.title);

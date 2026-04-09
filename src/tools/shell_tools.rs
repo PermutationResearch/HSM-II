@@ -10,6 +10,7 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::{object_schema, Tool, ToolOutput};
+use crate::tools::security::sanitize_working_dir_input;
 
 /// Maximum output size (100KB)
 const MAX_OUTPUT_SIZE: usize = 100 * 1024;
@@ -190,13 +191,19 @@ impl Tool for BashTool {
 
         let cwd: Option<String> = match params.get("working_dir").and_then(|v| v.as_str()) {
             Some(w) => match crate::harness::resolve_tool_fs_path(w) {
-                Ok(p) => Some(p.to_string_lossy().into_owned()),
+                Ok(p) => match sanitize_working_dir_input(&p.to_string_lossy()) {
+                    Ok(_) => Some(p.to_string_lossy().into_owned()),
+                    Err(e) => return ToolOutput::error(e),
+                },
                 Err(e) => return ToolOutput::error(e),
             },
             None => {
                 if crate::harness::current_root().is_some() {
                     match crate::harness::resolve_tool_fs_path(".") {
-                        Ok(p) => Some(p.to_string_lossy().into_owned()),
+                        Ok(p) => match sanitize_working_dir_input(&p.to_string_lossy()) {
+                            Ok(_) => Some(p.to_string_lossy().into_owned()),
+                            Err(e) => return ToolOutput::error(e),
+                        },
                         Err(e) => return ToolOutput::error(e),
                     }
                 } else {
