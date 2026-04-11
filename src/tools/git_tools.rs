@@ -10,6 +10,7 @@ async fn run_git(
     working_dir: Option<&str>,
 ) -> anyhow::Result<(String, String, i32)> {
     let mut cmd = tokio::process::Command::new("git");
+    crate::tools::subprocess_env::apply_minimal_env_tokio(&mut cmd);
     cmd.args(&args);
 
     if let Some(dir) = working_dir {

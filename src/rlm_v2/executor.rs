@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn test_blocked_patterns() {
         let config = SandboxConfig::default();
-        let params = serde_json::json!({"command": "rm -rf /"});
+        let _params = serde_json::json!({"command": "rm -rf /"});
 
         // This would need the executor instance to check properly
         // Just verify the pattern exists

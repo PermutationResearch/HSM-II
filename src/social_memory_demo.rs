@@ -6,7 +6,7 @@
 mod tests {
     use crate::agent::AgentId;
     use crate::social_memory::{
-        AgentReputation, CapabilityEvidence, CollaborationStats, DataSensitivity, PromiseRecord,
+        CollaborationStats, DataSensitivity, PromiseRecord,
         PromiseStatus, SocialMemory,
     };
 
@@ -452,7 +452,7 @@ mod tests {
         let mut scores = vec![];
 
         for agent in &agents {
-            let rep = social_memory.reputations.get(&agent.id).unwrap();
+            let _rep = social_memory.reputations.get(&agent.id).unwrap();
             let evidence = agent.experience as f64;
             let evidence_weight = (evidence / 5.0).min(1.0);
 

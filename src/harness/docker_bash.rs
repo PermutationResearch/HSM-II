@@ -1,4 +1,4 @@
-//! Optional high-risk bash isolation: run commands in Docker with the thread workspace mounted at `/ws`.
+//! Default `bash` tool isolation: `docker run` with the active thread workspace mounted at `/ws` (opt out via env).
 
 use std::process::Stdio;
 
@@ -11,15 +11,42 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Prefer `docker run` for the `bash` tool when an active thread workspace exists.
+///
+/// - Default: **on** (set `HSM_DOCKER_BASH=0` to disable).
+/// - `HSM_UNSAFE_HOST_BASH=1` disables Docker and forces host `bash` (local dev escape hatch).
 pub fn docker_bash_enabled() -> bool {
-    env_truthy("HSM_DOCKER_BASH")
+    if env_truthy("HSM_UNSAFE_HOST_BASH") {
+        return false;
+    }
+    match std::env::var("HSM_DOCKER_BASH") {
+        Ok(v) => {
+            let s = v.trim();
+            if s.is_empty() {
+                return true;
+            }
+            let l = s.to_ascii_lowercase();
+            if l == "0" || l == "false" || l == "no" || l == "off" {
+                return false;
+            }
+            true
+        }
+        Err(_) => true,
+    }
 }
 
-/// When true, `docker run` uses `--network none` (no egress). Enable with `HSM_DOCKER_BASH_NETWORK=none`.
-fn docker_network_is_none() -> bool {
-    std::env::var("HSM_DOCKER_BASH_NETWORK")
-        .map(|v| v.trim().eq_ignore_ascii_case("none"))
-        .unwrap_or(false)
+/// Extra `docker run` network args. Default / empty: **`--network none`**. Set `HSM_DOCKER_BASH_NETWORK=bridge`
+/// (or `host`, …) for egress; `default` omits `--network` (Docker daemon default).
+fn docker_network_run_args() -> Vec<String> {
+    let raw = std::env::var("HSM_DOCKER_BASH_NETWORK").unwrap_or_default();
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() || s == "none" {
+        return vec!["--network".into(), "none".into()];
+    }
+    if s == "default" {
+        return vec![];
+    }
+    vec!["--network".into(), raw.trim().to_string()]
 }
 
 pub async fn run_in_docker(
@@ -27,7 +54,7 @@ pub async fn run_in_docker(
     working_dir: Option<&str>,
 ) -> Result<(String, String, i32), String> {
     let root = super::thread_workspace::current_root().ok_or_else(|| {
-        "HSM_DOCKER_BASH requires an active thread workspace (enable HSM_THREAD_WORKSPACE=1)"
+        "Docker bash requires an active thread workspace (enable HSM_THREAD_WORKSPACE=1) or disable container wrap (HSM_DOCKER_BASH=0 / HSM_UNSAFE_HOST_BASH=1 for local dev)."
             .to_string()
     })?;
 
@@ -48,8 +75,8 @@ pub async fn run_in_docker(
 
     let mut cmd = tokio::process::Command::new("docker");
     cmd.arg("run").arg("--rm");
-    if docker_network_is_none() {
-        cmd.args(["--network", "none"]);
+    for a in docker_network_run_args() {
+        cmd.arg(a);
     }
     cmd.args([
         "-v",

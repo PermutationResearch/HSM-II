@@ -89,9 +89,9 @@ export function WorkspaceHubLinks() {
                       href={item.href}
                       title={item.hint}
                       className={cn(
-                        "block rounded-md px-2 py-1.5 font-sans text-[13px] transition-colors",
+                        "block rounded-md border border-transparent px-2 py-1.5 font-sans text-[13px] transition-colors",
                         active
-                          ? "bg-white text-black font-medium"
+                          ? "border-[#333333] bg-white/[0.05] text-white font-medium"
                           : "text-[#bbbbbb] hover:bg-white/[0.06] hover:text-white",
                       )}
                     >

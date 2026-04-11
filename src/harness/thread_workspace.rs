@@ -146,7 +146,9 @@ pub fn resolve_tool_fs_path(user_path: &str) -> Result<PathBuf, String> {
                 "thread workspace strict mode is enabled but no active workspace is set".into(),
             );
         }
-        return Ok(PathBuf::from(t));
+        let p = crate::tools::security::expand_user_path_hint(t);
+        crate::tools::security::deny_sensitive_tool_path(&p)?;
+        return Ok(p);
     };
 
     let candidate = if t == "." {

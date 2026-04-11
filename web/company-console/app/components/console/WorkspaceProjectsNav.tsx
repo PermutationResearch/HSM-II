@@ -72,9 +72,9 @@ function WorkspaceProjectsNavBody() {
             href="/workspace/issues"
             title="All issues for this company"
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors",
+              "flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-[12px] transition-colors",
               pathname.startsWith("/workspace/issues") && !selectedProject
-                ? "bg-white text-black"
+                ? "border-[#333333] bg-white/[0.05] text-white"
                 : "text-[#b0b0b0] hover:bg-white/[0.06] hover:text-[#e8e8e8]",
             )}
           >
@@ -99,9 +99,9 @@ function WorkspaceProjectsNavBody() {
                   href={href}
                   title={p.title}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[12px] transition-colors",
+                    "flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 pl-3 text-left text-[12px] transition-colors",
                     active
-                      ? "bg-white text-black"
+                      ? "border-[#333333] bg-white/[0.05] text-white"
                       : "text-[#b0b0b0] hover:bg-white/[0.06] hover:text-[#e8e8e8]",
                   )}
                 >
@@ -148,13 +148,13 @@ function WorkspaceProjectsNavBody() {
                   href={href}
                   title={`${label} — tasks, files, and run status`}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors",
+                    "flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-[12px] transition-colors",
                     active
-                      ? "bg-white text-black"
+                      ? "border-[#333333] bg-white/[0.05] text-white"
                       : "text-[#b0b0b0] hover:bg-white/[0.06] hover:text-[#e8e8e8]",
                   )}
                 >
-                  <Bot className={cn("h-3.5 w-3.5 shrink-0", active ? "text-black" : "text-[#666666]")} />
+                  <Bot className={cn("h-3.5 w-3.5 shrink-0", active ? "text-white" : "text-[#666666]")} />
                   <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{label}</span>
                 </Link>
               );

@@ -381,8 +381,24 @@ impl BatchAggregator {
         let mut credit_deltas: HashMap<String, Vec<f64>> = HashMap::new();
 
         for dir in run_dirs {
-            let summary_path = dir.join("summary.json");
-            if let Ok(content) = std::fs::read_to_string(&summary_path) {
+            // Summary files are named run_XX_seed_SEED_summary.json inside the run dir.
+            // Try the exact name first; fall back to glob-style scan for any *_summary.json.
+            let summary_content = std::fs::read_dir(dir)
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .find(|e| {
+                            let name = e.file_name();
+                            let s = name.to_string_lossy();
+                            s.ends_with("_summary.json") && !s.contains("aggregate")
+                        })
+                        .and_then(|e| std::fs::read_to_string(e.path()).ok())
+                })
+                // Legacy fallback: flat summary.json
+                .or_else(|| std::fs::read_to_string(dir.join("summary.json")).ok());
+
+            if let Some(content) = summary_content {
                 if let Ok(summary) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(coh) = summary["final_coherence"].as_f64() {
                         final_coherences.push(coh);
@@ -468,10 +484,15 @@ impl BatchAggregator {
             credit_delta_std.insert(decision_type.clone(), Self::std(deltas));
         }
 
+        let coh_mean = Self::mean(&final_coherences);
+        let coh_std = Self::std(&final_coherences);
+        let final_coherence_cv = if coh_mean > 0.0 { coh_std / coh_mean } else { 0.0 };
+
         Ok(AggregatedStats {
             coherence_trajectories: all_coherence_trajectories,
-            final_coherence_mean: Self::mean(&final_coherences),
-            final_coherence_std: Self::std(&final_coherences),
+            final_coherence_mean: coh_mean,
+            final_coherence_std: coh_std,
+            final_coherence_cv,
             coherence_growth_mean: Self::mean(&coherence_growths),
             coherence_growth_std: Self::std(&coherence_growths),
             skills_promoted_mean: Self::mean_usize(&skills_promoted),
@@ -528,6 +549,9 @@ pub struct AggregatedStats {
     pub coherence_trajectories: Vec<Vec<f64>>,
     pub final_coherence_mean: f64,
     pub final_coherence_std: f64,
+    /// Coefficient of variation (std/mean) for final coherence.
+    /// Lower CV = tighter, more predictable outcomes across seeds.
+    pub final_coherence_cv: f64,
     pub coherence_growth_mean: f64,
     pub coherence_growth_std: f64,
     pub skills_promoted_mean: f64,

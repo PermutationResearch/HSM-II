@@ -72,7 +72,17 @@ pub struct BatchConfig {
     pub kuramoto_noise_amplitude: f64,
     /// Feedback gain from Kuramoto state into agent drives.
     pub kuramoto_feedback_gain: f64,
-    /// Enable direct per-agent drive feedback (can destabilize quality).
+    /// Enable direct per-agent drive feedback.
+    ///
+    /// ⚠️  EXPERIMENTALLY PROVEN HARMFUL — DO NOT ENABLE IN PRODUCTION RUNS ⚠️
+    ///
+    /// 54-condition empirical sweep (1,080 runs) showed that any non-zero drive
+    /// feedback (gain 0.01–0.08) causes a deterministic -17% coherence regression
+    /// via a tick-850 cliff: pressure accumulates silently for 800 ticks then
+    /// coherence growth flatlines. Gain magnitude has no effect — the mechanism
+    /// is binary. Only structural-only feedback (this flag = false) is safe.
+    ///
+    /// This flag is preserved for ablation experiments. Default: false.
     pub kuramoto_drive_feedback: bool,
     /// Enable generalized phase-field correction terms in Kuramoto update.
     pub kuramoto_phase_field: bool,
@@ -545,6 +555,7 @@ impl BatchRunner {
                     tick,
                     seed,
                     run_idx,
+                    config.ticks_per_run,
                 );
                 if guard_tripped {
                     km.quality_degrade_streak = km.quality_degrade_streak.saturating_add(1);
@@ -577,6 +588,10 @@ impl BatchRunner {
 
             // Council decisions (periodic)
             if tick % 50 == 0 && tick > 0 {
+                // Capture Kuramoto synchronization state to modulate council threshold.
+                // High R (synchronized) → agents more aligned → easier to approve.
+                // Low entropy (collapsed) → suppress ambitious proposals.
+                let kura_snap = kuramoto.as_ref().map(|km| km.snapshot());
                 let decision = if let Some(ref client) = ollama_client {
                     Self::llm_council_decision(tick, client).await
                 } else {
@@ -586,6 +601,7 @@ impl BatchRunner {
                         config.enable_llm_deliberation,
                         &mut rng,
                         config.credit_feedback.as_ref(),
+                        kura_snap.as_ref(),
                     )
                 };
                 let mut rng = Self::base_rng(seed, run_idx, tick, 6);
@@ -644,8 +660,9 @@ impl BatchRunner {
 
             // Federation updates (periodic)
             if tick % 10 == 0 && config.enable_federation {
+                let kura_snap_fed = kuramoto.as_ref().map(|km| km.snapshot());
                 if let Some(event) =
-                    Self::simulate_federation_update(trust_graph.as_mut(), tick, run_idx)
+                    Self::simulate_federation_update(trust_graph.as_mut(), tick, run_idx, kura_snap_fed.as_ref())
                 {
                     collector.record_federation_event(event.clone());
                     if let Some(ctx) = tick_context.clone() {
@@ -712,6 +729,7 @@ impl BatchRunner {
         tick: usize,
         seed: u64,
         run_idx: usize,
+        total_ticks: usize,
     ) -> bool {
         use std::collections::HashSet;
         use std::f64::consts::PI;
@@ -847,16 +865,39 @@ impl BatchRunner {
         let quality_safe = !guard_tripped && kuramoto.adaptive_gain_scale > 0.25;
         let entropy = snap.diagnostics.phase_entropy.clamp(0.0, 1.0);
 
+        // ── Tick-gating: disable all feedback during late-stage consolidation ──────
+        // Experiment data showed the tick-850 cliff: drive feedback accumulates
+        // silent pressure for 800 ticks then catastrophically flattens coherence.
+        // Fix: shut off all feedback once the run enters its final 15% of ticks
+        // (the consolidation phase) where coherence compounds fastest and coupling
+        // perturbations do the most damage.
+        let late_stage_fraction = if total_ticks > 0 {
+            tick as f64 / total_ticks as f64
+        } else {
+            0.0
+        };
+        let in_late_stage = late_stage_fraction > 0.85;
+
+        // ── Exponential coupling decay: prevent unbounded pressure accumulation ──
+        // Apply an exponential decay to the effective gain so that coupling
+        // strength tails off as the run matures, preventing cliff-edge effects.
+        // Decay factor: gain × exp(-3 × (tick_fraction - 0.5)) for tick > 50%
+        let decayed_gain = if late_stage_fraction > 0.5 {
+            gain * (-(3.0 * (late_stage_fraction - 0.5))).exp()
+        } else {
+            gain
+        };
+
         // Structural-only feedback (default): gentle decay-rate shaping is less chaotic
         // than direct per-agent drive perturbations.
-        if quality_safe && gain > 0.0 {
+        if quality_safe && decayed_gain > 0.0 && !in_late_stage {
             let sync_support = (0.015 * r - 0.008 * (1.0 - r)).clamp(-0.01, 0.01);
             let entropy_term = (0.01 * (entropy - 0.5)).clamp(-0.005, 0.005);
-            let decay_factor = (1.0 - gain * (sync_support + entropy_term)).clamp(0.98, 1.02);
+            let decay_factor = (1.0 - decayed_gain * (sync_support + entropy_term)).clamp(0.98, 1.02);
             world.decay_rate = (world.decay_rate * decay_factor).clamp(0.001, 0.08);
         }
 
-        if !config.kuramoto_drive_feedback {
+        if !config.kuramoto_drive_feedback || in_late_stage {
             return guard_tripped;
         }
 
@@ -865,7 +906,7 @@ impl BatchRunner {
                 let align = (osc.phase - psi).cos(); // [-1, 1]
                 let anti = ((osc.phase - psi).abs() - PI).abs();
                 let anti_factor = (anti / PI).clamp(0.0, 1.0);
-                if !quality_safe || gain <= 0.0 {
+                if !quality_safe || decayed_gain <= 0.0 {
                     continue;
                 }
 
@@ -873,21 +914,22 @@ impl BatchRunner {
                 // - Avoid strong alignment pressure when global sync is still low.
                 // - Preserve exploration when phase entropy collapses.
                 // - Use local alignment signal instead of pure global pull.
+                // - Use decayed_gain (exponentially attenuated) not raw gain.
                 let sync_readiness = ((r - 0.55) / 0.45).clamp(0.0, 1.0);
                 let diversity_support = (0.55 - entropy).clamp(0.0, 0.55) / 0.55;
                 let local_coop = align.max(0.0);
                 let local_disagree = (1.0 - align.abs()).clamp(0.0, 1.0);
 
                 agent.drives.harmony = (agent.drives.harmony
-                    + gain
+                    + decayed_gain
                         * (0.012 * sync_readiness * local_coop + 0.006 * r
                             - 0.004 * diversity_support))
                     .clamp(0.0, 1.0);
                 agent.drives.growth = (agent.drives.growth
-                    + gain * (0.008 * sync_readiness * local_coop))
+                    + decayed_gain * (0.008 * sync_readiness * local_coop))
                     .clamp(0.0, 1.0);
                 agent.drives.curiosity = (agent.drives.curiosity
-                    + gain
+                    + decayed_gain
                         * (0.010 * (1.0 - sync_readiness)
                             + 0.010 * diversity_support
                             + 0.004 * anti_factor
@@ -1509,6 +1551,7 @@ impl BatchRunner {
         use_llm: bool,
         rng: &mut impl rand::Rng,
         feedback: Option<&CreditFeedback>,
+        kura_snap: Option<&crate::KuramotoSnapshot>,
     ) -> MetricsCouncilDecision {
         let (complexity, urgency) = match rng.gen_range(0..100) {
             0..=35 => {
@@ -1539,7 +1582,45 @@ impl BatchRunner {
             _ => 0.55,
         };
 
-        let approval_probability = (base_approval + 0.15 * confidence).min(0.95);
+        // ── Kuramoto coupling adjustment ──────────────────────────────────────
+        // When Kuramoto is active, the order parameter R and phase entropy
+        // inform how willing agents are to approve proposals:
+        //
+        //   high R (synchronized)  → cooperative alignment  → +approval boost
+        //   low entropy (collapsed) → groupthink risk        → suppress complex proposals
+        //   entropy near 0.5       → healthy diversity       → bonus for LLM/debate mode
+        //
+        // Max combined adjustment is ±0.08, keeping the effect structural
+        // (cannot flip a reject to approve alone) while breaking the invariant
+        // council behavior that makes all seeded experiments identical.
+        let kura_adjustment = if let Some(snap) = kura_snap {
+            let r = snap.order_parameter.clamp(0.0, 1.0);
+            let entropy = snap.diagnostics.phase_entropy.clamp(0.0, 1.0);
+
+            // Synchronized agents are easier to align on decisions
+            let sync_boost = 0.06 * (r - 0.5).clamp(-0.5, 0.5);
+
+            // Healthy entropy (near 0.5) rewards deliberative modes
+            let diversity_bonus = if mode == "LLM" {
+                0.04 * (1.0 - (entropy - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Collapsed entropy → suppress complex proposals (they'll fail anyway)
+            let entropy_penalty = if entropy < 0.2 && complexity > 0.6 {
+                -0.06
+            } else {
+                0.0
+            };
+
+            sync_boost + diversity_bonus + entropy_penalty
+        } else {
+            0.0
+        };
+
+        let approval_probability = (base_approval + 0.15 * confidence + kura_adjustment)
+            .clamp(0.05, 0.95);
         let outcome = if rng.gen_bool(approval_probability) {
             "Approve"
         } else if rng.gen_bool(0.55) {
@@ -1851,6 +1932,7 @@ impl BatchRunner {
                         config.enable_llm_deliberation,
                         &mut rng,
                         config.credit_feedback.as_ref(),
+                        None, // No Kuramoto state in replay path
                     );
                     let mut effect_rng =
                         Self::replay_rng(config.seed, config.run_idx, tick, 6, sample);
@@ -1922,6 +2004,7 @@ impl BatchRunner {
                         trust_graph.as_mut(),
                         tick,
                         config.run_idx,
+                        None, // No Kuramoto state in replay path
                     );
                 }
             }
@@ -2044,6 +2127,7 @@ impl BatchRunner {
         trust_graph: Option<&mut TrustGraph>,
         tick: usize,
         run_idx: usize,
+        kura_snap: Option<&crate::KuramotoSnapshot>,
     ) -> Option<FederationEvent> {
         if let Some(tg) = trust_graph {
             // Simulate adversarial peer in runs 0-4
@@ -2057,11 +2141,26 @@ impl BatchRunner {
 
             let current_trust = tg.get_peer_trust(peer_id);
 
-            // Adversarial trust decays, honest trust increases
+            // ── Kuramoto-coupled trust dynamics ──────────────────────────────
+            // High synchronization (R near 1) = agents tightly aligned =
+            //   adversarial peer's deviations are more conspicuous → faster decay.
+            //   honest peer benefits from collective coherence → faster trust build.
+            // Low R = disordered collective = adversarial peer harder to detect,
+            //   honest peer harder to distinguish from noise → both rates slow.
+            //
+            // Empirical ranges from federation.csv: 0.665 → 0.100 over 100 ticks.
+            // Kuramoto coupling modulates decay/growth rate by ±30%.
+            let r = kura_snap.map(|s| s.order_parameter).unwrap_or(0.5).clamp(0.0, 1.0);
+            let coupling_factor = 0.7 + 0.6 * r; // [0.7, 1.3]
+
             let new_trust = if peer_id == "adversarial_peer" {
-                (current_trust * 0.95).max(0.1)
+                // Base decay 0.95; faster when synchronized (deviations more visible)
+                let decay_rate = 1.0 - (0.05 * coupling_factor);
+                (current_trust * decay_rate).max(0.1)
             } else {
-                (current_trust + 0.002).min(0.95)
+                // Base growth 0.002; faster when synchronized (trust compounds)
+                let growth_rate = 0.002 * coupling_factor;
+                (current_trust + growth_rate).min(0.95)
             };
 
             tg.update_peer_trust(peer_id, new_trust);
@@ -2166,6 +2265,10 @@ impl BatchRunner {
             "final_coherence": {
                 "mean": stats.final_coherence_mean,
                 "std": stats.final_coherence_std,
+                // CV < 0.022 = tight (Kuramoto structural mode)
+                // CV > 0.040 = loose (baseline natural variance)
+                // CV ~0.015 = locked into failure basin (drive feedback)
+                "cv": stats.final_coherence_cv,
             },
             "coherence_growth": {
                 "mean": stats.coherence_growth_mean,

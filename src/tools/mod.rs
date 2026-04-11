@@ -56,6 +56,7 @@ pub mod integrated_executor;
 pub mod registry;
 pub mod scored_tool_router;
 pub mod security;
+pub mod subprocess_env;
 pub mod shell_tools;
 pub mod tool_permissions;
 pub use harness_gate::HarnessPolicyGate;
@@ -145,7 +146,8 @@ pub use ops_tools::register_personal_ops_tools;
 pub mod company_os_tools;
 pub use company_os_tools::{
     CompanyAgentRunFeedbackTool, CompanyMemoryAppendTool, CompanyMemorySearchTool,
-    CompanyPromoteFeedbackToTaskTool, CompanyTaskRequiresHumanTool,
+    CompanyPromoteFeedbackToTaskTool, CompanyTaskRequiresHumanTool, CompanyToolCallTool,
+    CompanyToolDescribeTool, CompanyToolDiscoverTool,
 };
 
 /// On-disk SKILL.md: `skills_list`, `skill_md_read` (shared catalog from personal agent).
@@ -326,6 +328,9 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     // API tools
     registry.register(Arc::new(HttpRequestTool::new()));
     registry.register(Arc::new(CompanyTaskRequiresHumanTool::new()));
+    registry.register(Arc::new(CompanyToolDiscoverTool::new()));
+    registry.register(Arc::new(CompanyToolDescribeTool::new()));
+    registry.register(Arc::new(CompanyToolCallTool::new()));
     registry.register(Arc::new(CompanyMemorySearchTool::new()));
     registry.register(Arc::new(CompanyMemoryAppendTool::new()));
     registry.register(Arc::new(CompanyAgentRunFeedbackTool::new()));

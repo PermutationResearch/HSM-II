@@ -10,6 +10,7 @@
 mod agent_runs;
 mod agents;
 mod bundle;
+mod context_repo;
 mod company_memory;
 mod company_memory_hybrid;
 pub mod intelligence_signals;
@@ -22,6 +23,7 @@ pub mod paperclip_sync;
 pub mod self_improvement;
 mod spend;
 mod store_promotion;
+mod tool_catalog;
 mod workspace_catalog;
 mod workspace_files;
 
@@ -88,8 +90,10 @@ pub fn router() -> Router<ConsoleState> {
         .merge(intelligence_signals::router())
         .merge(self_improvement::router())
         .merge(store_promotion::router())
+        .merge(tool_catalog::router())
         .merge(workspace_catalog::router())
         .merge(workspace_files::router())
+        .merge(context_repo::router())
         .merge(company_memory::router())
         .merge(memory_engine::router())
         .route("/api/company/health", get(company_health))
@@ -1981,6 +1985,11 @@ fn company_os_api_catalog_endpoints() -> Value {
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/skills/agentskills/export", "summary": "Export company skill bank in agentskills.io-compatible bundle format with provenance" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/skills/agentskills/import", "summary": "Import agentskills.io-compatible bundle with overwrite/dry-run controls and provenance preservation" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/migrations/legacy-agent-data", "summary": "Migrate legacy agent data (skills, memories, allowlists) with dry-run first pattern" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/context-repo/contract?session_key=", "summary": "Context repository layout contract (manifest, INDEX, notes/) under hsmii_home/context-repos" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/context-repo/ensure", "summary": "Create context-repo dirs + default manifest.json and INDEX.md" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/context-repo/publish", "summary": "Publish context repo snapshot into shared memory (hybrid retrieval) with governance + supersedes chain" },
+        { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/context-repo/rollback", "summary": "Rollback a context-repo publish (restore previous memory head)" },
+        { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/context-repo/publishes?session_key=", "summary": "List context-repo publishes for a session" },
         { "scope": "company", "methods": ["POST"], "path": "/api/company/companies/{company_id}/skills/bootstrap/prune", "summary": "Disable or prune auto-bootstrapped Hermes packs by provenance source/pack" },
         { "scope": "company", "methods": ["GET", "PUT", "DELETE"], "path": "/api/company/companies/{company_id}/credentials", "summary": "Store masked company credentials for operator-connected services and MCP-style tools" },
         { "scope": "company", "methods": ["GET"], "path": "/api/company/companies/{company_id}/browser/providers", "summary": "Cloud-browser and provider status surface (Firecrawl, Browserbase, Browser Use, xAI)" },
@@ -4115,7 +4124,11 @@ async fn checkout_task(
             state = CASE WHEN state = 'open' THEN 'in_progress' ELSE state END,
             updated_at = NOW()
            WHERE id = $3
-             AND (checked_out_by IS NULL OR checked_out_until < NOW())
+             AND (
+               checked_out_by IS NULL
+               OR checked_out_until < NOW()
+               OR lower(trim(checked_out_by)) = lower($1)
+             )
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
                      owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
     )
@@ -4958,6 +4971,7 @@ async fn stream_runtime_events() -> Sse<impl futures_util::Stream<Item = Result<
                     success: false,
                     message: "runtime event stream lagged".to_string(),
                     ts_ms: Utc::now().timestamp_millis(),
+                    stream_event: None,
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,

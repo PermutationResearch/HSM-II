@@ -6,6 +6,13 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::{object_schema, Tool, ToolOutput};
 use crate::tools::security::validate_archive_member_path;
+use crate::tools::subprocess_env::apply_minimal_env_tokio;
+
+fn tokio_tool_cmd(program: &str) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new(program);
+    apply_minimal_env_tokio(&mut c);
+    c
+}
 
 // ============================================================================
 // System Info Tool
@@ -169,7 +176,7 @@ impl Tool for ProcessListTool {
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
         // Try to get process list using ps command
-        let output = tokio::process::Command::new("ps")
+        let output = tokio_tool_cmd("ps")
             .args(&["aux"])
             .output()
             .await;
@@ -268,7 +275,7 @@ impl Tool for DiskUsageTool {
             }
             _ => {
                 // Fallback: try du
-                let output = tokio::process::Command::new("du")
+                let output = tokio_tool_cmd("du")
                     .args(&["-sh", &path])
                     .output()
                     .await;
@@ -790,24 +797,24 @@ impl ArchiveExtractTool {
     ) -> Result<(), String> {
         let arch_s = archive_path.to_string_lossy().to_string();
         let list = match extension {
-            "zip" => tokio::process::Command::new("unzip")
+            "zip" => tokio_tool_cmd("unzip")
                 .args(["-Z1", arch_s.as_str()])
                 .output()
                 .await
                 .map_err(|e| format!("failed to inspect zip: {e}"))?,
             "gz" if arch_s.ends_with(".tar.gz") || arch_s.ends_with(".tgz") => {
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(["-tzf", arch_s.as_str()])
                     .output()
                     .await
                     .map_err(|e| format!("failed to inspect tar.gz: {e}"))?
             }
-            "tar" => tokio::process::Command::new("tar")
+            "tar" => tokio_tool_cmd("tar")
                 .args(["-tf", arch_s.as_str()])
                 .output()
                 .await
                 .map_err(|e| format!("failed to inspect tar: {e}"))?,
-            "bz2" => tokio::process::Command::new("tar")
+            "bz2" => tokio_tool_cmd("tar")
                 .args(["-tjf", arch_s.as_str()])
                 .output()
                 .await
@@ -887,25 +894,25 @@ impl Tool for ArchiveExtractTool {
 
         let result = match extension.as_str() {
             "zip" => {
-                tokio::process::Command::new("unzip")
+                tokio_tool_cmd("unzip")
                     .args(["-o", arch_s.as_ref(), "-d", dest_s.as_ref()])
                     .output()
                     .await
             }
             "gz" if arch_s.ends_with(".tar.gz") || arch_s.ends_with(".tgz") => {
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(["-xzf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
             }
             "tar" => {
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(["-xf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
             }
             "bz2" => {
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(["-xjf", arch_s.as_ref(), "-C", dest_s.as_ref()])
                     .output()
                     .await
@@ -1015,7 +1022,7 @@ impl Tool for ArchiveCreateTool {
             "zip" => {
                 let mut args = vec!["-r", output];
                 args.extend(files.iter().map(|s| s.as_str()));
-                tokio::process::Command::new("zip")
+                tokio_tool_cmd("zip")
                     .args(&args)
                     .output()
                     .await
@@ -1023,7 +1030,7 @@ impl Tool for ArchiveCreateTool {
             "tar" => {
                 let mut args = vec!["-cf", output];
                 args.extend(files.iter().map(|s| s.as_str()));
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(&args)
                     .output()
                     .await
@@ -1031,7 +1038,7 @@ impl Tool for ArchiveCreateTool {
             "tar.gz" => {
                 let mut args = vec!["-czf", output];
                 args.extend(files.iter().map(|s| s.as_str()));
-                tokio::process::Command::new("tar")
+                tokio_tool_cmd("tar")
                     .args(&args)
                     .output()
                     .await

@@ -20,6 +20,7 @@ type ProviderPreset = {
 };
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  { key: "openrouter", label: "OpenRouter", envVar: "OPENROUTER_API_KEY", description: "Unified LLM gateway — qwen, mistral, gemini, and 200+ models via one key.", category: "AI" },
   { key: "openai", label: "OpenAI", envVar: "OPENAI_API_KEY", description: "Reasoning, embeddings, structured LLM tasks.", category: "AI" },
   { key: "anthropic", label: "Anthropic", envVar: "ANTHROPIC_API_KEY", description: "Long-form agent work and structured operator flows.", category: "AI" },
   { key: "github", label: "GitHub", envVar: "GITHUB_TOKEN", description: "Repo, PR, issue, and CI automation.", category: "Dev" },

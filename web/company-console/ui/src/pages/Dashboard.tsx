@@ -267,6 +267,18 @@ export function Dashboard({
   const DRAG_HANDLE_CLASS = "dashboard-drag-handle";
   /** Avoid initialWidth 1280 (hook default) stretching the grid wider than the canvas before measure. */
   const { containerRef: gridContainerRef, width: gridWidth } = useContainerWidth({ initialWidth: 0 });
+  const [viewportFallbackWidth, setViewportFallbackWidth] = useState(0);
+
+  useEffect(() => {
+    const update = () => {
+      const vw = typeof window !== "undefined" ? window.innerWidth : 0;
+      // Keep a conservative fallback for sidebars/rails so columns don't overspill.
+      setViewportFallbackWidth(Math.max(320, vw - 420));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   useEffect(() => {
     layoutsRef.current = layouts;
@@ -467,6 +479,7 @@ export function Dashboard({
   const dm = dashboardMetrics;
   const runs = data?.tasks ?? [];
   const companyLabel = companies.find((c) => c.id === companyId)?.display_name ?? null;
+  const effectiveGridWidth = gridWidth > 0 ? gridWidth : viewportFallbackWidth;
 
   const drill = onDrillDown;
   const metricTo = (fallback?: string) => (drill ? undefined : fallback);
@@ -564,7 +577,7 @@ export function Dashboard({
 
       {data && (
         <div ref={gridContainerRef as React.Ref<HTMLDivElement>} className="min-w-0 max-w-full">
-        {gridWidth > 0 ? (
+        {effectiveGridWidth > 0 ? (
         <ResponsiveGridLayout
           className="layout"
           layouts={layouts}
@@ -572,7 +585,7 @@ export function Dashboard({
           cols={{ lg: 12, md: 10, sm: 6 }}
           autoSize
           rowHeight={44}
-          width={gridWidth}
+          width={effectiveGridWidth}
           positionStrategy={transformStrategy}
           dragConfig={{
             enabled: !gridLocked,

@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::time::{Duration, Instant};
+use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::bundle::ToolBundle;
@@ -169,6 +169,14 @@ impl ToolRegistry {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
         crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "start");
+        crate::runtime_control::publish_completion(crate::runtime_control::CompletionEvent::tool_start(
+            &call.name,
+            &call.call_id,
+            format!(
+                "tool started args={}",
+                crate::harness::redact_secrets(&serde_json::to_string(&call.parameters).unwrap_or_else(|_| "{}".into()))
+            ),
+        ));
 
         let env_merged: Option<crate::harness::HarnessRunEnvelope> = call
             .harness_run
@@ -190,10 +198,9 @@ impl ToolRegistry {
                 }
             }
             crate::runtime_control::publish_completion(
-                crate::runtime_control::CompletionEvent::tool_completion(
+                crate::runtime_control::CompletionEvent::tool_error(
                     &call.name,
                     &call.call_id,
-                    false,
                     format!("blocked by policy: {reason}"),
                 ),
             );
@@ -206,6 +213,25 @@ impl ToolRegistry {
             };
         }
         crate::harness::record_policy_result(&span, true, None);
+
+        if should_enforce_strict_flow(&call) {
+            if let Some(reason) = strict_flow_violation(&call) {
+                crate::runtime_control::publish_completion(
+                    crate::runtime_control::CompletionEvent::tool_error(
+                        &call.name,
+                        &call.call_id,
+                        format!("blocked by strict flow: {reason}"),
+                    ),
+                );
+                crate::runtime_control::mark_runtime_idle();
+                return ToolCallResult {
+                    call,
+                    output: ToolOutput::error(reason),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    timestamp,
+                };
+            }
+        }
 
         if let Ok(list_str) = std::env::var("HSM_TOOL_APPROVAL_LIST") {
             let set: HashSet<String> = list_str
@@ -224,41 +250,90 @@ impl ToolRegistry {
                     "tool={} params={}",
                     call.name, call.parameters
                 ));
-                match appr.evaluate_or_queue(&key, &summary) {
-                    Ok(crate::harness::ApprovalOutcome::Allow) => {}
-                    Ok(crate::harness::ApprovalOutcome::Deny) => {
-                        crate::runtime_control::publish_completion(
-                            crate::runtime_control::CompletionEvent::tool_completion(
-                                &call.name,
-                                &call.call_id,
-                                false,
-                                "tool denied by approval store".to_string(),
-                            ),
-                        );
-                        crate::runtime_control::mark_runtime_idle();
-                        return ToolCallResult {
-                            call,
-                            output: ToolOutput::error("Tool denied by approval store".to_string()),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            timestamp,
-                        };
-                    }
-                    Err(e) => {
-                        crate::runtime_control::publish_completion(
-                            crate::runtime_control::CompletionEvent::tool_completion(
-                                &call.name,
-                                &call.call_id,
-                                false,
-                                e.to_string(),
-                            ),
-                        );
-                        crate::runtime_control::mark_runtime_idle();
-                        return ToolCallResult {
-                            call,
-                            output: ToolOutput::error(e.to_string()),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            timestamp,
-                        };
+                let approval_wait_ms =
+                    env_ms("HSM_TOOL_APPROVAL_WAIT_MS", 120_000, 0, 30 * 60 * 1000);
+                let approval_poll_ms = env_ms("HSM_TOOL_APPROVAL_POLL_MS", 1_500, 200, 30_000);
+                let paused_execution_id = uuid::Uuid::new_v4().to_string();
+                let mut first_pause_emitted = false;
+                let wait_deadline = Instant::now() + Duration::from_millis(approval_wait_ms);
+
+                loop {
+                    match appr.evaluate_or_queue(&key, &summary) {
+                        Ok(crate::harness::ApprovalOutcome::Allow) => {
+                            if first_pause_emitted {
+                                crate::runtime_control::mark_tool_activity(
+                                    &call.name,
+                                    &call.call_id,
+                                    "resumed_approval",
+                                );
+                                crate::runtime_control::publish_completion(
+                                    crate::runtime_control::CompletionEvent::tool_start(
+                                        &call.name,
+                                        &call.call_id,
+                                        format!(
+                                            "resumed_approval execution_id={} approval_key={}",
+                                            paused_execution_id, key
+                                        ),
+                                    ),
+                                );
+                            }
+                            break;
+                        }
+                        Ok(crate::harness::ApprovalOutcome::Deny) => {
+                            crate::runtime_control::publish_completion(
+                                crate::runtime_control::CompletionEvent::tool_error(
+                                    &call.name,
+                                    &call.call_id,
+                                    format!(
+                                        "denied_approval execution_id={} approval_key={}",
+                                        paused_execution_id, key
+                                    ),
+                                ),
+                            );
+                            crate::runtime_control::mark_runtime_idle();
+                            return ToolCallResult {
+                                call,
+                                output: ToolOutput::error("Tool denied by approval store".to_string()),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                timestamp,
+                            };
+                        }
+                        Err(e) => {
+                            let err = e.to_string();
+                            if !first_pause_emitted {
+                                first_pause_emitted = true;
+                                crate::runtime_control::mark_tool_activity(
+                                    &call.name,
+                                    &call.call_id,
+                                    "paused_approval",
+                                );
+                                crate::runtime_control::publish_completion(
+                                    crate::runtime_control::CompletionEvent::tool_error(
+                                        &call.name,
+                                        &call.call_id,
+                                        format!(
+                                            "paused_approval execution_id={} approval_key={} message={}",
+                                            paused_execution_id,
+                                            key,
+                                            crate::harness::redact_secrets(&err)
+                                        ),
+                                    ),
+                                );
+                            }
+                            if approval_wait_ms == 0 || Instant::now() >= wait_deadline {
+                                crate::runtime_control::mark_runtime_idle();
+                                return ToolCallResult {
+                                    call,
+                                    output: ToolOutput::error(format!(
+                                        "approval pending (execution_id={} approval_key={}): {}",
+                                        paused_execution_id, key, err
+                                    )),
+                                    duration_ms: start.elapsed().as_millis() as u64,
+                                    timestamp,
+                                };
+                            }
+                            sleep(Duration::from_millis(approval_poll_ms)).await;
+                        }
                     }
                 }
             }
@@ -318,6 +393,30 @@ impl ToolRegistry {
             warn!("Tool not found: {}", call.name);
             ToolOutput::error(format!("Tool '{}' not found", call.name))
         };
+
+        if !output.success {
+            if let Some(err_txt) = output.error.as_deref() {
+                if looks_like_auth_pause(err_txt) {
+                    let execution_id = uuid::Uuid::new_v4().to_string();
+                    crate::runtime_control::mark_tool_activity(
+                        &call.name,
+                        &call.call_id,
+                        "paused_auth",
+                    );
+                    crate::runtime_control::publish_completion(
+                        crate::runtime_control::CompletionEvent::tool_error(
+                            &call.name,
+                            &call.call_id,
+                            format!(
+                                "paused_auth execution_id={} message={}",
+                                execution_id,
+                                crate::harness::redact_secrets(err_txt)
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
 
         crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "finish");
         crate::runtime_control::publish_completion(crate::runtime_control::CompletionEvent::tool_completion(
@@ -387,6 +486,90 @@ fn transient_tool_failure(output: &ToolOutput) -> bool {
         || e.contains("429")
         || e.contains("rate limit")
         || e.contains("temporar")
+}
+
+fn env_ms(name: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.clamp(min_ms, max_ms))
+        .unwrap_or(default_ms.clamp(min_ms, max_ms))
+}
+
+fn boolish_env(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let s = v.trim();
+            s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn should_enforce_strict_flow(call: &ToolCall) -> bool {
+    if boolish_env("HSM_TOOL_STRICT_DISCOVER_DESCRIBE_CALL") {
+        return true;
+    }
+    call.parameters
+        .get("_strict_tool_flow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn strict_flow_violation(call: &ToolCall) -> Option<String> {
+    let flow = match call
+        .parameters
+        .get("flow")
+        .or_else(|| call.parameters.get("_flow"))
+    {
+        Some(v) => v,
+        None => {
+            return Some(format!(
+                "strict flow required discover->describe->call for `{}` (missing flow metadata)",
+                call.name
+            ))
+        }
+    };
+    let discovered = flow
+        .get("discovered_tool_keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .any(|k| k.trim().eq_ignore_ascii_case(&call.name))
+        })
+        .unwrap_or(false);
+    let described = flow
+        .get("described_tool_key")
+        .and_then(|v| v.as_str())
+        .map(|k| k.trim().eq_ignore_ascii_case(&call.name))
+        .unwrap_or(false);
+    if discovered && described {
+        None
+    } else {
+        Some(format!(
+            "strict flow required discover->describe->call for `{}`",
+            call.name
+        ))
+    }
+}
+
+fn looks_like_auth_pause(error: &str) -> bool {
+    let s = error.to_ascii_lowercase();
+    [
+        "api key",
+        "missing key",
+        "missing token",
+        "unauthorized",
+        "forbidden",
+        "invalid token",
+        "credentials",
+        "auth required",
+        "authentication",
+        "401",
+        "403",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
 }
 
 impl Default for ToolRegistry {

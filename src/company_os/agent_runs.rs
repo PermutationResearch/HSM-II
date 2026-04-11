@@ -78,6 +78,14 @@ struct ListRunsQuery {
     company_agent_id: Option<Uuid>,
     #[serde(default)]
     limit: Option<i64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    needs_human: Option<bool>,
+    #[serde(default)]
+    execution_mode: Option<String>,
+    #[serde(default)]
+    operator_inbox: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +163,15 @@ fn normalize_feedback_kind(s: &str) -> Result<&'static str, &'static str> {
     }
 }
 
+fn normalize_execution_mode(s: &str) -> Result<&'static str, &'static str> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "worker" => Ok("worker"),
+        "llm_simulated" => Ok("llm_simulated"),
+        "pending" => Ok("pending"),
+        _ => Err("execution_mode must be worker|llm_simulated|pending"),
+    }
+}
+
 async fn ensure_task_in_company(
     pool: &sqlx::PgPool,
     company_id: Uuid,
@@ -193,51 +210,132 @@ async fn list_agent_runs(
     };
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
+    let status_filter = q
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_run_status)
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?
+        .map(str::to_string);
+    let needs_human_filter = q.needs_human;
+    let execution_mode_filter = q
+        .execution_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_execution_mode)
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?
+        .map(str::to_string);
+    let inbox_only = q.operator_inbox.unwrap_or(false);
+
     let rows: Vec<AgentRunRow> = match (q.task_id, q.company_agent_id) {
         (Some(t), Some(a)) => {
-            let sql = r#"SELECT id, company_id, task_id, company_agent_id, external_run_id, external_system, status,
-                  started_at::text, finished_at::text, summary, meta
-           FROM agent_runs WHERE company_id = $1 AND task_id = $2 AND company_agent_id = $3
-           ORDER BY started_at DESC LIMIT $4"#;
+            let sql = r#"SELECT ar.id, ar.company_id, ar.task_id, ar.company_agent_id, ar.external_run_id, ar.external_system, ar.status,
+                  ar.started_at::text, ar.finished_at::text, ar.summary, ar.meta
+           FROM agent_runs ar
+           LEFT JOIN tasks tsk ON tsk.id = ar.task_id AND tsk.company_id = ar.company_id
+           WHERE ar.company_id = $1 AND ar.task_id = $2 AND ar.company_agent_id = $3
+             AND ($4::text IS NULL OR ar.status = $4)
+             AND ($5::boolean IS NULL OR COALESCE(tsk.requires_human, false) = $5)
+             AND ($6::text IS NULL OR COALESCE(ar.meta->>'execution_mode', '') = $6)
+             AND (
+               $7::boolean IS DISTINCT FROM TRUE
+               OR COALESCE(tsk.requires_human, false) = TRUE
+               OR ar.status IN ('error', 'cancelled')
+               OR COALESCE(ar.meta->>'needs_human', '') = 'true'
+             )
+           ORDER BY ar.started_at DESC LIMIT $8"#;
             sqlx::query_as::<_, AgentRunRow>(sql)
                 .bind(company_id)
                 .bind(t)
                 .bind(a)
+                .bind(status_filter.as_deref())
+                .bind(needs_human_filter)
+                .bind(execution_mode_filter.as_deref())
+                .bind(inbox_only)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
         }
         (Some(t), None) => {
-            let sql = r#"SELECT id, company_id, task_id, company_agent_id, external_run_id, external_system, status,
-                  started_at::text, finished_at::text, summary, meta
-           FROM agent_runs WHERE company_id = $1 AND task_id = $2
-           ORDER BY started_at DESC LIMIT $3"#;
+            let sql = r#"SELECT ar.id, ar.company_id, ar.task_id, ar.company_agent_id, ar.external_run_id, ar.external_system, ar.status,
+                  ar.started_at::text, ar.finished_at::text, ar.summary, ar.meta
+           FROM agent_runs ar
+           LEFT JOIN tasks tsk ON tsk.id = ar.task_id AND tsk.company_id = ar.company_id
+           WHERE ar.company_id = $1 AND ar.task_id = $2
+             AND ($3::text IS NULL OR ar.status = $3)
+             AND ($4::boolean IS NULL OR COALESCE(tsk.requires_human, false) = $4)
+             AND ($5::text IS NULL OR COALESCE(ar.meta->>'execution_mode', '') = $5)
+             AND (
+               $6::boolean IS DISTINCT FROM TRUE
+               OR COALESCE(tsk.requires_human, false) = TRUE
+               OR ar.status IN ('error', 'cancelled')
+               OR COALESCE(ar.meta->>'needs_human', '') = 'true'
+             )
+           ORDER BY ar.started_at DESC LIMIT $7"#;
             sqlx::query_as::<_, AgentRunRow>(sql)
                 .bind(company_id)
                 .bind(t)
+                .bind(status_filter.as_deref())
+                .bind(needs_human_filter)
+                .bind(execution_mode_filter.as_deref())
+                .bind(inbox_only)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
         }
         (None, Some(a)) => {
-            let sql = r#"SELECT id, company_id, task_id, company_agent_id, external_run_id, external_system, status,
-                  started_at::text, finished_at::text, summary, meta
-           FROM agent_runs WHERE company_id = $1 AND company_agent_id = $2
-           ORDER BY started_at DESC LIMIT $3"#;
+            let sql = r#"SELECT ar.id, ar.company_id, ar.task_id, ar.company_agent_id, ar.external_run_id, ar.external_system, ar.status,
+                  ar.started_at::text, ar.finished_at::text, ar.summary, ar.meta
+           FROM agent_runs ar
+           LEFT JOIN tasks tsk ON tsk.id = ar.task_id AND tsk.company_id = ar.company_id
+           WHERE ar.company_id = $1 AND ar.company_agent_id = $2
+             AND ($3::text IS NULL OR ar.status = $3)
+             AND ($4::boolean IS NULL OR COALESCE(tsk.requires_human, false) = $4)
+             AND ($5::text IS NULL OR COALESCE(ar.meta->>'execution_mode', '') = $5)
+             AND (
+               $6::boolean IS DISTINCT FROM TRUE
+               OR COALESCE(tsk.requires_human, false) = TRUE
+               OR ar.status IN ('error', 'cancelled')
+               OR COALESCE(ar.meta->>'needs_human', '') = 'true'
+             )
+           ORDER BY ar.started_at DESC LIMIT $7"#;
             sqlx::query_as::<_, AgentRunRow>(sql)
                 .bind(company_id)
                 .bind(a)
+                .bind(status_filter.as_deref())
+                .bind(needs_human_filter)
+                .bind(execution_mode_filter.as_deref())
+                .bind(inbox_only)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
         }
         (None, None) => {
-            let sql = r#"SELECT id, company_id, task_id, company_agent_id, external_run_id, external_system, status,
-                  started_at::text, finished_at::text, summary, meta
-           FROM agent_runs WHERE company_id = $1
-           ORDER BY started_at DESC LIMIT $2"#;
+            let sql = r#"SELECT ar.id, ar.company_id, ar.task_id, ar.company_agent_id, ar.external_run_id, ar.external_system, ar.status,
+                  ar.started_at::text, ar.finished_at::text, ar.summary, ar.meta
+           FROM agent_runs ar
+           LEFT JOIN tasks tsk ON tsk.id = ar.task_id AND tsk.company_id = ar.company_id
+           WHERE ar.company_id = $1
+             AND ($2::text IS NULL OR ar.status = $2)
+             AND ($3::boolean IS NULL OR COALESCE(tsk.requires_human, false) = $3)
+             AND ($4::text IS NULL OR COALESCE(ar.meta->>'execution_mode', '') = $4)
+             AND (
+               $5::boolean IS DISTINCT FROM TRUE
+               OR COALESCE(tsk.requires_human, false) = TRUE
+               OR ar.status IN ('error', 'cancelled')
+               OR COALESCE(ar.meta->>'needs_human', '') = 'true'
+             )
+           ORDER BY ar.started_at DESC LIMIT $6"#;
             sqlx::query_as::<_, AgentRunRow>(sql)
                 .bind(company_id)
+                .bind(status_filter.as_deref())
+                .bind(needs_human_filter)
+                .bind(execution_mode_filter.as_deref())
+                .bind(inbox_only)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
@@ -269,6 +367,12 @@ async fn post_agent_run(
         .unwrap_or("hsm")
         .to_string();
     let ext_run = body.external_run_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    if ext_sys != "operator-chat" && ext_run.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "external_run_id required for non-chat triggers" })),
+        ));
+    }
 
     if let Some(tid) = body.task_id {
         if !ensure_task_in_company(pool, company_id, tid)
@@ -327,7 +431,29 @@ async fn post_agent_run(
         }
     }
 
-    let meta = SqlxJson(body.meta.unwrap_or_else(|| json!({})));
+    let mut meta_v = body.meta.unwrap_or_else(|| json!({}));
+    if !meta_v.is_object() {
+        meta_v = json!({});
+    }
+    let mode_raw = meta_v
+        .get("execution_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let normalized_mode = if let Some(mode) = mode_raw {
+        normalize_execution_mode(&mode)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?
+            .to_string()
+    } else if ext_sys == "operator-chat" || ext_sys == "skill-run-api" {
+        "llm_simulated".to_string()
+    } else {
+        "pending".to_string()
+    };
+    if let Some(obj) = meta_v.as_object_mut() {
+        obj.insert("execution_mode".to_string(), json!(normalized_mode));
+    }
+    let meta = SqlxJson(meta_v);
     let summary = body
         .summary
         .as_ref()

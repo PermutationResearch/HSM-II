@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 use std::sync::{OnceLock, RwLock};
 use tokio::sync::broadcast;
 
@@ -38,18 +39,50 @@ pub struct CompletionEvent {
     pub success: bool,
     pub message: String,
     pub ts_ms: i64,
+    /// When `event_type` is `stream_event`, carries an Anthropic Messages API stream
+    /// event object (e.g. `content_block_delta` with `text_delta`). Company Console
+    /// NDJSON mirrors these as top-level `{ "type": "stream_event", "event": … }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_event: Option<Value>,
 }
 
 impl CompletionEvent {
+    pub fn tool_start(tool_name: &str, call_id: &str, message: String) -> Self {
+        Self {
+            event_type: "tool_start".to_string(),
+            task_key: None,
+            tool_name: Some(tool_name.to_string()),
+            call_id: Some(call_id.to_string()),
+            success: true,
+            message,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            stream_event: None,
+        }
+    }
+
+    pub fn tool_error(tool_name: &str, call_id: &str, message: String) -> Self {
+        Self {
+            event_type: "tool_error".to_string(),
+            task_key: None,
+            tool_name: Some(tool_name.to_string()),
+            call_id: Some(call_id.to_string()),
+            success: false,
+            message,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            stream_event: None,
+        }
+    }
+
     pub fn tool_completion(tool_name: &str, call_id: &str, success: bool, message: String) -> Self {
         Self {
-            event_type: "tool_completion".to_string(),
+            event_type: "tool_complete".to_string(),
             task_key: None,
             tool_name: Some(tool_name.to_string()),
             call_id: Some(call_id.to_string()),
             success,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            stream_event: None,
         }
     }
 
@@ -62,6 +95,21 @@ impl CompletionEvent {
             success,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            stream_event: None,
+        }
+    }
+
+    /// Publish a Claude-compatible partial stream event for operator UIs.
+    pub fn anthropic_stream_event(event: Value) -> Self {
+        Self {
+            event_type: "stream_event".to_string(),
+            task_key: None,
+            tool_name: None,
+            call_id: None,
+            success: true,
+            message: String::new(),
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            stream_event: Some(event),
         }
     }
 }

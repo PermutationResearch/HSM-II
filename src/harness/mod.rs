@@ -13,7 +13,7 @@
 //! - [`context_tier`] — tiered context budgets (`HSM_CTX_*`).
 //! - [`lh_trace`] — stable `tracing` span fields for collectors.
 //! - [`thread_workspace`] — per-thread disk roots + tool path isolation (`HSM_THREAD_WORKSPACE`).
-//! - [`docker_bash`] — optional `docker run` for `bash` (`HSM_DOCKER_BASH`).
+//! - [`docker_bash`] — **default** `docker run` for the `bash` tool when a thread workspace is active (`HSM_DOCKER_BASH=0` / `HSM_UNSAFE_HOST_BASH=1` to force host).
 //! - [`posix_sandbox`] — optional Firejail / `unshare` wrapper for local bash (`HSM_BASH_ISOLATE`).
 //! - [`coordinator`] — coordinator delegation tracing (`coordinator_step_span`, `HarnessRunEnvelope::subagent_delegate`).
 
@@ -39,6 +39,7 @@ mod session_persist;
 mod store;
 mod thread_workspace;
 mod tool_checkpoint;
+pub mod context_repo;
 pub mod types;
 
 pub use anti_sycophancy::{
@@ -76,6 +77,11 @@ pub use thread_workspace::{
     activate_thread_workspace, appliance_home, current_root, deactivate_thread_workspace,
     ensure_thread_workspace_on_disk, resolve_tool_fs_path, sanitize_thread_id,
     thread_workspace_enabled, workspace_dirs, HarnessTurnCleanup,
+};
+pub use context_repo::{
+    default_manifest_for_session, repo_root_for_company_home, repo_root_for_thread,
+    sanitize_session_key, ContextRepoManifest, CONTEXT_REPO_FORMAT_VERSION, INDEX_FILE, MANIFEST_FILE,
+    NOTES_DIR, SNAPSHOTS_DIR, THREAD_REPO_DIR,
 };
 pub use tool_checkpoint::append_tool_checkpoint;
 pub use types::{ErrorClass, HarnessState, HarnessStepKey, ResumeToken, TaskOutcome};

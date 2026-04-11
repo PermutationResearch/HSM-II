@@ -55,7 +55,7 @@ export function GenUiStreamClient() {
       <p className="text-[11px] leading-relaxed text-zinc-500">
         Set <code className="text-emerald-400/90">OPENROUTER_API_KEY</code> in{" "}
         <code className="text-zinc-400">web/.env.local</code> (defaults to OpenRouter +{" "}
-        <code className="text-zinc-400">qwen/qwen3.6-plus:free</code>). Or use{" "}
+        <code className="text-zinc-400">openai/gpt-oss-120b:free</code>). Or use{" "}
         <code className="text-zinc-400">OPENAI_API_KEY</code> for OpenAI or any OpenAI-compatible API. Optional:{" "}
         <code className="text-zinc-400">OPENROUTER_BASE_URL</code> /{" "}
         <code className="text-zinc-400">OPENAI_BASE_URL</code>,{" "}

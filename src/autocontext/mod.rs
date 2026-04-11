@@ -514,7 +514,7 @@ mod tests {
     fn test_knowledge_base_upsert() {
         let mut kb = KnowledgeBase::new();
         let mut pb = Playbook::new("Test", "desc", "pattern");
-        let id = pb.id.clone();
+        let _id = pb.id.clone();
         kb.upsert_playbook(pb.clone());
         assert_eq!(kb.playbooks.len(), 1);
 

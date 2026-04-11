@@ -16,6 +16,40 @@ function devCompanyConsoleRoot(): string {
   return path.resolve(__dirname, "..", "..", "company-console");
 }
 
+/**
+ * GUI-launched Electron often has no shell `export OPENROUTER_API_KEY=…`.
+ * Read repo + company-console `.env*` so the spawned Next server can run LLM routes.
+ */
+function readOpenRouterEnvFromDotenv(repoRoot: string, companyConsoleRoot: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const files = [
+    path.join(repoRoot, ".env"),
+    path.join(repoRoot, ".env.local"),
+    path.join(companyConsoleRoot, ".env"),
+    path.join(companyConsoleRoot, ".env.local"),
+  ];
+  const strip = (s: string) => {
+    let v = s.replace(/\r$/, "").trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    return v;
+  };
+  for (const fp of files) {
+    if (!fs.existsSync(fp)) continue;
+    const text = fs.readFileSync(fp, "utf8");
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const m = /^(?:export\s+)?(OPENROUTER_API_KEY|HSM_OPENROUTER_API_KEY|OPENROUTER_API_BASE)\s*=\s*(.*)$/.exec(t);
+      if (!m) continue;
+      const val = strip(m[2] ?? "");
+      if (!val) continue;
+      if (m[1] === "HSM_OPENROUTER_API_KEY") out.OPENROUTER_API_KEY = val;
+      else out[m[1]] = val;
+    }
+  }
+  return out;
+}
+
 /** Directory whose cwd we use for Next: either `.next/standalone` or the app root for `next start`. */
 function getUiRoot(): string {
   if (app.isPackaged) {
@@ -107,6 +141,7 @@ function spawnHsmConsole(repoRoot: string, apiPort: number): { proc: ChildProces
   if (exe) {
     return {
       proc: spawn(exe, ["--port", String(apiPort), "--host", "127.0.0.1"], {
+        cwd: repoRoot,
         env: { ...process.env },
         stdio: "inherit",
       }),
@@ -195,6 +230,41 @@ async function waitForOk(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`Timeout waiting for ${url} (last: ${lastErr})`);
 }
 
+async function assertPortFree(port: number, label: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const s = net.createServer();
+    s.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            `${label} port ${port} is already in use.\n` +
+              `Stop the existing process on :${port} and retry.`
+          )
+        );
+      } else {
+        reject(err);
+      }
+    });
+    s.once("listening", () => s.close(() => resolve()));
+    s.listen(port, "127.0.0.1");
+  });
+}
+
+/**
+ * If `envName` is unset, bind-scan upward from `fallback` (matches README: first free port from base).
+ * If set, require that exact port to be free.
+ */
+async function resolveListenPort(envName: string, fallback: number, label: string): Promise<number> {
+  const raw = process.env[envName]?.trim();
+  if (!raw) {
+    return findFreePort(fallback);
+  }
+  const n = Number.parseInt(raw, 10);
+  const port = Number.isFinite(n) && n > 0 && n <= 65535 ? n : fallback;
+  await assertPortFree(port, label);
+  return port;
+}
+
 function pushChild(cp: ChildProcess | null): void {
   if (cp) children.push(cp);
 }
@@ -211,12 +281,14 @@ function shutdownChildren(): void {
 }
 
 async function startStack(): Promise<{ uiUrl: string }> {
-  const apiPort = await findFreePort(3847);
-  const uiPort = await findFreePort(3050);
+  const apiPort = await resolveListenPort("HSM_DESKTOP_API_PORT", 3847, "API");
+  const uiPort = await resolveListenPort("HSM_DESKTOP_UI_PORT", 3050, "UI");
   const apiBase = `http://127.0.0.1:${apiPort}`;
   const uiUrl = `http://127.0.0.1:${uiPort}`;
 
   const repoRoot = getRepoRoot();
+  const ccRoot = devCompanyConsoleRoot();
+  const openRouterFromFiles = readOpenRouterEnvFromDotenv(repoRoot, ccRoot);
   const { proc: api, viaCargo } = spawnHsmConsole(repoRoot, apiPort);
   pushChild(api);
 
@@ -231,6 +303,7 @@ async function startStack(): Promise<{ uiUrl: string }> {
       cwd: uiRoot,
       env: {
         ...process.env,
+        ...openRouterFromFiles,
         PORT: String(uiPort),
         HOSTNAME: "127.0.0.1",
         HSM_CONSOLE_URL: apiBase,
@@ -240,7 +313,6 @@ async function startStack(): Promise<{ uiUrl: string }> {
     });
     pushChild(child);
   } else {
-    const ccRoot = devCompanyConsoleRoot();
     const nextCli = path.join(ccRoot, "node_modules", "next", "dist", "bin", "next");
     if (!fs.existsSync(nextCli)) {
       shutdownChildren();
@@ -254,6 +326,7 @@ async function startStack(): Promise<{ uiUrl: string }> {
       cwd: ccRoot,
       env: {
         ...process.env,
+        ...openRouterFromFiles,
         HSM_CONSOLE_URL: apiBase,
         NODE_ENV: "production",
       },
@@ -340,6 +413,17 @@ async function createWindow(): Promise<void> {
   win.webContents.on("did-fail-load", (_e, code, desc, url) => {
     console.error("[electron] did-fail-load", code, desc, url);
   });
+
+  // In desktop dev, stale cache can keep old Next chunks/styles after rebuilds.
+  if (!app.isPackaged) {
+    try {
+      await win.webContents.session.clearCache();
+    } catch {
+      /* ignore cache-clear failures */
+    }
+    const sep = uiUrl.includes("?") ? "&" : "?";
+    uiUrl = `${uiUrl}${sep}__desktop_reload=${Date.now()}`;
+  }
 
   await win.loadURL(uiUrl);
   if (!win.isVisible()) win.show();

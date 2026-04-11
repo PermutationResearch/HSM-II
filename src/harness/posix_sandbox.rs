@@ -1,6 +1,6 @@
 //! Optional host-level bash wrapping: Firejail / Linux `unshare` for network isolation (layer 7).
 //!
-//! Does **not** replace Docker mode (`HSM_DOCKER_BASH`); this applies to **local** `bash -c`.
+//! Does **not** replace Docker mode (Docker is default for `bash` when enabled); this applies to **local** `bash -c`.
 //!
 //! - `HSM_BASH_ISOLATE=firejail` — prefix `firejail --net=none --quiet --` (install Firejail).
 //! - `HSM_BASH_ISOLATE=unshare` — Linux only: `unshare -n -- bash -c ...` (may require privileges).
@@ -63,5 +63,6 @@ pub fn host_bash_command(command: &str, cwd: Option<&std::path::Path>) -> std::p
     if let Some(d) = cwd {
         c.current_dir(d);
     }
+    crate::tools::subprocess_env::apply_minimal_env_std(&mut c);
     c
 }

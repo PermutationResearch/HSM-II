@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_unit_validation_empty_playbook() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         let pipeline = ValidationPipeline::default_pipeline();
         let pb = Playbook::new("Empty", "desc", "pattern");
         let result = pipeline.validate_unit(&pb, &registry);

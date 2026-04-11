@@ -12,7 +12,7 @@ function chatCompletionsUrl(baseRaw: string): string {
   return base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
 }
 
-const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.6-plus:free";
+const DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 
 type ResolvedProvider = {
@@ -54,7 +54,7 @@ function resolveOpenAiCompatibleProvider(): ResolvedProvider | { error: string }
 
   return {
     error:
-      "No API key: set OPENROUTER_API_KEY (recommended; defaults to OpenRouter + free Qwen) or OPENAI_API_KEY for any OpenAI-compatible endpoint (OpenAI, Anthropic via a proxy, Groq, etc.). Optional: OPENROUTER_BASE_URL / OPENAI_BASE_URL, HSM_GEN_UI_MODEL.",
+      "No API key: set OPENROUTER_API_KEY (recommended; defaults to OpenRouter + free GPT-OSS 120B) or OPENAI_API_KEY for any OpenAI-compatible endpoint (OpenAI, Anthropic via a proxy, Groq, etc.). Optional: OPENROUTER_BASE_URL / OPENAI_BASE_URL, HSM_GEN_UI_MODEL.",
   };
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
@@ -21,6 +22,30 @@ export default function WorkspaceApprovalsPage() {
   const taskItems = items.filter((item) => item.kind === "task");
   const emailItems = items.filter((item) => item.kind === "email");
   const failureItems = items.filter((item) => item.kind === "failure");
+  const runInbox = useQuery({
+    queryKey: ["hsm", "agent-runs-inbox", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(
+        companyOsUrl(apiBase, `/api/company/companies/${companyId}/agent-runs?operator_inbox=true&limit=30`),
+      );
+      const j = (await r.json().catch(() => ({}))) as {
+        runs?: Array<{
+          id: string;
+          task_id?: string | null;
+          status: string;
+          summary?: string | null;
+          external_system?: string;
+          started_at?: string;
+          meta?: Record<string, unknown>;
+        }>;
+        error?: string;
+      };
+      if (!r.ok) throw new Error(j.error ?? `runs ${r.status}`);
+      return j.runs ?? [];
+    },
+    enabled: !!companyId,
+    refetchInterval: 10_000,
+  });
 
   const decideTask = useMutation({
     mutationFn: async ({ taskId, decision_mode }: { taskId: string; decision_mode: "auto" | "blocked" }) => {
@@ -107,6 +132,66 @@ export default function WorkspaceApprovalsPage() {
               </p>
             </div>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card className="pc-panel border-admin-border">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Runs needing operator attention</CardTitle>
+          <CardDescription>
+            {(runInbox.data?.length ?? 0) > 0
+              ? `${runInbox.data?.length ?? 0} run(s) flagged by status or requires_human`
+              : "No run-level escalations right now"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {runInbox.isLoading ? (
+            <Skeleton className="h-20 w-full" />
+          ) : runInbox.error ? (
+            <p className="text-sm text-destructive">
+              {runInbox.error instanceof Error ? runInbox.error.message : String(runInbox.error)}
+            </p>
+          ) : (runInbox.data?.length ?? 0) === 0 ? (
+            <p className="text-sm text-muted-foreground">No escalated runs in the current window.</p>
+          ) : (
+            runInbox.data?.map((run) => {
+              const mode =
+                typeof run.meta?.execution_mode === "string" ? run.meta.execution_mode : "unknown";
+              return (
+                <div key={run.id} className="rounded-lg border border-admin-border bg-black/10 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-medium text-foreground">
+                      {run.summary?.trim() || `Run ${run.id.slice(0, 8)}`}
+                    </p>
+                    <Badge variant={run.status === "error" ? "destructive" : "outline"} className="font-mono text-[10px]">
+                      {run.status}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                    {run.external_system ?? "system"} · mode {mode}
+                    {run.task_id ? ` · task ${run.task_id.slice(0, 8)}…` : ""}
+                  </p>
+                  <div className="mt-2">
+                    {run.task_id ? (
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        onClick={() =>
+                          setPropertiesSelection({
+                            kind: "task",
+                            id: String(run.task_id),
+                            title: run.summary?.trim() || `Run ${run.id.slice(0, 8)}`,
+                          })
+                        }
+                      >
+                        Open task
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </CardContent>
       </Card>
 

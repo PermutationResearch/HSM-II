@@ -10,6 +10,9 @@ const TOOL_MEMORY_SEARCH: &str = "company_memory_search";
 const TOOL_MEMORY_APPEND: &str = "company_memory_append";
 const TOOL_RUN_FEEDBACK: &str = "company_run_feedback_append";
 const TOOL_PROMOTE_FEEDBACK: &str = "company_promote_feedback_to_task";
+const TOOL_CATALOG_DISCOVER: &str = "company_tool_discover";
+const TOOL_CATALOG_DESCRIBE: &str = "company_tool_describe";
+const TOOL_CATALOG_CALL: &str = "company_tool_call";
 
 fn company_api_base() -> String {
     std::env::var("HSM_COMPANY_API_BASE")
@@ -70,6 +73,270 @@ fn apply_company_bearer(mut req: reqwest::RequestBuilder) -> reqwest::RequestBui
         }
     }
     req
+}
+
+fn company_client() -> Client {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .expect("reqwest client")
+}
+
+pub struct CompanyToolDiscoverTool {
+    client: Client,
+}
+
+impl CompanyToolDiscoverTool {
+    pub fn new() -> Self {
+        Self {
+            client: company_client(),
+        }
+    }
+}
+
+impl Default for CompanyToolDiscoverTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyToolDiscoverTool {
+    fn name(&self) -> &str {
+        TOOL_CATALOG_DISCOVER
+    }
+
+    fn description(&self) -> &str {
+        "Search unified company tool catalog by intent. Calls POST /api/company/companies/{company_id}/tools/discover."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type":"object",
+            "properties":{
+                "company_id":{"type":"string","description":"Company UUID (or set HSM_COMPANY_ID)."},
+                "query":{"type":"string","description":"Intent query to match tool capabilities."},
+                "limit":{"type":"integer","description":"Max matches (default 8)."}
+            },
+            "required":["query"]
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(company_id) = resolve_company_id_param(&params) else {
+            return ToolOutput::error("company_tool_discover: missing company_id (param or HSM_COMPANY_ID)");
+        };
+        let query = params
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if query.is_empty() {
+            return ToolOutput::error("company_tool_discover: query is required");
+        }
+        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(8).clamp(1, 40);
+        let base = company_api_base();
+        let url = format!("{base}/api/company/companies/{company_id}/tools/discover");
+        let req = apply_company_bearer(
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&json!({ "query": query, "limit": limit })),
+        );
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return ToolOutput::error(format!(
+                        "company_tool_discover failed HTTP {}: {}",
+                        status.as_u16(),
+                        text.chars().take(600).collect::<String>()
+                    ));
+                }
+                ToolOutput::success("tool discover complete").with_metadata(json!({ "body": text }))
+            }
+            Err(e) => ToolOutput::error(format!("company_tool_discover request failed: {e}")),
+        }
+    }
+}
+
+pub struct CompanyToolDescribeTool {
+    client: Client,
+}
+
+impl CompanyToolDescribeTool {
+    pub fn new() -> Self {
+        Self {
+            client: company_client(),
+        }
+    }
+}
+
+impl Default for CompanyToolDescribeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyToolDescribeTool {
+    fn name(&self) -> &str {
+        TOOL_CATALOG_DESCRIBE
+    }
+
+    fn description(&self) -> &str {
+        "Get tool schema from unified company catalog. Calls GET /api/company/companies/{company_id}/tools/{tool_key}/describe."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type":"object",
+            "properties":{
+                "company_id":{"type":"string","description":"Company UUID (or set HSM_COMPANY_ID)."},
+                "tool_key":{"type":"string","description":"Catalog tool_key to describe."}
+            },
+            "required":["tool_key"]
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(company_id) = resolve_company_id_param(&params) else {
+            return ToolOutput::error("company_tool_describe: missing company_id (param or HSM_COMPANY_ID)");
+        };
+        let tool_key = params
+            .get("tool_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if tool_key.is_empty() {
+            return ToolOutput::error("company_tool_describe: tool_key is required");
+        }
+        let base = company_api_base();
+        let url = format!(
+            "{base}/api/company/companies/{company_id}/tools/{}/describe",
+            urlencoding::encode(tool_key)
+        );
+        let req = apply_company_bearer(self.client.get(&url));
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return ToolOutput::error(format!(
+                        "company_tool_describe failed HTTP {}: {}",
+                        status.as_u16(),
+                        text.chars().take(600).collect::<String>()
+                    ));
+                }
+                ToolOutput::success("tool describe complete").with_metadata(json!({ "body": text }))
+            }
+            Err(e) => ToolOutput::error(format!("company_tool_describe request failed: {e}")),
+        }
+    }
+}
+
+pub struct CompanyToolCallTool {
+    client: Client,
+}
+
+impl CompanyToolCallTool {
+    pub fn new() -> Self {
+        Self {
+            client: company_client(),
+        }
+    }
+}
+
+impl Default for CompanyToolCallTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyToolCallTool {
+    fn name(&self) -> &str {
+        TOOL_CATALOG_CALL
+    }
+
+    fn description(&self) -> &str {
+        "Invoke a cataloged company tool with strict flow metadata. Calls POST /api/company/companies/{company_id}/tools/{tool_key}/call."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type":"object",
+            "properties":{
+                "company_id":{"type":"string","description":"Company UUID (or set HSM_COMPANY_ID)."},
+                "tool_key":{"type":"string","description":"Catalog tool_key to invoke."},
+                "args":{"type":"object","description":"Tool arguments payload."},
+                "flow":{"type":"object","description":"Strict flow object with discovered_tool_keys + described_tool_key."},
+                "dry_run":{"type":"boolean","description":"Validate/record without real side-effect."},
+                "simulate_pause":{"type":"string","description":"Optional: auth|approval for checkpoint testing."}
+            },
+            "required":["tool_key"]
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(company_id) = resolve_company_id_param(&params) else {
+            return ToolOutput::error("company_tool_call: missing company_id (param or HSM_COMPANY_ID)");
+        };
+        let tool_key = params
+            .get("tool_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if tool_key.is_empty() {
+            return ToolOutput::error("company_tool_call: tool_key is required");
+        }
+        let args = params.get("args").cloned().unwrap_or_else(|| json!({}));
+        let flow = params.get("flow").cloned().unwrap_or_else(|| json!({}));
+        let dry_run = params.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+        let simulate_pause = params
+            .get("simulate_pause")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let base = company_api_base();
+        let url = format!(
+            "{base}/api/company/companies/{company_id}/tools/{}/call",
+            urlencoding::encode(tool_key)
+        );
+        let mut body = json!({
+            "args": args,
+            "flow": flow,
+            "dry_run": dry_run
+        });
+        if let Some(kind) = simulate_pause {
+            body["simulate_pause"] = Value::String(kind.to_string());
+        }
+        let req = apply_company_bearer(
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body),
+        );
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return ToolOutput::error(format!(
+                        "company_tool_call failed HTTP {}: {}",
+                        status.as_u16(),
+                        text.chars().take(600).collect::<String>()
+                    ));
+                }
+                ToolOutput::success("tool call submitted").with_metadata(json!({ "body": text }))
+            }
+            Err(e) => ToolOutput::error(format!("company_tool_call request failed: {e}")),
+        }
+    }
 }
 
 /// Resolve `company_id` and optional workforce `agent_id` via `GET …/llm-context`.

@@ -197,6 +197,61 @@ body {
   .nd-ws-nav-section-label {
     @apply px-2 pb-1 pt-3 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-[#555555] first:pt-1;
   }
+
+  /**
+   * Agent rail — live model stream (nothing-design): monochrome surface, left-edge structure,
+   * Space Mono tertiary meta; no blue “card chrome”. Body uses `--nd-text-primary`.
+   */
+  .nd-stream-assistant {
+    @apply rounded-sm border border-[#222222] border-l-2 border-l-[#333333] bg-[#111111] px-3 py-2.5;
+  }
+
+  .nd-stream-assistant__meta {
+    @apply flex items-baseline justify-between gap-2;
+  }
+
+  .nd-stream-assistant__label {
+    @apply font-mono text-[10px] font-normal uppercase tracking-[0.12em] text-[#666666];
+  }
+
+  .nd-stream-assistant__persona {
+    @apply shrink-0 font-mono text-[10px] font-normal uppercase tracking-[0.08em] text-[#999999];
+  }
+
+  .nd-stream-assistant__body {
+    @apply flex min-w-0 items-start gap-2;
+  }
+
+  .nd-stream-assistant > .nd-stream-assistant__body {
+    @apply mt-2;
+  }
+
+  /** 1px caret — mechanical tick, not a pill glow */
+  .nd-stream-assistant__caret {
+    @apply mt-[0.35em] inline-block h-[1em] w-px shrink-0 bg-[#e8e8e8];
+  }
+
+  .nd-stream-assistant__caret--pulse {
+    animation: nd-stream-caret 1.1s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+  }
+}
+
+@keyframes nd-stream-caret {
+  0%,
+  38% {
+    opacity: 1;
+  }
+  52%,
+  100% {
+    opacity: 0.14;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nd-stream-assistant__caret--pulse {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 /* ── react-grid-layout: pointer + transform placement (RGL adds .cssTransforms when using transformStrategy) ── */

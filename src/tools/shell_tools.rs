@@ -11,6 +11,7 @@ use tracing::debug;
 
 use super::{object_schema, Tool, ToolOutput};
 use crate::tools::security::sanitize_working_dir_input;
+use crate::tools::subprocess_env::{apply_minimal_env_std, warn_host_bash_unsafe_once};
 
 /// Maximum output size (100KB)
 const MAX_OUTPUT_SIZE: usize = 100 * 1024;
@@ -75,11 +76,13 @@ impl BashTool {
             }
         }
         let cwd = working_dir.as_deref().map(std::path::Path::new);
+        warn_host_bash_unsafe_once();
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(c) = cwd {
             cmd.current_dir(c);
         }
+        apply_minimal_env_std(&mut cmd);
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to execute argv command: {}", e))?;
@@ -127,6 +130,7 @@ impl BashTool {
         command: String,
         working_dir: Option<String>,
     ) -> Result<(String, String, i32), String> {
+        warn_host_bash_unsafe_once();
         let cwd = working_dir.as_deref().map(std::path::Path::new);
         let mut cmd = crate::harness::host_bash_command(&command, cwd);
 
@@ -149,7 +153,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command or (preferred) argv-only: pass `argv` as [\"prog\", \"arg1\", ...]. Use with caution. 30s timeout. HSM_BASH_POLICY=strict, HSM_BASH_ARGV_ONLY=1, HSM_BASH_ARGV_ALLOWLIST=ls,git. Isolation: HSM_BASH_ISOLATE / HSM_DOCKER_BASH (docker does not support argv mode)."
+        "Execute a bash command or (preferred) argv-only: pass `argv` as [\"prog\", \"arg1\", ...]. Use with caution. 30s timeout. HSM_BASH_POLICY=strict, HSM_BASH_ARGV_ONLY=1, HSM_BASH_ARGV_ALLOWLIST=ls,git. Isolation: Docker by default for shell commands (HSM_THREAD_WORKSPACE=1); argv runs on host with minimal env. HSM_BASH_ISOLATE, HSM_DOCKER_BASH=0, HSM_UNSAFE_HOST_BASH=1."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -215,7 +219,7 @@ impl Tool for BashTool {
         if let Some(argv) = argv_param {
             if crate::harness::docker_bash_enabled() {
                 return ToolOutput::error(
-                    "argv execution is not supported with HSM_DOCKER_BASH; disable docker or use `command` string.",
+                    "argv runs on the host process; disable container bash first (HSM_DOCKER_BASH=0 or HSM_UNSAFE_HOST_BASH=1), or use the shell command field to run inside Docker when enabled.",
                 );
             }
             debug!("Executing argv: {:?}", argv);
@@ -307,6 +311,7 @@ impl GrepTool {
         file_pattern: Option<&str>,
     ) -> Result<String, String> {
         let mut cmd = Command::new("grep");
+        apply_minimal_env_std(&mut cmd);
         cmd.arg("-r")
             .arg("-n")
             .arg("-I") // Ignore binary files
@@ -421,6 +426,7 @@ impl FindTool {
         file_type: Option<&str>,
     ) -> Result<String, String> {
         let mut cmd = Command::new("find");
+        apply_minimal_env_std(&mut cmd);
         cmd.arg(path);
 
         // Max depth to prevent hanging on large directories

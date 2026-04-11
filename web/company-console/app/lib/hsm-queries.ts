@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { getConsoleApiBase } from "./console-api-base";
 import { companyOsUrl } from "./company-api-url";
+import { asArray, asObject } from "./runtime-contract";
 import type {
   HsmAgentInventory,
   HsmCompanyAgentRow,
@@ -38,6 +39,15 @@ export type HsmCompanyHealth = {
   postgres_ok?: boolean;
 };
 
+async function readJsonObject(r: Response): Promise<Record<string, unknown>> {
+  const raw = await r.json().catch(() => ({}));
+  return asObject(raw) ?? {};
+}
+
+function getErrorMessage(obj: Record<string, unknown>, fallback: string): string {
+  return typeof obj.error === "string" && obj.error.trim() ? obj.error : fallback;
+}
+
 export function useCompanyHealth(apiBase: string) {
   const url =
     apiBase.length > 0
@@ -47,11 +57,15 @@ export function useCompanyHealth(apiBase: string) {
     queryKey: ["hsm", "health", apiBase],
     queryFn: async () => {
       const r = await fetch(url);
-      const body = (await r.json().catch(() => ({}))) as HsmCompanyHealth;
+      const body = await readJsonObject(r);
       if (!r.ok) {
         throw new Error(`health ${r.status}`);
       }
-      return body;
+      return {
+        postgres_configured:
+          typeof body.postgres_configured === "boolean" ? body.postgres_configured : undefined,
+        postgres_ok: typeof body.postgres_ok === "boolean" ? body.postgres_ok : undefined,
+      } satisfies HsmCompanyHealth;
     },
   });
 }
@@ -61,14 +75,11 @@ export function useCompanies(apiBase: string) {
     queryKey: ["hsm", "companies", apiBase],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies`);
-      const j = (await r.json().catch(() => ({}))) as {
-        companies?: HsmCompanyRow[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `companies ${r.status}`);
+        throw new Error(getErrorMessage(j, `companies ${r.status}`));
       }
-      return j.companies ?? [];
+      return asArray(j.companies) as HsmCompanyRow[];
     },
   });
 }
@@ -78,11 +89,11 @@ export function useCompanyTasks(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "tasks", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/tasks`);
-      const j = (await r.json().catch(() => ({}))) as { tasks?: HsmTaskRow[]; error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `tasks ${r.status}`);
+        throw new Error(getErrorMessage(j, `tasks ${r.status}`));
       }
-      return j.tasks ?? [];
+      return asArray(j.tasks) as HsmTaskRow[];
     },
     enabled: !!companyId,
   });
@@ -97,9 +108,9 @@ export function useTaskQueue(apiBase: string, companyId: string | null, view?: s
       const r = await fetch(
         companyOsUrl(apiBase, `/api/company/companies/${companyId}/tasks/queue?${qs.toString()}`),
       );
-      const j = (await r.json().catch(() => ({}))) as { tasks?: HsmTaskRow[]; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `task queue ${r.status}`);
-      return j.tasks ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `task queue ${r.status}`));
+      return asArray(j.tasks) as HsmTaskRow[];
     },
     enabled: !!companyId,
     refetchInterval: 15_000,
@@ -111,14 +122,11 @@ export function useCompanyAgents(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "agents", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/agents`);
-      const j = (await r.json().catch(() => ({}))) as {
-        agents?: HsmCompanyAgentRow[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `agents ${r.status}`);
+        throw new Error(getErrorMessage(j, `agents ${r.status}`));
       }
-      return j.agents ?? [];
+      return asArray(j.agents) as HsmCompanyAgentRow[];
     },
     enabled: !!companyId,
   });
@@ -135,10 +143,9 @@ export function useAgentInventory(apiBase: string, companyId: string | null, age
       );
       const r = await fetch(url);
       const text = await r.text();
-      type InvErr = { error?: string };
-      let j: (HsmAgentInventory & InvErr) | InvErr = {};
+      let j: Record<string, unknown> = {};
       try {
-        j = text ? (JSON.parse(text) as (HsmAgentInventory & InvErr) | InvErr) : {};
+        j = asObject(text ? JSON.parse(text) : {}) ?? {};
       } catch {
         j = {};
       }
@@ -163,11 +170,11 @@ export function useCompanySpendSummary(apiBase: string, companyId: string | null
     queryKey: ["hsm", "spend", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/spend/summary`);
-      const j = (await r.json().catch(() => ({}))) as HsmSpendSummaryRow & { error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `spend ${r.status}`);
+        throw new Error(getErrorMessage(j, `spend ${r.status}`));
       }
-      return j;
+      return j as HsmSpendSummaryRow;
     },
     enabled: !!companyId,
   });
@@ -178,11 +185,11 @@ export function useCompanyGoals(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "goals", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/goals`);
-      const j = (await r.json().catch(() => ({}))) as { goals?: HsmGoalRow[]; error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `goals ${r.status}`);
+        throw new Error(getErrorMessage(j, `goals ${r.status}`));
       }
-      return j.goals ?? [];
+      return asArray(j.goals) as HsmGoalRow[];
     },
     enabled: !!companyId,
   });
@@ -193,14 +200,14 @@ export function useCompanyProjects(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "projects", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/projects`));
-      const j = (await r.json().catch(() => ({}))) as { projects?: HsmProjectRow[]; error?: string };
+      const j = await readJsonObject(r);
       if (r.status === 404) {
         return [];
       }
       if (!r.ok) {
-        throw new Error(j.error ?? `projects ${r.status}`);
+        throw new Error(getErrorMessage(j, `projects ${r.status}`));
       }
-      return j.projects ?? [];
+      return asArray(j.projects) as HsmProjectRow[];
     },
     enabled: !!companyId,
     retry: false,
@@ -212,14 +219,14 @@ export function useCompanyIssueLabels(apiBase: string, companyId: string | null)
     queryKey: ["hsm", "issue-labels", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/issue-labels`));
-      const j = (await r.json().catch(() => ({}))) as { labels?: HsmIssueLabelRow[]; error?: string };
+      const j = await readJsonObject(r);
       if (r.status === 404) {
         return [];
       }
       if (!r.ok) {
-        throw new Error(j.error ?? `issue-labels ${r.status}`);
+        throw new Error(getErrorMessage(j, `issue-labels ${r.status}`));
       }
-      return j.labels ?? [];
+      return asArray(j.labels) as HsmIssueLabelRow[];
     },
     enabled: !!companyId,
     retry: false,
@@ -244,11 +251,11 @@ export function useAgentOperatorThread(apiBase: string, companyId: string | null
       const r = await fetch(
         companyOsUrl(apiBase, `/api/company/companies/${companyId}/agents/${agentId}/operator-thread`),
       );
-      const j = (await r.json().catch(() => ({}))) as HsmOperatorThreadResponse & { error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `operator-thread ${r.status}`);
+        throw new Error(getErrorMessage(j, `operator-thread ${r.status}`));
       }
-      return j;
+      return j as HsmOperatorThreadResponse;
     },
     enabled: !!companyId && !!agentId,
   });
@@ -259,11 +266,11 @@ export function useCompanyIntelligenceSummary(apiBase: string, companyId: string
     queryKey: ["hsm", "intelligence", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/intelligence/summary`);
-      const j = (await r.json().catch(() => ({}))) as HsmIntelligenceSummary;
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `intelligence ${r.status}`);
+        throw new Error(getErrorMessage(j, `intelligence ${r.status}`));
       }
-      return j;
+      return j as HsmIntelligenceSummary;
     },
     enabled: !!companyId,
     refetchInterval: 15_000,
@@ -275,12 +282,13 @@ export function useSelfImprovementSummary(apiBase: string, companyId: string | n
     queryKey: ["hsm", "self-improvement", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/self-improvement/summary`);
-      const j = (await r.json().catch(() => ({}))) as { summary?: HsmSelfImprovementSummary; error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `self-improvement ${r.status}`);
+        throw new Error(getErrorMessage(j, `self-improvement ${r.status}`));
       }
+      const summary = asObject(j.summary) as HsmSelfImprovementSummary | null;
       return (
-        j.summary ?? {
+        summary ?? {
           total_failures_7d: 0,
           repeat_failure_rate_7d: 0,
           first_pass_success_rate_7d: 1,
@@ -310,14 +318,11 @@ export function useSelfImprovementProposals(
       const r = await fetch(
         `${apiBase}/api/company/companies/${companyId}/self-improvement/proposals?${qs.toString()}`,
       );
-      const j = (await r.json().catch(() => ({}))) as {
-        proposals?: HsmSelfImprovementProposal[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `self-improvement proposals ${r.status}`);
+        throw new Error(getErrorMessage(j, `self-improvement proposals ${r.status}`));
       }
-      return j.proposals ?? [];
+      return asArray(j.proposals) as HsmSelfImprovementProposal[];
     },
     enabled: !!companyId,
     refetchInterval: 30_000,
@@ -338,14 +343,11 @@ export function useStorePromotions(
       const r = await fetch(
         `${apiBase}/api/company/companies/${companyId}/promotions?${qs.toString()}`,
       );
-      const j = (await r.json().catch(() => ({}))) as {
-        promotions?: HsmStorePromotion[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `promotions ${r.status}`);
+        throw new Error(getErrorMessage(j, `promotions ${r.status}`));
       }
-      return j.promotions ?? [];
+      return asArray(j.promotions) as HsmStorePromotion[];
     },
     enabled: !!companyId,
     refetchInterval: 30_000,
@@ -366,14 +368,11 @@ export function useMemoryArtifacts(
       const r = await fetch(
         `${apiBase}/api/company/companies/${companyId}/memory/artifacts?${qs.toString()}`,
       );
-      const j = (await r.json().catch(() => ({}))) as {
-        artifacts?: HsmMemoryArtifact[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `memory artifacts ${r.status}`);
+        throw new Error(getErrorMessage(j, `memory artifacts ${r.status}`));
       }
-      return j.artifacts ?? [];
+      return asArray(j.artifacts) as HsmMemoryArtifact[];
     },
     enabled: !!companyId,
     refetchInterval: 15_000,
@@ -392,11 +391,11 @@ export function useMemoryInspect(
       const r = await fetch(
         `${apiBase}/api/company/companies/${companyId}/memory/${memoryId}/inspect`,
       );
-      const j = (await r.json().catch(() => ({}))) as HsmMemoryInspect & { error?: string };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `memory inspect ${r.status}`);
+        throw new Error(getErrorMessage(j, `memory inspect ${r.status}`));
       }
-      return j;
+      return j as HsmMemoryInspect;
     },
     enabled: !!companyId && !!memoryId,
   });
@@ -407,18 +406,15 @@ export function useCompanyCredentials(apiBase: string, companyId: string | null)
     queryKey: ["hsm", "company-credentials", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/credentials`));
-      const j = (await r.json().catch(() => ({}))) as {
-        credentials?: HsmCompanyCredential[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       // Older backend builds may not expose credentials endpoints yet.
       if (r.status === 404) {
         return [];
       }
       if (!r.ok) {
-        throw new Error(j.error ?? `credentials ${r.status}`);
+        throw new Error(getErrorMessage(j, `credentials ${r.status}`));
       }
-      return j.credentials ?? [];
+      return asArray(j.credentials) as HsmCompanyCredential[];
     },
     enabled: !!companyId,
   });
@@ -429,21 +425,15 @@ export function useSkillBank(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "skill-bank", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/skills/bank`);
-      const j = (await r.json().catch(() => ({}))) as {
-        current_skills?: HsmSkillBankEntry[];
-        recommended_skills?: HsmSkillBankEntry[];
-        connected_skill_refs?: Record<string, string[]>;
-        active_agent_count?: number;
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (!r.ok) {
-        throw new Error(j.error ?? `skill-bank ${r.status}`);
+        throw new Error(getErrorMessage(j, `skill-bank ${r.status}`));
       }
       return {
-        current_skills: j.current_skills ?? [],
-        recommended_skills: j.recommended_skills ?? [],
-        connected_skill_refs: j.connected_skill_refs ?? {},
-        active_agent_count: j.active_agent_count ?? 0,
+        current_skills: asArray(j.current_skills) as HsmSkillBankEntry[],
+        recommended_skills: asArray(j.recommended_skills) as HsmSkillBankEntry[],
+        connected_skill_refs: (asObject(j.connected_skill_refs) as Record<string, string[]>) ?? {},
+        active_agent_count: typeof j.active_agent_count === "number" ? j.active_agent_count : 0,
       };
     },
     enabled: !!companyId,
@@ -457,13 +447,10 @@ export function useBrowserProviders(apiBase: string, companyId: string | null) {
       const r = await fetch(
         companyOsUrl(apiBase, `/api/company/companies/${companyId}/browser/providers`),
       );
-      const j = (await r.json().catch(() => ({}))) as {
-        providers?: HsmBrowserProviderStatus[];
-        error?: string;
-      };
+      const j = await readJsonObject(r);
       if (r.status === 404) return [];
-      if (!r.ok) throw new Error(j.error ?? `browser providers ${r.status}`);
-      return j.providers ?? [];
+      if (!r.ok) throw new Error(getErrorMessage(j, `browser providers ${r.status}`));
+      return asArray(j.providers) as HsmBrowserProviderStatus[];
     },
     enabled: !!companyId,
   });
@@ -474,12 +461,9 @@ export function useThreadSessions(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "thread-sessions", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(`${apiBase}/api/company/companies/${companyId}/thread-sessions`);
-      const j = (await r.json().catch(() => ({}))) as {
-        sessions?: HsmThreadSession[];
-        error?: string;
-      };
-      if (!r.ok) throw new Error(j.error ?? `thread sessions ${r.status}`);
-      return j.sessions ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `thread sessions ${r.status}`));
+      return asArray(j.sessions) as HsmThreadSession[];
     },
     enabled: !!companyId,
   });
@@ -490,9 +474,9 @@ export function useCompanyOpsOverview(apiBase: string, companyId: string | null)
     queryKey: ["hsm", "ops-overview", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/ops/overview`));
-      const j = (await r.json().catch(() => ({}))) as HsmCompanyOpsOverview & { error?: string };
-      if (!r.ok) throw new Error(j.error ?? `ops overview ${r.status}`);
-      return j;
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `ops overview ${r.status}`));
+      return j as HsmCompanyOpsOverview;
     },
     enabled: !!companyId,
     refetchInterval: 30_000,
@@ -504,9 +488,9 @@ export function useCompanyConnectors(apiBase: string, companyId: string | null) 
     queryKey: ["hsm", "connectors", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/connectors`));
-      const j = (await r.json().catch(() => ({}))) as { connectors?: HsmCompanyConnector[]; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `connectors ${r.status}`);
-      return j.connectors ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `connectors ${r.status}`));
+      return asArray(j.connectors) as HsmCompanyConnector[];
     },
     enabled: !!companyId,
   });
@@ -520,9 +504,9 @@ export function useConnectorTemplates(apiBase: string, category?: string, compan
       if (category?.trim()) qs.set("category", category.trim());
       if (companyId?.trim()) qs.set("company_id", companyId.trim());
       const r = await fetch(companyOsUrl(apiBase, `/api/company/connectors/templates?${qs.toString()}`));
-      const j = (await r.json().catch(() => ({}))) as { templates?: HsmConnectorTemplate[]; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `connector templates ${r.status}`);
-      return j.templates ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `connector templates ${r.status}`));
+      return asArray(j.templates) as HsmConnectorTemplate[];
     },
   });
 }
@@ -540,9 +524,9 @@ export function useEmailOperatorQueue(
       const r = await fetch(
         companyOsUrl(apiBase, `/api/company/companies/${companyId}/email/operator-queue?${qs.toString()}`),
       );
-      const j = (await r.json().catch(() => ({}))) as { items?: HsmEmailOperatorQueueItem[]; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `email queue ${r.status}`);
-      return j.items ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `email queue ${r.status}`));
+      return asArray(j.items) as HsmEmailOperatorQueueItem[];
     },
     enabled: !!companyId,
     refetchInterval: 10_000,
@@ -554,9 +538,9 @@ export function useCompanyProfile(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "company-profile", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/profile`));
-      const j = (await r.json().catch(() => ({}))) as { profile?: HsmCompanyProfile; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `profile ${r.status}`);
-      return j.profile ?? null;
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `profile ${r.status}`));
+      return (asObject(j.profile) as HsmCompanyProfile | null) ?? null;
     },
     enabled: !!companyId,
   });
@@ -567,9 +551,9 @@ export function useWorkflowPacks(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "workflow-packs", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/workflow-packs`));
-      const j = (await r.json().catch(() => ({}))) as { workflow_packs?: HsmWorkflowPack[]; error?: string };
-      if (!r.ok) throw new Error(j.error ?? `workflow packs ${r.status}`);
-      return j.workflow_packs ?? [];
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `workflow packs ${r.status}`));
+      return asArray(j.workflow_packs) as HsmWorkflowPack[];
     },
     enabled: !!companyId,
   });
@@ -580,9 +564,9 @@ export function useOperatorInbox(apiBase: string, companyId: string | null) {
     queryKey: ["hsm", "operator-inbox", apiBase, companyId],
     queryFn: async () => {
       const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/operator-inbox`));
-      const j = (await r.json().catch(() => ({}))) as HsmOperatorInbox & { error?: string };
-      if (!r.ok) throw new Error(j.error ?? `operator inbox ${r.status}`);
-      return j;
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `operator inbox ${r.status}`));
+      return j as HsmOperatorInbox;
     },
     enabled: !!companyId,
     refetchInterval: 10_000,

@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -80,6 +80,76 @@ pub fn sanitize_working_dir_input(raw: &str) -> Result<&str, String> {
         return Err("working_dir contains disallowed control characters".to_string());
     }
     Ok(t)
+}
+
+/// When set, [`deny_sensitive_tool_path`] allows home-dir secret locations (not recommended).
+pub fn sensitive_paths_allowed() -> bool {
+    env_truthy("HSM_ALLOW_SENSITIVE_PATHS")
+}
+
+/// Expand `~/` using the process home dir; otherwise return `path` as [`PathBuf`].
+pub fn expand_user_path_hint(raw: &str) -> PathBuf {
+    let t = raw.trim();
+    if let Some(rest) = t.strip_prefix("~/") {
+        if let Some(h) = dirs::home_dir() {
+            return h.join(rest);
+        }
+    }
+    PathBuf::from(t)
+}
+
+/// Block obvious operator-secret paths (`.ssh`, cloud CLIs, `.env`) when tools touch the host FS.
+pub fn deny_sensitive_tool_path(p: &Path) -> Result<(), String> {
+    if sensitive_paths_allowed() {
+        return Ok(());
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let Ok(rel) = canon.strip_prefix(&home) else {
+        return Ok(());
+    };
+    let rel_s = rel.to_string_lossy().replace('\\', "/");
+    let first = rel
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap_or("");
+    let blocked_prefixes = [
+        ".ssh",
+        ".kube",
+        ".aws",
+        ".docker",
+        ".config/gcloud",
+        ".azure",
+        ".local/share/keyrings",
+    ];
+    if blocked_prefixes
+        .iter()
+        .any(|pre| rel_s == *pre || rel_s.starts_with(&format!("{pre}/")))
+    {
+        return Err(format!(
+            "refusing path under home secret/config area: {} (set HSM_ALLOW_SENSITIVE_PATHS=1 to override — not recommended)",
+            canon.display()
+        ));
+    }
+    if first == ".env" || rel_s.ends_with("/.env") || rel_s.contains("/.env/") {
+        return Err(format!(
+            "refusing .env under home: {} (set HSM_ALLOW_SENSITIVE_PATHS=1 to override)",
+            canon.display()
+        ));
+    }
+    if rel_s == ".git-credentials" || rel_s.ends_with("/.git-credentials") {
+        return Err(format!(
+            "refusing git credentials file: {}",
+            canon.display()
+        ));
+    }
+    if rel_s == ".netrc" || rel_s.ends_with("/.netrc") {
+        return Err(format!("refusing .netrc: {}", canon.display()));
+    }
+    Ok(())
 }
 
 pub fn validate_archive_member_path(entry: &str) -> Result<(), String> {

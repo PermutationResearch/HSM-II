@@ -73,6 +73,12 @@ function fmtTs(ts: string | null): string {
   }
 }
 
+function executionMode(run: AgentRun): "worker" | "llm_simulated" | "pending" | "unknown" {
+  const raw = typeof run.meta?.execution_mode === "string" ? run.meta.execution_mode : "";
+  if (raw === "worker" || raw === "llm_simulated" || raw === "pending") return raw;
+  return "unknown";
+}
+
 // ── Run detail (feedback + promote) ──────────────────────────────────────────
 
 function RunDetail({
@@ -170,6 +176,7 @@ function RunDetail({
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground font-mono">
         <span>started {fmtTs(run.started_at)}</span>
         {run.finished_at && <span>finished {fmtTs(run.finished_at)}</span>}
+        <span>mode {executionMode(run)}</span>
         {run.summary && <span className="text-foreground/80">{run.summary}</span>}
         {run.external_run_id && (
           <span>
@@ -404,7 +411,7 @@ export function AgentRunsPanel({
               <span>Summary / run id</span>
               <span>Status</span>
               <span>Started</span>
-              <span>System</span>
+              <span>System / Mode</span>
             </div>
 
             {isLoading ? (
@@ -460,6 +467,9 @@ export function AgentRunsPanel({
                     </span>
                     <span className="font-mono text-[10px] text-muted-foreground">
                       {run.external_system}
+                      <span className="block text-[9px] text-muted-foreground/80">
+                        {executionMode(run)}
+                      </span>
                     </span>
                   </button>
 

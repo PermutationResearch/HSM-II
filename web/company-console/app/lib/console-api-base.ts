@@ -22,3 +22,21 @@ export function getConsoleApiBase(): string {
   if (v.length > 0) return v;
   return "";
 }
+
+/**
+ * POST target for operator NDJSON chat (`/api/agent-chat-reply/stream`).
+ * Implemented only on the **Next.js** company-console server — not on `hsm_console`.
+ *
+ * - Default: same document origin as the page (works with `next dev`, standalone, desktop UI port).
+ * - Override when the UI is opened from an origin that does not serve Next (rare): set
+ *   `NEXT_PUBLIC_AGENT_CHAT_STREAM_URL` to the full stream URL, e.g. `http://127.0.0.1:3050/api/agent-chat-reply/stream`.
+ */
+export function getAgentChatReplyStreamUrl(): string {
+  const raw = process.env.NEXT_PUBLIC_AGENT_CHAT_STREAM_URL;
+  const o = (typeof raw === "string" ? raw : "").trim();
+  if (o) return o;
+  if (typeof window !== "undefined") {
+    return new URL("/api/agent-chat-reply/stream", window.location.href).toString();
+  }
+  return "/api/agent-chat-reply/stream";
+}

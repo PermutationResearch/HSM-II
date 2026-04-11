@@ -122,7 +122,9 @@ function NavButton({
       onClick={onClick}
       className={cn(
         "flex w-full items-center gap-2.5 rounded-full px-2.5 py-2 text-left text-sm font-mono uppercase tracking-[0.06em] transition-colors duration-200 ease-out",
-        active ? "bg-white text-black" : "text-[#999999] hover:bg-[#1A1A1A] hover:text-[#E8E8E8]"
+        active
+          ? "border border-[#333333] bg-white/[0.05] text-white"
+          : "border border-transparent text-[#999999] hover:bg-[#1A1A1A] hover:text-[#E8E8E8]"
       )}
     >
       <Icon className="h-4 w-4 shrink-0 opacity-80" />
@@ -420,7 +422,7 @@ export function WorkspaceSidebar({
                           className={cn(
                             "rounded-full px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wide transition-colors",
                             directoryScope === "all"
-                              ? "bg-white text-black"
+                              ? "border border-[#333333] bg-white/[0.05] text-white"
                               : "border border-[#333333] text-[#888888] hover:border-[#555555] hover:text-[#CCCCCC]"
                           )}
                         >
@@ -670,12 +672,12 @@ export function WorkspaceSidebar({
                     className={cn(
                       "flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
                       active
-                        ? "bg-white text-black"
+                        ? "border border-[#333333] bg-white/[0.05] text-white"
                         : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
                     )}
                   >
                     <Folder
-                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-black" : "text-[#666666]")}
+                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-white" : "text-[#666666]")}
                     />
                     <span className="truncate">{p.title}</span>
                   </button>
@@ -757,13 +759,13 @@ export function WorkspaceSidebar({
                 const rowTone = cn(
                   "flex w-full items-center gap-2 rounded-md px-2 py-1.5 pl-3 text-left text-[13px] transition-colors duration-200 ease-out",
                   active
-                    ? "bg-white text-black"
+                    ? "border border-[#333333] bg-white/[0.05] text-white"
                     : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
                 );
                 const label = (
                   <>
                     <AgentIcon
-                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-black" : "text-[#666666]")}
+                      className={cn("h-3.5 w-3.5 shrink-0 stroke-[1.5]", active ? "text-white" : "text-[#666666]")}
                     />
                     <span className="min-w-0 flex-1 truncate text-[13px]">{a.name}</span>
                     {a.liveCount > 0 ? (
@@ -786,7 +788,9 @@ export function WorkspaceSidebar({
                       key={a.id}
                       className={cn(
                         "flex w-full items-stretch overflow-hidden rounded-md",
-                        active ? "bg-white text-black" : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
+                        active
+                          ? "border border-[#333333] bg-white/[0.05] text-white"
+                          : "text-[#999999] hover:bg-[#111111] hover:text-[#E8E8E8]"
                       )}
                     >
                       <button
@@ -810,7 +814,7 @@ export function WorkspaceSidebar({
                         className={cn(
                           "flex w-7 shrink-0 items-center justify-center rounded-r-md border-l transition-colors",
                           active
-                            ? "border-[#DDDDDD] text-[#333333] hover:bg-[#EAEAEA]"
+                            ? "border-[#333333] text-[#bbbbbb] hover:bg-white/[0.08] hover:text-white"
                             : "border-[#222222] text-[#666666] hover:bg-[#1A1A1A] hover:text-[#D71921]"
                         )}
                       >
