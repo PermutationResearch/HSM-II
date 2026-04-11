@@ -18,3 +18,10 @@ When working on **`hsm_console`**, Postgres Company OS, or DRIs: canonical graph
 ## Eval and meta-harness
 
 Canonical guide: **`docs/EVAL_AND_META_HARNESS.md`** — `hsm-eval` vs `hsm_meta_harness` vs `hsm_outer_loop`, artifact paths, smoke recipes. Promoted **`HsmRunnerConfig`** / `best_config.json` applies to **eval binaries** until explicitly wired into the live agent runtime.
+
+## Agent OS program (long-horizon operating discipline)
+
+Portable **file pack** for the “principal architect” protocol: operating summary, implementation contract, capability matrix, milestones, momentum queues, verification checklists, smoke script.
+
+- **Start here:** `docs/agent-os-program/OPERATING_SUMMARY.md`
+- **M1 smoke:** `bash scripts/agent-os-milestone1-smoke.sh` (requires `hsm_console` or `HSM_CONSOLE_URL`)

@@ -1,23 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, memo } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Bot,
   ChevronRight,
+  FilePlus,
   FileText,
   FolderOpen,
+  FolderPlus,
   MessageSquare,
   RefreshCw,
   Send,
+  Trash2,
   X,
 } from "lucide-react";
 
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
+import { Input } from "@/app/components/ui/input";
 import { Textarea } from "@/app/components/ui/textarea";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 import type { HsmTaskRow } from "@/app/lib/hsm-api-types";
@@ -60,12 +64,24 @@ const WORKSPACE_MARKDOWN_PROSE_CN = cn(
   "[&_p]:my-1 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0",
 );
 
-function WorkspaceMarkdownBody({ text, className }: { text: string; className?: string }) {
+const WorkspaceMarkdownBody = memo(function WorkspaceMarkdownBody({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
   return (
     <div className={cn(WORKSPACE_MARKDOWN_PROSE_CN, className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
+});
+
+/** Defers markdown reconciliation so high-frequency token updates do not block the main thread each chunk. */
+function WorkspaceMarkdownStreamBody({ text, className }: { text: string; className?: string }) {
+  const deferred = useDeferredValue(text);
+  return <WorkspaceMarkdownBody text={deferred} className={className} />;
 }
 
 type RunStatus = ContractRunStatus;
@@ -217,6 +233,23 @@ type WorkspaceListEntry = {
   size_bytes?: number | null;
 };
 
+/** Open file in workspace rail: editable text, image preview, or opaque binary. */
+type WorkspaceBrowserSelection =
+  | { kind: "text"; path: string; name: string; content: string }
+  | { kind: "image"; path: string; name: string; dataUrl: string; mimeType: string; byteLen: number }
+  | { kind: "binary"; path: string; name: string; mimeType: string; byteLen: number };
+
+function joinWorkspaceRel(cwd: string, name: string): string {
+  const n = name.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!n) return cwd;
+  return cwd ? `${cwd}/${n}` : n;
+}
+
+function isUnderRecycle(relPath: string): boolean {
+  const p = relPath.replace(/\\/g, "/");
+  return p === ".recycle" || p.startsWith(".recycle/");
+}
+
 function WorkspaceRailFileBrowser({
   apiBase,
   companyId,
@@ -226,11 +259,15 @@ function WorkspaceRailFileBrowser({
 }) {
   const [cwd, setCwd] = useState("");
   const [entries, setEntries] = useState<WorkspaceListEntry[]>([]);
+  const [listRev, setListRev] = useState(0);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [selected, setSelected] = useState<{ path: string; content: string; name: string } | null>(
-    null,
-  );
+  const [selected, setSelected] = useState<WorkspaceBrowserSelection | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const [showMdPreview, setShowMdPreview] = useState(false);
+  const [ioBusy, setIoBusy] = useState<string | null>(null);
+  const [createMode, setCreateMode] = useState<null | "file" | "folder">(null);
+  const [createName, setCreateName] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -256,7 +293,30 @@ function WorkspaceRailFileBrowser({
     return () => {
       cancelled = true;
     };
-  }, [apiBase, companyId, cwd]);
+  }, [apiBase, companyId, cwd, listRev]);
+
+  useEffect(() => {
+    if (selected?.kind === "text") {
+      setEditContent(selected.content);
+      setShowMdPreview(false);
+    } else {
+      setEditContent("");
+    }
+  }, [selected]);
+
+  const sortedEntries = useMemo(() => {
+    const out = [...entries];
+    out.sort((a, b) => {
+      const aRec = a.kind === "dir" && a.name === ".recycle" ? 1 : 0;
+      const bRec = b.kind === "dir" && b.name === ".recycle" ? 1 : 0;
+      if (aRec !== bRec) return bRec - aRec;
+      const ad = a.kind === "dir" ? 1 : 0;
+      const bd = b.kind === "dir" ? 1 : 0;
+      if (ad !== bd) return bd - ad;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    return out;
+  }, [entries]);
 
   const openFile = useCallback(
     async (path: string, name: string) => {
@@ -269,8 +329,27 @@ function WorkspaceRailFileBrowser({
         const j = asObject(raw);
         const error = typeof j?.error === "string" ? j.error : undefined;
         if (!r.ok) throw new Error(error ?? r.statusText);
-        const content = typeof j?.content === "string" ? j.content : "";
-        setSelected({ path, content, name });
+        const enc = typeof j?.encoding === "string" ? j.encoding : "utf-8";
+        if (enc === "base64") {
+          const b64 = typeof j?.content_base64 === "string" ? j.content_base64 : "";
+          const mime = typeof j?.mime_type === "string" ? j.mime_type : "application/octet-stream";
+          const byteLen = typeof j?.byte_len === "number" ? j.byte_len : 0;
+          if (mime.startsWith("image/")) {
+            setSelected({
+              kind: "image",
+              path,
+              name,
+              mimeType: mime,
+              byteLen,
+              dataUrl: `data:${mime};base64,${b64}`,
+            });
+          } else {
+            setSelected({ kind: "binary", path, name, mimeType: mime, byteLen });
+          }
+        } else {
+          const content = typeof j?.content === "string" ? j.content : "";
+          setSelected({ kind: "text", path, name, content });
+        }
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       }
@@ -278,7 +357,148 @@ function WorkspaceRailFileBrowser({
     [apiBase, companyId],
   );
 
+  const saveFile = useCallback(async () => {
+    if (!selected || selected.kind !== "text") return;
+    setIoBusy("save");
+    setErr(null);
+    try {
+      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/file`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected.path, content: editContent }),
+      });
+      const raw = await r.json().catch(() => ({}));
+      const j = asObject(raw);
+      const error = typeof j?.error === "string" ? j.error : undefined;
+      if (!r.ok) throw new Error(error ?? r.statusText);
+      setSelected({ kind: "text", path: selected.path, name: selected.name, content: editContent });
+      setListRev((n) => n + 1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  }, [apiBase, companyId, editContent, selected]);
+
+  const trashFile = useCallback(async () => {
+    if (!selected) return;
+    if (!window.confirm(`Move “${selected.name}” to the recycle folder (.recycle)?`)) return;
+    setIoBusy("trash");
+    setErr(null);
+    try {
+      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/file/trash`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected.path }),
+      });
+      const raw = await r.json().catch(() => ({}));
+      const j = asObject(raw);
+      const error = typeof j?.error === "string" ? j.error : undefined;
+      if (!r.ok) throw new Error(error ?? r.statusText);
+      setSelected(null);
+      setListRev((n) => n + 1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  }, [apiBase, companyId, selected]);
+
+  const purgeFile = useCallback(async () => {
+    if (!selected || !isUnderRecycle(selected.path)) return;
+    if (!window.confirm(`Permanently delete “${selected.name}”? This cannot be undone.`)) return;
+    setIoBusy("purge");
+    setErr(null);
+    try {
+      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/file/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected.path }),
+      });
+      const raw = await r.json().catch(() => ({}));
+      const j = asObject(raw);
+      const error = typeof j?.error === "string" ? j.error : undefined;
+      if (!r.ok) throw new Error(error ?? r.statusText);
+      setSelected(null);
+      setListRev((n) => n + 1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  }, [apiBase, companyId, selected]);
+
+  const openRecycleBin = useCallback(async () => {
+    setErr(null);
+    try {
+      const mk = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/mkdir`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: ".recycle" }),
+      });
+      const raw = await mk.json().catch(() => ({}));
+      const j = asObject(raw);
+      const error = typeof j?.error === "string" ? j.error : undefined;
+      if (!mk.ok) throw new Error(error ?? mk.statusText);
+      setCwd(".recycle");
+      setSelected(null);
+      setCreateMode(null);
+      setCreateName("");
+      setListRev((n) => n + 1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [apiBase, companyId]);
+
+  const submitCreate = useCallback(async () => {
+    const name = createName.trim();
+    if (!name) {
+      setErr("Name required.");
+      return;
+    }
+    const rel = joinWorkspaceRel(cwd, name);
+    setIoBusy(createMode === "file" ? "create_file" : "mkdir");
+    setErr(null);
+    try {
+      if (createMode === "folder") {
+        const r = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/mkdir`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: rel }),
+        });
+        const raw = await r.json().catch(() => ({}));
+        const j = asObject(raw);
+        const error = typeof j?.error === "string" ? j.error : undefined;
+        if (!r.ok) throw new Error(error ?? r.statusText);
+        setCreateMode(null);
+        setCreateName("");
+        setListRev((n) => n + 1);
+      } else {
+        const r = await fetch(`${apiBase}/api/company/companies/${companyId}/workspace/file`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: rel, content: "" }),
+        });
+        const raw = await r.json().catch(() => ({}));
+        const j = asObject(raw);
+        const error = typeof j?.error === "string" ? j.error : undefined;
+        if (!r.ok) throw new Error(error ?? r.statusText);
+        setCreateMode(null);
+        setCreateName("");
+        const base = name.split("/").pop() ?? name;
+        setListRev((n) => n + 1);
+        await openFile(rel, base);
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  }, [apiBase, companyId, createMode, createName, cwd, openFile]);
+
   const crumbs = cwd ? cwd.split("/").filter(Boolean) : [];
+  const inRecycle = isUnderRecycle(cwd);
+  const dirty = selected?.kind === "text" && editContent !== selected.content;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -290,6 +510,8 @@ function WorkspaceRailFileBrowser({
             onClick={() => {
               setCwd("");
               setSelected(null);
+              setCreateMode(null);
+              setCreateName("");
             }}
           >
             workspace
@@ -305,6 +527,8 @@ function WorkspaceRailFileBrowser({
                   onClick={() => {
                     setCwd(prefix);
                     setSelected(null);
+                    setCreateMode(null);
+                    setCreateName("");
                   }}
                 >
                   {seg}
@@ -313,18 +537,207 @@ function WorkspaceRailFileBrowser({
             );
           })}
         </div>
-        {selected ? (
-          <div className="mt-2 flex items-center justify-between gap-2">
-            <p className="min-w-0 truncate font-mono text-[10px] text-[#999999]" title={selected.path}>
-              {selected.name}
-            </p>
-            <button
+        {!selected ? (
+          <div className="mt-2.5 flex w-full gap-2">
+            <Button
               type="button"
-              className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-[#666666] hover:text-[#e8e8e8]"
-              onClick={() => setSelected(null)}
+              variant="outline"
+              size="sm"
+              disabled={!!ioBusy}
+              title="Create a new file in the current folder"
+              className="h-8 min-w-0 flex-1 justify-center gap-1.5 border-[#2a2a2a] bg-[#0a0a0a] px-1.5 font-mono text-[9px] font-normal uppercase leading-tight tracking-wide text-[#b8b8b8] hover:border-[#3d3d3d] hover:bg-white/[0.04] hover:text-[#e8e8e8]"
+              onClick={() => {
+                setCreateMode("file");
+                setCreateName("");
+              }}
             >
-              Close file
-            </button>
+              <FilePlus className="size-3.5 shrink-0 opacity-80" strokeWidth={1.5} aria-hidden />
+              <span className="text-center">New file</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!!ioBusy}
+              title="Create a new folder"
+              className="h-8 min-w-0 flex-1 justify-center gap-1.5 border-[#2a2a2a] bg-[#0a0a0a] px-1.5 font-mono text-[9px] font-normal uppercase leading-tight tracking-wide text-[#b8b8b8] hover:border-[#3d3d3d] hover:bg-white/[0.04] hover:text-[#e8e8e8]"
+              onClick={() => {
+                setCreateMode("folder");
+                setCreateName("");
+              }}
+            >
+              <FolderPlus className="size-3.5 shrink-0 opacity-80" strokeWidth={1.5} aria-hidden />
+              <span className="text-center">New folder</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!!ioBusy}
+              title="Open .recycle folder"
+              className="h-8 min-w-0 flex-1 justify-center gap-1.5 border-[#2a2a2a] bg-[#0a0a0a] px-1.5 font-mono text-[9px] font-normal uppercase leading-tight tracking-wide text-[#b8b8b8] hover:border-[#3d3d3d] hover:bg-white/[0.04] hover:text-[#e8e8e8]"
+              onClick={() => void openRecycleBin()}
+            >
+              <Trash2 className="size-3.5 shrink-0 opacity-70" strokeWidth={1.5} aria-hidden />
+              <span className="text-center">Recycle</span>
+            </Button>
+          </div>
+        ) : null}
+        {createMode && !selected ? (
+          <div className="mt-2 flex flex-wrap items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <label className="mb-0.5 block font-mono text-[9px] uppercase tracking-wide text-[#666666]">
+                {createMode === "file" ? "File name (under current folder)" : "Folder name"}
+              </label>
+              <Input
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                placeholder={createMode === "file" ? "notes.md" : "my-folder"}
+                className="h-8 border-[#333333] bg-black font-mono text-xs text-[#e8e8e8]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void submitCreate();
+                }}
+              />
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!!ioBusy}
+              className="h-8 border-[#333333] bg-black font-mono text-[10px] uppercase tracking-wide text-[#e8e8e8] hover:bg-white/[0.08]"
+              onClick={() => void submitCreate()}
+            >
+              Create
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 font-mono text-[10px] uppercase tracking-wide text-[#666666]"
+              onClick={() => {
+                setCreateMode(null);
+                setCreateName("");
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        ) : null}
+        {selected ? (
+          <div className="mt-2.5 space-y-2.5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <p
+                className="min-w-0 font-mono text-[10px] leading-snug text-[#999999] sm:max-w-[min(100%,14rem)] sm:truncate"
+                title={selected.path}
+              >
+                {isUnderRecycle(selected.path) ? (
+                  <span className="text-[#D4A843]">.recycle · </span>
+                ) : null}
+                <span className="break-all text-[#c8c8c8] sm:break-normal">{selected.name}</span>
+                {dirty ? (
+                  <span className="ml-2 font-mono text-[9px] uppercase tracking-wide text-[#D4A843]">
+                    unsaved
+                  </span>
+                ) : null}
+              </p>
+              <div className="flex shrink-0 flex-wrap items-stretch justify-end gap-2">
+                {selected.kind === "text" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!ioBusy || !dirty}
+                    className="h-8 border-[#2a2a2a] bg-[#0a0a0a] px-3 font-mono text-[10px] font-normal uppercase tracking-wide text-[#d0d0d0] hover:border-[#3d3d3d] hover:bg-white/[0.04] disabled:border-[#222222] disabled:text-[#555555]"
+                    onClick={() => void saveFile()}
+                  >
+                    Save
+                  </Button>
+                ) : null}
+                {!isUnderRecycle(selected.path) ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!ioBusy}
+                    className="h-8 border-[#2a2a2a] bg-[#0a0a0a] px-3 font-mono text-[10px] font-normal uppercase tracking-wide text-[#d0d0d0] hover:border-[#3d3d3d] hover:bg-white/[0.04]"
+                    onClick={() => void trashFile()}
+                  >
+                    To recycle
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!ioBusy}
+                    className="h-8 border-[#5c4a2a] bg-[#0a0a0a] px-3 font-mono text-[10px] font-normal uppercase tracking-wide text-[#D4A843] hover:border-[#7a6230] hover:bg-[#14100a]"
+                    onClick={() => void purgeFile()}
+                  >
+                    Purge
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 border-[#2a2a2a] bg-[#0a0a0a] px-3 font-mono text-[10px] font-normal uppercase tracking-wide text-[#888888] hover:border-[#3d3d3d] hover:bg-white/[0.04] hover:text-[#c8c8c8]"
+                  onClick={() => setSelected(null)}
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+            {selected.kind === "text" ? (
+              <>
+                <Textarea
+                  value={editContent}
+                  onChange={(e) => setEditContent(e.target.value)}
+                  rows={14}
+                  spellCheck={false}
+                  className="min-h-[200px] resize-y border border-[#2a2a2a] bg-[#050505] font-mono text-[12px] leading-relaxed text-[#e8e8e8] shadow-none placeholder:text-[#555555] focus-visible:border-[#4a4a4a] focus-visible:ring-0 focus-visible:ring-offset-0"
+                  aria-label="File contents"
+                />
+                {/\.md$/i.test(selected.name) ? (
+                  <div className="flex flex-col gap-2 border-t border-[#1f1f1f] pt-2 sm:flex-row sm:items-center sm:justify-between">
+                    <label className="flex cursor-pointer items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-[#777777]">
+                      <input
+                        type="checkbox"
+                        checked={showMdPreview}
+                        onChange={(e) => setShowMdPreview(e.target.checked)}
+                        className="size-3.5 rounded border-[#3a3a3a] bg-black accent-[#666666]"
+                      />
+                      Rendered preview
+                    </label>
+                    <span className="font-mono text-[9px] uppercase tracking-wide text-[#555555]">Markdown</span>
+                  </div>
+                ) : null}
+                {/\.md$/i.test(selected.name) && showMdPreview ? (
+                  <div className="max-h-64 overflow-y-auto rounded-sm border border-[#222222] bg-[#080808] p-3">
+                    <WorkspaceMarkdownBody text={editContent} />
+                  </div>
+                ) : null}
+              </>
+            ) : selected.kind === "image" ? (
+              <div className="space-y-2 rounded-sm border border-[#2a2a2a] bg-[#080808] p-3">
+                <p className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
+                  {selected.mimeType} · {(selected.byteLen / 1024).toFixed(1)} KiB · not editable here
+                </p>
+                <img
+                  src={selected.dataUrl}
+                  alt={selected.name}
+                  className="max-h-[min(50vh,420px)] w-auto max-w-full rounded-sm object-contain"
+                />
+              </div>
+            ) : (
+              <div className="rounded-sm border border-[#2a2a2a] bg-[#080808] px-3 py-6 text-center">
+                <p className="font-mono text-[11px] leading-relaxed text-[#999999]">
+                  Binary file ({selected.mimeType})
+                </p>
+                <p className="mt-1 font-mono text-[10px] text-[#666666]">
+                  {(selected.byteLen / 1024).toFixed(1)} KiB — open on disk or use a desktop tool. You can still move
+                  to recycle or purge.
+                </p>
+              </div>
+            )}
           </div>
         ) : null}
       </div>
@@ -335,23 +748,18 @@ function WorkspaceRailFileBrowser({
         ) : null}
         {loading ? (
           <p className="p-3 font-mono text-[10px] uppercase tracking-wide text-[#666666]">[LOADING…]</p>
-        ) : selected ? (
-          <div className="border-b border-[#222222] p-3">
-            {/\.md$/i.test(selected.name) ? (
-              <WorkspaceMarkdownBody text={selected.content} />
-            ) : (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[#c8c8c8]">
-                {selected.content}
-              </pre>
-            )}
-          </div>
         ) : null}
         {!selected && !loading ? (
           <ul className="divide-y divide-[#1a1a1a]">
-            {entries.length === 0 ? (
+            {inRecycle ? (
+              <li className="px-3 py-2 font-mono text-[10px] uppercase tracking-wide text-[#666666]">
+                Recovered names include a timestamp prefix. Delete permanently to remove.
+              </li>
+            ) : null}
+            {sortedEntries.length === 0 ? (
               <li className="px-3 py-4 text-center text-xs text-[#666666]">Empty folder</li>
             ) : (
-              entries.map((e) => (
+              sortedEntries.map((e) => (
                 <li key={e.path}>
                   <button
                     type="button"
@@ -360,13 +768,21 @@ function WorkspaceRailFileBrowser({
                       if (e.kind === "dir") {
                         setCwd(e.path);
                         setSelected(null);
+                        setCreateMode(null);
+                        setCreateName("");
                       } else {
                         void openFile(e.path, e.name);
                       }
                     }}
                   >
                     {e.kind === "dir" ? (
-                      <FolderOpen className="size-4 shrink-0 text-[#888888]" strokeWidth={1.5} />
+                      <FolderOpen
+                        className={cn(
+                          "size-4 shrink-0",
+                          e.name === ".recycle" ? "text-[#D4A843]" : "text-[#888888]",
+                        )}
+                        strokeWidth={1.5}
+                      />
                     ) : (
                       <FileText className="size-4 shrink-0 text-[#666666]" strokeWidth={1.5} />
                     )}
@@ -445,6 +861,36 @@ export function WorkspaceRightRail() {
   const timelineStatusRef = useRef<RunStatus | null>(null);
   const brailleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const typeoutTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Coalesce NDJSON token updates to one React commit per animation frame. */
+  const streamAppendAccRef = useRef("");
+  const streamAppendRafRef = useRef<number | null>(null);
+
+  const resetStreamAppend = useCallback(() => {
+    streamAppendAccRef.current = "";
+    if (streamAppendRafRef.current != null) {
+      cancelAnimationFrame(streamAppendRafRef.current);
+      streamAppendRafRef.current = null;
+    }
+    setStreamAssistantBuf("");
+  }, []);
+
+  const flushStreamAppendNow = useCallback(() => {
+    if (streamAppendRafRef.current != null) {
+      cancelAnimationFrame(streamAppendRafRef.current);
+      streamAppendRafRef.current = null;
+    }
+    setStreamAssistantBuf(streamAppendAccRef.current);
+  }, []);
+
+  const scheduleStreamAppend = useCallback((chunk: string) => {
+    if (!chunk) return;
+    streamAppendAccRef.current += chunk;
+    if (streamAppendRafRef.current != null) return;
+    streamAppendRafRef.current = requestAnimationFrame(() => {
+      streamAppendRafRef.current = null;
+      setStreamAssistantBuf(streamAppendAccRef.current);
+    });
+  }, []);
 
   const BRAILLE = "⣾⣽⣻⢿⡿⣟⣯⣷";
 
@@ -533,16 +979,16 @@ export function WorkspaceRightRail() {
     setRunNeedsApproval(false);
     runtimeSeenRef.current.clear();
     setRunActionErr(null);
-    setStreamAssistantBuf("");
-  }, [focusedPersona]);
+    resetStreamAppend();
+  }, [focusedPersona, resetStreamAppend]);
 
   /** Clear live token bubble once the tracked worker run reaches a terminal state. */
   useEffect(() => {
     const st = liveRun?.status;
     if (st === "success" || st === "error" || st === "cancelled") {
-      setStreamAssistantBuf("");
+      resetStreamAppend();
     }
-  }, [liveRun?.status]);
+  }, [liveRun?.status, resetStreamAppend]);
 
   const pushRunTimeline = useCallback((entry: Omit<RunTimelineEntry, "seq" | "tsMs"> & { tsMs?: number }) => {
     const seq = ++timelineSeqRef.current;
@@ -987,7 +1433,7 @@ export function WorkspaceRightRail() {
       // Step 2: NDJSON stream — runtime/tool events + model token deltas (same-origin for Electron reliability)
       setThinking(true);
       setSending(false);
-      setStreamAssistantBuf("");
+      resetStreamAppend();
       let hadStreamedTokens = false;
 
       const streamUrl = getAgentChatReplyStreamUrl();
@@ -1089,14 +1535,14 @@ export function WorkspaceRightRail() {
             const eff = extractAnthropicStreamTextEffect(ev.event);
             if (eff === "reset") {
               hadStreamedTokens = true;
-              setStreamAssistantBuf("");
+              resetStreamAppend();
             } else if (eff && "append" in eff && eff.append.length > 0) {
               hadStreamedTokens = true;
-              setStreamAssistantBuf((s) => s + eff.append);
+              scheduleStreamAppend(eff.append);
             }
           } else if (t === "delta" && typeof ev.text === "string") {
             hadStreamedTokens = true;
-            setStreamAssistantBuf((s) => s + ev.text);
+            scheduleStreamAppend(ev.text);
           } else if (t === "error") {
             replyJ = {
               ok: false,
@@ -1118,6 +1564,8 @@ export function WorkspaceRightRail() {
           }
         }
       }
+
+      flushStreamAppendNow();
 
       if (replyJ.run_id && companyId) {
         setLiveRun({
@@ -1154,7 +1602,7 @@ export function WorkspaceRightRail() {
 
       const keepStreamBubble = hadStreamedTokens && Boolean(replyJ.run_id);
       if (!keepStreamBubble) {
-        setStreamAssistantBuf("");
+        resetStreamAppend();
       }
       if (!replyJ.ok || replyJ.error) {
         setThinking(false);
@@ -1202,11 +1650,14 @@ export function WorkspaceRightRail() {
     channels,
     companyId,
     draft,
+    flushStreamAppendNow,
     focusedPersona,
     persistNotes,
     propertiesSelection,
     qc,
     refreshWorkspace,
+    resetStreamAppend,
+    scheduleStreamAppend,
     startPollingForReply,
     selectedRow,
     tasks,
@@ -1870,7 +2321,7 @@ export function WorkspaceRightRail() {
                         </div>
                         <div className="nd-stream-assistant__body">
                           <div className="min-w-0 flex-1">
-                            <WorkspaceMarkdownBody
+                            <WorkspaceMarkdownStreamBody
                               text={item.text}
                               className={cn(
                                 "text-[#e8e8e8]",

@@ -8,6 +8,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use base64::Engine as _;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::path::{Component, Path, PathBuf};
@@ -35,6 +36,10 @@ pub fn router() -> Router<ConsoleState> {
         .route(
             "/api/company/companies/:company_id/workspace/file/delete",
             post(post_delete_workspace_file),
+        )
+        .route(
+            "/api/company/companies/:company_id/workspace/file/trash",
+            post(post_trash_workspace_file),
         )
         .route(
             "/api/company/companies/:company_id/workspace/file",
@@ -198,7 +203,8 @@ async fn list_workspace(
             break;
         }
         let name = item.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        // Hide dotfiles except `.recycle` (company workspace trash).
+        if name.starts_with('.') && name != ".recycle" {
             continue;
         }
         let meta = item.metadata().map_err(|e| {
@@ -245,6 +251,27 @@ async fn list_workspace(
 #[derive(Deserialize)]
 struct FileQuery {
     path: String,
+}
+
+fn mime_from_workspace_path(file_abs: &Path) -> &'static str {
+    match file_abs
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("gz") => "application/gzip",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn get_workspace_file(
@@ -308,16 +335,25 @@ async fn get_workspace_file(
             Json(json!({ "error": format!("file larger than {MAX_READ_BYTES} bytes") })),
         ));
     }
-    let content = String::from_utf8(bytes).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "file is not valid UTF-8" })),
-        )
-    })?;
-    Ok(Json(json!({
-        "path": rel_display(&home_canon, &file_abs),
-        "content": content,
-    })))
+    let path_disp = rel_display(&home_canon, &file_abs);
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => Ok(Json(json!({
+            "path": path_disp,
+            "encoding": "utf-8",
+            "content": text,
+        }))),
+        Err(_) => {
+            let mime = mime_from_workspace_path(&file_abs);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(Json(json!({
+                "path": path_disp,
+                "encoding": "base64",
+                "content_base64": b64,
+                "mime_type": mime,
+                "byte_len": bytes.len(),
+            })))
+        }
+    }
 }
 
 async fn delete_workspace_file_by_rel_path(
@@ -406,6 +442,137 @@ async fn post_delete_workspace_file(
         return Err(no_db());
     };
     delete_workspace_file_by_rel_path(pool, company_id, &body.path).await
+}
+
+const RECYCLE_REL: &str = ".recycle";
+
+#[derive(Deserialize)]
+struct TrashWorkspaceFileBody {
+    path: String,
+}
+
+/// Move a regular file to `hsmii_home/.recycle/` with a timestamped flattened name (soft delete).
+async fn post_trash_workspace_file(
+    State(st): State<ConsoleState>,
+    PathParam(company_id): PathParam<Uuid>,
+    Json(body): Json<TrashWorkspaceFileBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    if body.path.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "path is required" })),
+        ));
+    }
+    let home_cell = fetch_hsmii_home_cell(pool, company_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(home_opt) = home_cell else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "company not found" })),
+        ));
+    };
+    let Some(home_str) = home_opt.filter(|s| !s.trim().is_empty()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "company has no hsmii_home" })),
+        ));
+    };
+    let home = Path::new(home_str.trim());
+    let home_canon = canonical_home(home).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let rel = parse_rel_path(&body.path)
+        .map_err(|m| (StatusCode::BAD_REQUEST, Json(json!({ "error": m }))))?;
+    let rel_disp = rel.to_string_lossy().replace('\\', "/");
+    if rel_disp == RECYCLE_REL || rel_disp.starts_with(&format!("{}/", RECYCLE_REL)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "file is already under .recycle; delete permanently instead",
+                "path": body.path,
+            })),
+        ));
+    }
+    let file_abs = resolve_under_home(&home_canon, &rel)
+        .map_err(|m| (StatusCode::BAD_REQUEST, Json(json!({ "error": m }))))?;
+    if !file_abs.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "not a regular file (only files can be moved to recycle)",
+                "path": body.path,
+            })),
+        ));
+    }
+    let recycle_root = resolve_under_home(&home_canon, Path::new(RECYCLE_REL))
+        .map_err(|m| (StatusCode::BAD_REQUEST, Json(json!({ "error": m }))))?;
+    std::fs::create_dir_all(&recycle_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let recycle_canon = std::fs::canonicalize(&recycle_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    if !recycle_canon.starts_with(&home_canon) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "recycle path escapes workspace root" })),
+        ));
+    }
+
+    let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let flat: String = rel_disp.chars().filter(|c| *c != '\0').collect();
+    let flat = flat.replace('/', "__");
+    let flat = if flat.is_empty() {
+        "unnamed".to_string()
+    } else if flat.len() > 180 {
+        format!("{}…{}", &flat[..120], flat.len())
+    } else {
+        flat
+    };
+
+    let from_disp = rel_display(&home_canon, &file_abs);
+    let mut dest_abs = recycle_canon.join(format!("{}__{}", ts, flat));
+    let mut n = 0u32;
+    while dest_abs.exists() {
+        n += 1;
+        if n > 500 {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "could not allocate unique recycle name" })),
+            ));
+        }
+        dest_abs = recycle_canon.join(format!("{}__{}_{}", ts, flat, n));
+    }
+
+    std::fs::rename(&file_abs, &dest_abs).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let to_disp = rel_display(&home_canon, &dest_abs);
+
+    Ok(Json(json!({
+        "ok": true,
+        "from": from_disp,
+        "to": to_disp,
+    })))
 }
 
 #[derive(Deserialize)]
