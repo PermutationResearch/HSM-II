@@ -91,6 +91,29 @@ impl Heartbeat {
         let mut results = Vec::new();
 
         tracing::info!("Running heartbeat...");
+        match super::kb_manifest::load_kb_manifest_report(base_path) {
+            Ok(Some(report)) => {
+                let ok = report.missing_files.is_empty();
+                let mut message = report.status_line();
+                if !ok {
+                    message.push_str(&format!("; missing={}", report.missing_files.join(", ")));
+                }
+                tracing::info!("{}", message);
+                results.push(HeartbeatResult {
+                    action: "KB Manifest".to_string(),
+                    success: ok,
+                    message,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                results.push(HeartbeatResult {
+                    action: "KB Manifest".to_string(),
+                    success: false,
+                    message: format!("kb manifest load failed: {}", e),
+                });
+            }
+        }
 
         // Run checklist items
         for item in &self.checklist {

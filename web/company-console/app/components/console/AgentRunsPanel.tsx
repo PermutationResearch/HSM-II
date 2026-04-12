@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, ArrowUpRight } from "lucide-react";
 import { Badge } from "@/app/components/ui/badge";
@@ -37,6 +38,16 @@ type FeedbackEvent = {
   body: string;
   created_at: string;
   spawned_task_id: string | null;
+};
+
+type RunArtifactFile = {
+  path: string;
+  call_count: number;
+  tools: string[];
+  last_tool: string;
+  before_snapshot: string | null;
+  after_snapshot: string | null;
+  updated_at: string | null;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,6 +88,35 @@ function executionMode(run: AgentRun): "worker" | "llm_simulated" | "pending" | 
   const raw = typeof run.meta?.execution_mode === "string" ? run.meta.execution_mode : "";
   if (raw === "worker" || raw === "llm_simulated" || raw === "pending") return raw;
   return "unknown";
+}
+
+function executionVerified(run: AgentRun): boolean {
+  return run.meta?.execution_verified === true;
+}
+
+function parseRunArtifacts(meta: Record<string, unknown>): RunArtifactFile[] {
+  const ro = meta?.run_artifacts;
+  if (!ro || typeof ro !== "object") return [];
+  const touched = (ro as { touched_files?: unknown }).touched_files;
+  if (!Array.isArray(touched)) return [];
+  const out: RunArtifactFile[] = [];
+  for (const item of touched) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const path = typeof o.path === "string" ? o.path.trim() : "";
+    if (!path) continue;
+    const tools = Array.isArray(o.tools) ? o.tools.filter((x): x is string => typeof x === "string") : [];
+    out.push({
+      path,
+      call_count: typeof o.call_count === "number" ? o.call_count : 1,
+      tools,
+      last_tool: typeof o.last_tool === "string" ? o.last_tool : tools[tools.length - 1] ?? "tool",
+      before_snapshot: typeof o.before_snapshot === "string" ? o.before_snapshot : null,
+      after_snapshot: typeof o.after_snapshot === "string" ? o.after_snapshot : null,
+      updated_at: typeof o.updated_at === "string" ? o.updated_at : null,
+    });
+  }
+  return out;
 }
 
 // ── Run detail (feedback + promote) ──────────────────────────────────────────
@@ -169,6 +209,18 @@ function RunDetail({
   });
 
   const feedback = data?.feedback ?? [];
+  const liveRun = data?.run ?? run;
+  const artifacts = parseRunArtifacts(liveRun.meta ?? {});
+  const recursiveReqPath =
+    typeof liveRun.meta?.recursive_requirements_path === "string"
+      ? liveRun.meta.recursive_requirements_path
+      : null;
+  const recursiveRunPath =
+    typeof liveRun.meta?.recursive_run_path === "string" ? liveRun.meta.recursive_run_path : null;
+  const recursiveHref =
+    recursiveReqPath && liveRun.company_agent_id
+      ? `/workspace/agents/${liveRun.company_agent_id}?tab=workspace&path=${encodeURIComponent(recursiveReqPath)}`
+      : null;
 
   return (
     <div className="space-y-4 px-1 pb-1 pt-2">
@@ -177,11 +229,81 @@ function RunDetail({
         <span>started {fmtTs(run.started_at)}</span>
         {run.finished_at && <span>finished {fmtTs(run.finished_at)}</span>}
         <span>mode {executionMode(run)}</span>
+        <span>{executionVerified(liveRun) ? "verified execution" : "unverified execution"}</span>
         {run.summary && <span className="text-foreground/80">{run.summary}</span>}
         {run.external_run_id && (
           <span>
             {run.external_system}:{run.external_run_id}
           </span>
+        )}
+        {recursiveRunPath && <span>recursive {recursiveRunPath}</span>}
+      </div>
+      {recursiveHref ? (
+        <div>
+          <Link
+            href={recursiveHref}
+            className="rounded border border-admin-border px-2 py-0.5 font-mono text-[9px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+          >
+            Open recursive requirements
+          </Link>
+        </div>
+      ) : null}
+
+      {/* Run artifacts */}
+      <div>
+        <p className="mb-2 text-[11px] font-medium text-foreground/70">
+          Run Artifacts ({artifacts.length})
+        </p>
+        {artifacts.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No touched-file artifacts captured for this run yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {artifacts.map((a, idx) => {
+              const openHref =
+                liveRun.company_agent_id != null
+                  ? `/workspace/agents/${liveRun.company_agent_id}?tab=workspace&path=${encodeURIComponent(a.path)}`
+                  : null;
+              const hasDiff = (a.before_snapshot?.length ?? 0) > 0 || (a.after_snapshot?.length ?? 0) > 0;
+              const diffHref =
+                openHref && hasDiff
+                  ? `${openHref}&artifact_before=${encodeURIComponent(a.before_snapshot ?? "")}&artifact_after=${encodeURIComponent(a.after_snapshot ?? "")}`
+                  : null;
+              return (
+                <div
+                  key={`${a.path}-${idx}`}
+                  className="rounded border border-admin-border bg-black/10 p-2"
+                >
+                  <p className="truncate font-mono text-[10px] text-foreground/90">{a.path}</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[9px] text-muted-foreground">
+                    <span>{a.call_count} call{a.call_count === 1 ? "" : "s"}</span>
+                    <span>last: {a.last_tool}</span>
+                    {a.tools.length > 0 ? <span>tools: {a.tools.join(", ")}</span> : null}
+                    {a.updated_at ? <span>{fmtTs(a.updated_at)}</span> : null}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {openHref ? (
+                      <Link
+                        href={openHref}
+                        className="rounded border border-admin-border px-2 py-0.5 font-mono text-[9px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                      >
+                        Open in Files
+                      </Link>
+                    ) : null}
+                    {diffHref ? (
+                      <Link
+                        href={diffHref}
+                        className="rounded border border-[#3b82f6]/40 px-2 py-0.5 font-mono text-[9px] text-[#9ecbff] hover:bg-[#3b82f6]/10"
+                      >
+                        Before/After diff
+                      </Link>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

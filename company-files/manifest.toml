@@ -1,0 +1,27 @@
+[[file]]
+path = "client_registry.md"
+type = "registry"
+
+[[file]]
+path = "onboarding_checklist.md"
+type = "checklist"
+
+[[file]]
+path = "sop/research_sop.md"
+type = "sop"
+
+[[file]]
+path = "sop/crypto_sop.md"
+type = "sop"
+
+[[file]]
+path = "sop/engineering_sop.md"
+type = "sop"
+
+[[file]]
+path = "compliance_matrix.md"
+type = "compliance"
+
+[[file]]
+path = "kpi_dashboard_template.md"
+type = "template"

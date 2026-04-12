@@ -33,7 +33,7 @@ use axum::{
     middleware::Next,
     response::Response,
     response::sse::{Event, KeepAlive, Sse},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 pub use bundle::{export_bundle, import_bundle as run_import_bundle, CompanyBundle, ImportRequest};
@@ -53,6 +53,8 @@ use self::onboarding_contracts::{
     evaluate_gate_results, find_contract, load_contracts_hot, OnboardingGateResult,
 };
 use crate::console::ConsoleState;
+use crate::personal::gateway::{Message, Platform};
+use crate::personal::EnhancedPersonalAgent;
 use crate::personal::ops_config::{
     heartbeat_state_path, load_heartbeat_state, load_ops_config, resolve_ops_config_path,
     BudgetScope, Ticket,
@@ -207,6 +209,14 @@ pub fn router() -> Router<ConsoleState> {
             get(list_tasks).post(create_task),
         )
         .route(
+            "/api/company/companies/:company_id/tasks/:task_id",
+            delete(delete_task),
+        )
+        .route(
+            "/api/company/tasks/:task_id/state",
+            patch(patch_task_state),
+        )
+        .route(
             "/api/company/companies/:company_id/spawn-rules",
             get(list_spawn_rules).post(create_spawn_rule),
         )
@@ -293,6 +303,10 @@ pub fn router() -> Router<ConsoleState> {
         )
         .route("/api/company/tasks/:task_id/checkout", post(checkout_task))
         .route("/api/company/tasks/:task_id/release", post(release_task))
+        .route(
+            "/api/company/tasks/:task_id/execute-worker",
+            post(post_execute_task_worker),
+        )
         .route(
             "/api/company/tasks/:task_id/run-telemetry",
             post(post_task_run_telemetry),
@@ -2664,6 +2678,203 @@ struct PostRunTelemetryBody {
     clear_log: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct ExecuteTaskWorkerBody {
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    skill_slug: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ExecuteTaskRow {
+    title: String,
+    specification: Option<String>,
+    checked_out_by: Option<String>,
+}
+
+fn truncate_worker_log(s: &str, max_chars: usize) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let out: String = t.chars().take(max_chars).collect();
+    if out.chars().count() < t.chars().count() {
+        format!("{out}…")
+    } else {
+        out
+    }
+}
+
+async fn post_execute_task_worker(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<ExecuteTaskWorkerBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let task = sqlx::query_as::<_, ExecuteTaskRow>(
+        r#"SELECT title, specification, checked_out_by
+           FROM tasks WHERE id = $1"#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(task) = task else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+
+    let actor = body
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            task.checked_out_by
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "worker-agent-loop".to_string());
+
+    let prompt = body
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "Execute this task with real tools and return what was changed.\n\nTitle: {}\n\nSpecification:\n{}",
+                task.title,
+                task.specification.as_deref().unwrap_or("")
+            )
+        });
+
+    let skill_slug = body
+        .skill_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "operator-chat".to_string());
+
+    let actor_for_response = actor.clone();
+    let skill_slug_for_response = skill_slug.clone();
+    let st_bg = st.clone();
+    tokio::spawn(async move {
+        let _ = post_task_run_telemetry(
+            State(st_bg.clone()),
+            Path(task_id),
+            Json(PostRunTelemetryBody {
+                run_status: Some("running".to_string()),
+                tool_calls: Some(1),
+                log_append: Some(format!(
+                    "worker start actor={} skill={} at={}\n",
+                    actor,
+                    skill_slug,
+                    Utc::now().to_rfc3339()
+                )),
+                clear_log: Some(true),
+            }),
+        )
+        .await;
+
+        let start_ms = Utc::now().timestamp_millis();
+        let mut rx = crate::runtime_control::subscribe_completions();
+        let (run_status, mut tool_calls, log_append) =
+            match EnhancedPersonalAgent::initialize(&st_bg.home).await {
+                Ok(mut agent) => {
+                    let msg = Message {
+                        id: format!("task-{task_id}"),
+                        platform: Platform::Web,
+                        channel_id: "company-os".to_string(),
+                        channel_name: Some("company-os".to_string()),
+                        user_id: actor.clone(),
+                        user_name: actor.clone(),
+                        content: prompt,
+                        timestamp: Utc::now(),
+                        attachments: Vec::new(),
+                        reply_to: None,
+                    };
+                    match agent.handle_message(msg).await {
+                        Ok(reply) => (
+                            "success".to_string(),
+                            0i32,
+                            format!("worker reply: {}\n", truncate_worker_log(&reply, 1400)),
+                        ),
+                        Err(e) => ("error".to_string(), 0i32, format!("worker error: {e}\n")),
+                    }
+                }
+                Err(e) => (
+                    "error".to_string(),
+                    0i32,
+                    format!("worker init failed: {e}\n"),
+                ),
+            };
+
+        loop {
+            match rx.try_recv() {
+                Ok(evt) => {
+                    if evt.ts_ms >= start_ms
+                        && (evt.event_type == "tool_start" || evt.event_type == "tool_start_delta")
+                    {
+                        tool_calls += 1;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            }
+        }
+        if tool_calls <= 0 {
+            tool_calls = 1;
+        }
+
+        let _ = post_task_run_telemetry(
+            State(st_bg.clone()),
+            Path(task_id),
+            Json(PostRunTelemetryBody {
+                run_status: Some(run_status),
+                tool_calls: Some(tool_calls),
+                log_append: Some(log_append),
+                clear_log: Some(false),
+            }),
+        )
+        .await;
+
+        let _ = release_task(
+            State(st_bg),
+            Path(task_id),
+            Json(ReleaseBody {
+                actor: actor.clone(),
+            }),
+        )
+        .await;
+    });
+
+    Ok(Json(json!({
+        "started": true,
+        "task_id": task_id,
+        "actor": actor_for_response,
+        "skill_slug": skill_slug_for_response,
+    })))
+}
+
 async fn post_task_run_telemetry(
     State(st): State<ConsoleState>,
     Path(task_id): Path<Uuid>,
@@ -2940,6 +3151,38 @@ async fn list_tasks(
 }
 
 #[derive(Deserialize)]
+/// # What is a Task?
+///
+/// A task is the **atomic unit of organizational intent** in Company OS.  It is not merely a
+/// to-do item — it is a *stigmergic coordination artifact* that carries everything an agent
+/// (or human) needs to pick up work without re-discovering context.
+///
+/// ## Purpose & utility
+///
+/// | Dimension            | What the task provides                                               |
+/// |----------------------|----------------------------------------------------------------------|
+/// | **Commitment**       | An explicit promise that outcome X will be reached by persona Y      |
+/// | **Context capsule**  | `specification`, `workspace_attachment_paths`, `capability_refs` and |
+/// |                      | `context_notes` form a self-contained brief any agent can cold-start |
+/// | **Stigmergic trail** | `context_notes` accumulates operator messages, agent replies, and    |
+/// |                      | run telemetry so every handoff is lossless — no institutional memory |
+/// |                      | escapes into chat logs that disappear                                |
+/// | **Governance gate**  | `requires_human` stops the flow for explicit human approval;         |
+/// |                      | the decision log (`governance_events`) is immutable                  |
+/// | **Work queue slot**  | `priority`, `checked_out_by`, `checked_out_until` implement a        |
+/// |                      | distributed, lease-based work queue agents poll for their next turn  |
+/// | **Learning trigger** | When a task completes, its `context_notes` digest becomes a          |
+/// |                      | candidate for company shared memory (`company_memory_entries`)       |
+///
+/// ## Lifecycle
+/// ```text
+/// open → in_progress (checkout) → [waiting_admin | blocked] → done / cancelled
+///                                      ↑ requires_human gate
+/// ```
+///
+/// ## Design rule
+/// Keep tasks *narrow but rich*: one clear outcome, fully specified context.  A task that needs
+/// five sub-tasks spawned is healthy.  A task with a vague title and no specification is not.
 struct CreateTaskBody {
     title: String,
     #[serde(default)]
@@ -4215,6 +4458,85 @@ struct ReleaseBody {
     actor: String,
 }
 
+/// `DELETE /api/company/companies/:company_id/tasks/:task_id`
+async fn delete_task(
+    State(st): State<ConsoleState>,
+    Path((company_id, task_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let deleted = sqlx::query_scalar::<_, bool>(
+        "DELETE FROM tasks WHERE id = $1 AND company_id = $2 RETURNING TRUE",
+    )
+    .bind(task_id)
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    if deleted.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    }
+    Ok(Json(json!({ "deleted": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct PatchTaskStateBody {
+    state: String,
+}
+
+/// `PATCH /api/company/tasks/:task_id/state`
+async fn patch_task_state(
+    State(st): State<ConsoleState>,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<PatchTaskStateBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    let allowed = ["done", "closed", "cancelled", "open", "in_progress", "blocked", "waiting_admin"];
+    let state = body.state.trim().to_lowercase();
+    if !allowed.contains(&state.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("state must be one of: {}", allowed.join(", ")) })),
+        ));
+    }
+    let row = sqlx::query_as::<_, TaskRow>(
+        r#"UPDATE tasks SET state = $2, updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification,
+                     workspace_attachment_paths, capability_refs, state, owner_persona, parent_task_id,
+                     spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number,
+                     requires_human, created_at::text"#,
+    )
+    .bind(task_id)
+    .bind(&state)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(t) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task not found" })),
+        ));
+    };
+    Ok(Json(json!({ "task": t })))
+}
+
 async fn release_task(
     State(st): State<ConsoleState>,
     Path(task_id): Path<Uuid>,
@@ -4972,6 +5294,7 @@ async fn stream_runtime_events() -> Sse<impl futures_util::Stream<Item = Result<
                     success: false,
                     message: "runtime event stream lagged".to_string(),
                     ts_ms: Utc::now().timestamp_millis(),
+                    input: None,
                     stream_event: None,
                 }
             }

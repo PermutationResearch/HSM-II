@@ -25,3 +25,15 @@ Portable **file pack** for the “principal architect” protocol: operating sum
 
 - **Start here:** `docs/agent-os-program/OPERATING_SUMMARY.md`
 - **M1 smoke:** `bash scripts/agent-os-milestone1-smoke.sh` (requires `hsm_console` or `HSM_CONSOLE_URL`)
+
+## Execution discipline (team default)
+
+Use these defaults for Company OS engineering work:
+
+- Plan first for non-trivial tasks (3+ steps, architecture, migrations): track plan in `tasks/todo.md`.
+- Re-plan immediately when runtime evidence contradicts the current plan.
+- Use subagents for focused exploration/analysis where parallelism helps.
+- Do not mark complete without verification evidence (tests, logs, and behavior diff when relevant).
+- Prefer elegant minimal changes; avoid patch stacking when a cleaner approach is obvious.
+- Treat bug reports as autonomous fix tasks: reproduce, gather evidence, fix, verify.
+- After user corrections, capture the pattern and new guardrail in `tasks/lessons.md`.

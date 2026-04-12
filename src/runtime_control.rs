@@ -39,6 +39,9 @@ pub struct CompletionEvent {
     pub success: bool,
     pub message: String,
     pub ts_ms: i64,
+    /// Structured tool input payload for `tool_start` notifications.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
     /// When `event_type` is `stream_event`, carries an Anthropic Messages API stream
     /// event object (e.g. `content_block_delta` with `text_delta`). Company Console
     /// NDJSON mirrors these as top-level `{ "type": "stream_event", "event": … }`.
@@ -56,6 +59,41 @@ impl CompletionEvent {
             success: true,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
+            stream_event: None,
+        }
+    }
+
+    pub fn tool_start_with_input(
+        tool_name: &str,
+        call_id: &str,
+        input: Value,
+        message: String,
+    ) -> Self {
+        Self {
+            event_type: "tool_start".to_string(),
+            task_key: None,
+            tool_name: Some(tool_name.to_string()),
+            call_id: Some(call_id.to_string()),
+            success: true,
+            message,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: Some(input),
+            stream_event: None,
+        }
+    }
+
+    /// Provider-agnostic incremental tool-input preview event emitted before execution starts.
+    pub fn tool_start_delta(tool_name: &str, call_id: &str, input: Value, message: String) -> Self {
+        Self {
+            event_type: "tool_start_delta".to_string(),
+            task_key: None,
+            tool_name: Some(tool_name.to_string()),
+            call_id: Some(call_id.to_string()),
+            success: true,
+            message,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: Some(input),
             stream_event: None,
         }
     }
@@ -69,6 +107,7 @@ impl CompletionEvent {
             success: false,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
             stream_event: None,
         }
     }
@@ -82,6 +121,7 @@ impl CompletionEvent {
             success,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
             stream_event: None,
         }
     }
@@ -95,6 +135,7 @@ impl CompletionEvent {
             success,
             message,
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
             stream_event: None,
         }
     }
@@ -109,6 +150,7 @@ impl CompletionEvent {
             success: true,
             message: String::new(),
             ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
             stream_event: Some(event),
         }
     }

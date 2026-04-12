@@ -842,8 +842,9 @@ impl LlmClient {
             }
             LlmProvider::Ollama => {
                 let url = format!("{}/api/chat", base_url);
+                let model = Self::ollama_model_id(&request.model);
                 let body = json!({
-                    "model": request.model,
+                    "model": model,
                     "messages": request.messages.iter().map(|m| json!({
                         "role": m.role,
                         "content": m.content
@@ -957,6 +958,24 @@ impl LlmClient {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(m)
                 .to_string()
+        } else {
+            m.to_string()
+        }
+    }
+
+    /// If a cloud-only model id leaks into an Ollama call, swap to a local fallback.
+    fn ollama_model_id(model: &str) -> String {
+        let m = model.trim();
+        let lowered = m.to_ascii_lowercase();
+        let looks_cloud = lowered.contains("claude")
+            || lowered.contains("gpt-")
+            || lowered.contains("gemini")
+            || lowered.contains("anthropic/")
+            || lowered.contains("openai/")
+            || lowered.contains("xai/")
+            || lowered.contains("openrouter/");
+        if looks_cloud {
+            crate::ollama_client::resolve_model_from_env("llama3.2")
         } else {
             m.to_string()
         }
@@ -1086,9 +1105,10 @@ impl LlmClient {
         base_url: &str,
     ) -> Result<LlmResponse> {
         let url = format!("{}/api/chat", base_url);
+        let model = Self::ollama_model_id(&request.model);
 
         let body = json!({
-            "model": request.model,
+            "model": model,
             "messages": request.messages.iter().map(|m| json!({
                 "role": m.role,
                 "content": m.content

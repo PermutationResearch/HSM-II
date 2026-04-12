@@ -84,6 +84,40 @@ function WorkspaceMarkdownStreamBody({ text, className }: { text: string; classN
   return <WorkspaceMarkdownBody text={deferred} className={className} />;
 }
 
+/** Parse YAML frontmatter block from a markdown string. */
+function parseFrontmatter(text: string): { fm: Record<string, string> | null; body: string } {
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { fm: null, body: text };
+  const fm: Record<string, string> = {};
+  for (const line of match[1].split("\n")) {
+    const sep = line.indexOf(":");
+    if (sep === -1) continue;
+    const key = line.slice(0, sep).trim();
+    const val = line.slice(sep + 1).trim();
+    if (key) fm[key] = val;
+  }
+  return { fm, body: match[2] };
+}
+
+/** Renders parsed YAML frontmatter as a compact key-value grid. */
+function FrontmatterBox({ fm }: { fm: Record<string, string> }) {
+  const entries = Object.entries(fm);
+  if (entries.length === 0) return null;
+  return (
+    <div className="mb-3 rounded border border-[#2a2a2a] bg-[#060606] px-3 py-2">
+      <p className="mb-1.5 font-mono text-[9px] uppercase tracking-widest text-[#555555]">Frontmatter</p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        {entries.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="font-mono text-[11px] text-[#666666] self-baseline">{k}</dt>
+            <dd className="font-mono text-[11px] text-[#a0a0a0] break-all self-baseline">{v || <span className="text-[#444444]">—</span>}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 type RunStatus = ContractRunStatus;
 type LiveRun = {
   runId: string;
@@ -92,6 +126,7 @@ type LiveRun = {
   summary: string | null;
   taskId?: string | null;
   executionMode?: "worker" | "llm_simulated" | "pending" | "unknown";
+  executionVerified?: boolean;
 };
 type RuntimeToolEvent = {
   event_type?: string;
@@ -100,6 +135,7 @@ type RuntimeToolEvent = {
   call_id?: string | null;
   success?: boolean;
   message?: string;
+  input?: unknown;
   ts_ms?: number;
 };
 type RunTimelinePhase =
@@ -124,6 +160,14 @@ type ChatTranscriptItem =
   | { kind: "tool"; key: string; event: RuntimeToolEvent }
   | { kind: "status"; key: string; text: string }
   | { kind: "assistant_partial"; key: string; text: string };
+
+/** A single observable step in the agent activity panel. */
+type ActivityItem = {
+  id: string;
+  label: string;
+  detail?: string | null;
+  status: "in_progress" | "done" | "error" | "interrupted";
+};
 
 const CHANNEL_STORAGE_KEY = "pc-ws-agent-channels-v1";
 
@@ -222,6 +266,7 @@ function isoToMs(value: string): number {
 
 function formatRuntimeEventLabel(event: RuntimeToolEvent): string {
   const isErr = event.success === false || /error|fail|blocked|denied/i.test(event.message ?? "");
+  if (event.event_type === "tool_start_delta") return "tool input delta";
   if (event.event_type === "tool_start") return "tool start";
   return isErr ? "tool error" : "tool result";
 }
@@ -697,24 +742,37 @@ function WorkspaceRailFileBrowser({
                   aria-label="File contents"
                 />
                 {/\.md$/i.test(selected.name) ? (
-                  <div className="flex flex-col gap-2 border-t border-[#1f1f1f] pt-2 sm:flex-row sm:items-center sm:justify-between">
-                    <label className="flex cursor-pointer items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-[#777777]">
-                      <input
-                        type="checkbox"
-                        checked={showMdPreview}
-                        onChange={(e) => setShowMdPreview(e.target.checked)}
-                        className="size-3.5 rounded border-[#3a3a3a] bg-black accent-[#666666]"
+                  <div className="flex items-center gap-2 border-t border-[#1f1f1f] pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowMdPreview((v) => !v)}
+                      className={cn(
+                        "flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors",
+                        showMdPreview
+                          ? "bg-white/[0.07] text-[#c8c8c8]"
+                          : "text-[#555555] hover:text-[#888888]",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "inline-block size-2 rounded-full transition-colors",
+                          showMdPreview ? "bg-[#4a9eff]" : "bg-[#333333]",
+                        )}
                       />
-                      Rendered preview
-                    </label>
-                    <span className="font-mono text-[9px] uppercase tracking-wide text-[#555555]">Markdown</span>
+                      Preview
+                    </button>
+                    <span className="font-mono text-[9px] uppercase tracking-wide text-[#3a3a3a]">.md</span>
                   </div>
                 ) : null}
-                {/\.md$/i.test(selected.name) && showMdPreview ? (
-                  <div className="max-h-64 overflow-y-auto rounded-sm border border-[#222222] bg-[#080808] p-3">
-                    <WorkspaceMarkdownBody text={editContent} />
-                  </div>
-                ) : null}
+                {/\.md$/i.test(selected.name) && showMdPreview ? (() => {
+                  const { fm, body } = parseFrontmatter(editContent);
+                  return (
+                    <div className="max-h-72 overflow-y-auto rounded border border-[#1e1e1e] bg-[#070707] p-3">
+                      {fm ? <FrontmatterBox fm={fm} /> : null}
+                      <WorkspaceMarkdownBody text={body} />
+                    </div>
+                  );
+                })() : null}
               </>
             ) : selected.kind === "image" ? (
               <div className="space-y-2 rounded-sm border border-[#2a2a2a] bg-[#080808] p-3">
@@ -850,6 +908,15 @@ export function WorkspaceRightRail() {
   const [runActionBusy, setRunActionBusy] = useState(false);
   const [runActionErr, setRunActionErr] = useState<string | null>(null);
   const [railTab, setRailTab] = useState<"agents" | "files">("agents");
+  /** Set when the server compacted the note history on the last send. */
+  const [compactionBanner, setCompactionBanner] = useState<{
+    notesCompacted: number;
+    notesKept: number;
+  } | null>(null);
+  /** Live activity items shown in the observable status panel above the input bar. */
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
+  /** Short contextual label shown below the activity list, e.g. "Step 2 — Building context". */
+  const [activityPhaseLabel, setActivityPhaseLabel] = useState<string | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1170,7 +1237,7 @@ export function WorkspaceRightRail() {
 
       setLiveToolEvents((prev) => [parsed!, ...prev].slice(0, 24));
       const eventPhase: RunTimelinePhase =
-        parsed.event_type === "tool_start"
+        parsed.event_type === "tool_start" || parsed.event_type === "tool_start_delta"
           ? "tool_start"
           : parsed.success === false || /error|fail|blocked|denied/i.test(parsed.message ?? "")
             ? "tool_error"
@@ -1185,7 +1252,9 @@ export function WorkspaceRightRail() {
       });
       const tool = parsed.tool_name ?? "tool";
       const kind =
-        parsed.event_type === "tool_start"
+        parsed.event_type === "tool_start_delta"
+          ? "ToolInputDelta"
+          : parsed.event_type === "tool_start"
           ? "ToolStart"
           : parsed.success === false || /error|fail|blocked|denied/i.test(parsed.message ?? "")
             ? "ToolError"
@@ -1318,6 +1387,9 @@ export function WorkspaceRightRail() {
   const clearAgent = useCallback(() => {
     setSendErr(null);
     setDraft("");
+    setCompactionBanner(null);
+    setActivityItems([]);
+    setActivityPhaseLabel(null);
     if (propertiesSelection?.kind === "agent") {
       setPropertiesSelection(null);
     }
@@ -1378,6 +1450,9 @@ export function WorkspaceRightRail() {
           if (newAgentNotes.length > 0) {
             clearInterval(pollingRef.current!);
             setThinking(false);
+            // Clear activity panel — reply arrived
+            setActivityItems([]);
+            setActivityPhaseLabel(null);
             // Persist full updated notes list
             persistNotes(persona, taskId, taskNotes);
             // Kick off typeout for the last agent reply
@@ -1404,17 +1479,53 @@ export function WorkspaceRightRail() {
     if (pollingRef.current) clearInterval(pollingRef.current);
     setThinking(false);
     setTypeoutNote(null);
+
+    // Reset activity panel and seed the first step
+    let actStep = 0;
+    const markPrevDone = (items: ActivityItem[]) =>
+      items.map((p) => (p.status === "in_progress" ? { ...p, status: "done" as const } : p));
+    const pushAct = (id: string, label: string, detail?: string | null) => {
+      actStep += 1;
+      setActivityItems((prev) => [
+        ...markPrevDone(prev),
+        { id, label, detail: detail ?? null, status: "in_progress" as const },
+      ]);
+      setActivityPhaseLabel(`Step ${actStep} — ${label}`);
+    };
+    setActivityItems([{ id: "prepare", label: "Preparing request", detail: null, status: "in_progress" }]);
+    setActivityPhaseLabel("Step 1 — Preparing request");
     try {
-      let taskId =
+      let taskId: string | null =
         channels[focusedPersona]?.taskId ?? findBestTaskForPersona(tasks, focusedPersona) ?? null;
 
-      // Step 1: Save the operator note (or create task)
+      // Step 1: Save the operator note (or create task).
+      // If the cached taskId no longer exists (e.g. was deleted, DB wiped), evict it and
+      // fall through to task creation so the user never sees a hard "TASK NOT FOUND" error.
       let notesAfterSend: StigNote[] = [];
       if (taskId) {
-        const j = await postTaskStigmergicNote(apiBase, taskId, { text, actor: "operator" });
-        notesAfterSend = parseNotesFromResponse(j.context_notes);
-        persistNotes(focusedPersona, taskId, notesAfterSend);
-      } else {
+        try {
+          const j = await postTaskStigmergicNote(apiBase, taskId, { text, actor: "operator" });
+          notesAfterSend = parseNotesFromResponse(j.context_notes);
+          persistNotes(focusedPersona, taskId, notesAfterSend);
+        } catch (noteErr) {
+          const msg = (noteErr instanceof Error ? noteErr.message : String(noteErr)).toLowerCase();
+          if (/not found|404|no rows|task/i.test(msg)) {
+            // Stale task ID — evict channel cache and fall through to creating a fresh task
+            taskId = null;
+            if (companyId) {
+              saveChannel(companyId, focusedPersona, { taskId: "", notes: [] });
+              setChannels((prev) => {
+                const next = { ...prev };
+                delete next[focusedPersona];
+                return next;
+              });
+            }
+          } else {
+            throw noteErr; // unrelated error — surface it
+          }
+        }
+      }
+      if (!taskId) {
         const j = await createCompanyTask(apiBase, companyId, {
           title: `Operator · ${focusedPersona}`,
           specification: text,
@@ -1435,6 +1546,7 @@ export function WorkspaceRightRail() {
       setSending(false);
       resetStreamAppend();
       let hadStreamedTokens = false;
+      pushAct("route", "Routing to agent runtime");
 
       const streamUrl = getAgentChatReplyStreamUrl();
 
@@ -1448,6 +1560,7 @@ export function WorkspaceRightRail() {
               call_id: typeof obj.call_id === "string" || obj.call_id === null ? obj.call_id : undefined,
               success: typeof obj.success === "boolean" ? obj.success : undefined,
               message: typeof obj.message === "string" ? obj.message : undefined,
+              input: Object.prototype.hasOwnProperty.call(obj, "input") ? obj.input : undefined,
               ts_ms: typeof obj.ts_ms === "number" ? obj.ts_ms : undefined,
             }
           : null;
@@ -1459,7 +1572,7 @@ export function WorkspaceRightRail() {
         const rid = liveRun?.runId;
         if (rid) {
           const eventPhase: RunTimelinePhase =
-            parsed.event_type === "tool_start"
+            parsed.event_type === "tool_start" || parsed.event_type === "tool_start_delta"
               ? "tool_start"
               : parsed.success === false || /error|fail|blocked|denied/i.test(parsed.message ?? "")
                 ? "tool_error"
@@ -1498,6 +1611,8 @@ export function WorkspaceRightRail() {
         skill?: string;
         status?: string;
         execution_mode?: string;
+        worker_evidence?: boolean;
+        execution_verified?: boolean;
         finalized?: boolean;
       } = { ok: false };
 
@@ -1531,18 +1646,84 @@ export function WorkspaceRightRail() {
           const t = typeof ev.type === "string" ? ev.type : "";
           if (t === "runtime" && ev.payload) {
             ingestRuntimeFromPayload(ev.payload);
+            // Mirror tool events into the activity panel
+            const p = asObject(ev.payload);
+            if (p) {
+              const toolName = typeof p.tool_name === "string" ? p.tool_name : null;
+              const callId = typeof p.call_id === "string" ? p.call_id : null;
+              const evType = typeof p.event_type === "string" ? p.event_type : "";
+              const success = typeof p.success === "boolean" ? p.success : true;
+              if ((evType === "tool_start" || evType === "tool_start_delta") && toolName) {
+                pushAct(`tool:${callId ?? toolName}`, toolName, callId ?? null);
+              } else if (evType !== "tool_start" && evType !== "tool_start_delta" && toolName) {
+                setActivityItems((prev) =>
+                  prev.map((a) =>
+                    a.id === `tool:${callId ?? toolName}` || a.status === "in_progress"
+                      ? { ...a, status: success ? ("done" as const) : ("error" as const) }
+                      : a,
+                  ),
+                );
+              }
+            }
+          } else if (t === "tool_start" || t === "tool_start_delta") {
+            const toolName = typeof ev.tool_name === "string" ? ev.tool_name : null;
+            const callId = typeof ev.call_id === "string" ? ev.call_id : null;
+            const input = Object.prototype.hasOwnProperty.call(ev, "input") ? ev.input : undefined;
+            const tsMs = Date.now();
+            const parsed: RuntimeToolEvent = {
+              event_type: t,
+              tool_name: toolName,
+              call_id: callId,
+              success: true,
+              message: t === "tool_start_delta" ? "model streaming tool input" : "model emitted tool call",
+              input,
+              ts_ms: tsMs,
+            };
+            const key = `${parsed.ts_ms ?? 0}:${parsed.call_id ?? ""}:${parsed.event_type ?? ""}:${parsed.message ?? ""}`;
+            if (!runtimeSeenRef.current.has(key)) {
+              runtimeSeenRef.current.add(key);
+              setLiveToolEvents((prev) => [parsed, ...prev].slice(0, 24));
+            }
+            if (toolName) {
+              setActivityItems((prev) => {
+                const id = `tool:${callId ?? toolName}`;
+                const alreadyActive = prev.some((a) => a.id === id && a.status !== "error");
+                if (alreadyActive) return prev;
+                return [
+                  ...prev.map((p) =>
+                    p.status === "in_progress" ? { ...p, status: "done" as const } : p,
+                  ),
+                  {
+                    id,
+                    label: toolName,
+                    detail: callId ?? null,
+                    status: "in_progress" as const,
+                  },
+                ];
+              });
+            }
           } else if (t === "stream_event") {
             const eff = extractAnthropicStreamTextEffect(ev.event);
             if (eff === "reset") {
+              if (!hadStreamedTokens) pushAct("generate", "Generating response");
               hadStreamedTokens = true;
               resetStreamAppend();
             } else if (eff && "append" in eff && eff.append.length > 0) {
+              if (!hadStreamedTokens) pushAct("generate", "Generating response");
               hadStreamedTokens = true;
               scheduleStreamAppend(eff.append);
             }
           } else if (t === "delta" && typeof ev.text === "string") {
+            if (!hadStreamedTokens) pushAct("generate", "Generating response");
             hadStreamedTokens = true;
             scheduleStreamAppend(ev.text);
+          } else if (t === "phase" && ev.phase === "context_compaction") {
+            // Server compacted old messages into the system prompt — show banner + activity step.
+            pushAct("compact", "Compacting conversation context");
+            setCompactionBanner({
+              notesCompacted: typeof ev.notes_compacted === "number" ? ev.notes_compacted : 0,
+              notesKept: typeof ev.notes_kept === "number" ? ev.notes_kept : 0,
+            });
           } else if (t === "error") {
             replyJ = {
               ok: false,
@@ -1559,8 +1740,19 @@ export function WorkspaceRightRail() {
               skill: typeof ev.skill === "string" ? ev.skill : undefined,
               status: typeof ev.status === "string" ? ev.status : undefined,
               execution_mode: typeof ev.execution_mode === "string" ? ev.execution_mode : undefined,
+              worker_evidence: ev.worker_evidence === true,
+              execution_verified: ev.execution_verified === true,
               finalized: ev.finalized === true,
             };
+            // Mark all in-progress activities done
+            setActivityItems((prev) =>
+              prev.map((a) => (a.status === "in_progress" ? { ...a, status: "done" as const } : a)),
+            );
+            if (replyJ.skill) {
+              setActivityPhaseLabel(`Dispatched · ${replyJ.skill}`);
+            } else {
+              setActivityPhaseLabel(null);
+            }
           }
         }
       }
@@ -1568,11 +1760,14 @@ export function WorkspaceRightRail() {
       flushStreamAppendNow();
 
       if (replyJ.run_id && companyId) {
+        // Keep panel alive while the worker runs — show a polling indicator
+        pushAct("poll", `Waiting for agent · ${replyJ.skill ?? "worker"}`, replyJ.run_id?.slice(0, 8) ?? null);
         setLiveRun({
           runId: replyJ.run_id,
           skill: replyJ.skill ?? "worker-dispatch",
           status: "running",
           summary: null,
+          executionVerified: replyJ.execution_verified === true,
         });
         const rid = replyJ.run_id;
         void (async () => {
@@ -1587,6 +1782,7 @@ export function WorkspaceRightRail() {
                     summary: typeof run?.summary === "string" ? run.summary : null,
                     taskId: typeof run?.task_id === "string" ? run.task_id : null,
                     executionMode: parseExecutionMode(run?.meta?.execution_mode),
+                    executionVerified: run?.meta?.execution_verified === true,
                   }
               : prev,
             );
@@ -1763,6 +1959,7 @@ export function WorkspaceRightRail() {
                 runId: j.run_id!,
                 status: parseRunStatus(j.status),
                 executionMode: parseExecutionMode(j.execution_mode),
+                executionVerified: j.execution_verified === true,
                 summary: "Resumed from approval checkpoint.",
               }
             : prev,
@@ -1916,6 +2113,7 @@ export function WorkspaceRightRail() {
             <p className="truncate font-mono text-[11px] text-[#e8e8e8]">Skill · {liveRun.skill}</p>
             <p className="mt-0.5 font-mono text-[9px] text-[#777777]">
               mode {liveRun.executionMode ?? "unknown"}
+              {liveRun.executionVerified ? " · verified" : " · unverified"}
               {liveRun.taskId ? ` · task ${liveRun.taskId.slice(0, 8)}…` : ""}
             </p>
             {liveRun.summary ? (
@@ -1980,10 +2178,29 @@ export function WorkspaceRightRail() {
           <div className="mt-2 max-h-32 overflow-y-auto rounded border border-[#222222] bg-black/40 p-1.5">
             {liveToolEvents.map((e, i) => {
               const isErr = e.success === false || /error|fail|blocked|denied/i.test(e.message ?? "");
-              const label = e.event_type === "tool_start" ? "ToolStart" : isErr ? "ToolError" : "ToolComplete";
+              const label =
+                e.event_type === "tool_start_delta"
+                  ? "ToolInputDelta"
+                  : e.event_type === "tool_start"
+                    ? "ToolStart"
+                    : isErr
+                      ? "ToolError"
+                      : "ToolComplete";
+              const inputPreview =
+                (e.event_type === "tool_start" || e.event_type === "tool_start_delta") && e.input !== undefined
+                  ? (() => {
+                      try {
+                        const raw = JSON.stringify(e.input);
+                        return raw.length > 180 ? `${raw.slice(0, 180)}…` : raw;
+                      } catch {
+                        return null;
+                      }
+                    })()
+                  : null;
               return (
                 <p key={`${e.ts_ms ?? 0}-${e.call_id ?? "na"}-${i}`} className={cn("font-mono text-[9px]", isErr ? "text-red-200" : "text-[#9bb4d0]")}>
                   {label} · {e.tool_name ?? "tool"} {e.call_id ? `(${e.call_id})` : ""} {e.message ? `— ${e.message}` : ""}
+                  {inputPreview ? ` · input=${inputPreview}` : ""}
                 </p>
               );
             })}
@@ -2238,6 +2455,23 @@ export function WorkspaceRightRail() {
             </span>
           </div>
 
+          {/* Compaction banner — shown once after context was compacted server-side */}
+          {compactionBanner ? (
+            <div className="shrink-0 flex items-center justify-between gap-2 border-b border-[#1e2a1e] bg-[#0d1a0d] px-3 py-1.5">
+              <p className="font-mono text-[9px] leading-tight text-emerald-400/80">
+                ↑ {compactionBanner.notesCompacted} older message{compactionBanner.notesCompacted === 1 ? "" : "s"} compacted into context · {compactionBanner.notesKept} recent kept · summary saved to memory
+              </p>
+              <button
+                type="button"
+                title="Dismiss"
+                className="shrink-0 font-mono text-[9px] text-[#666666] hover:text-[#aaaaaa]"
+                onClick={() => setCompactionBanner(null)}
+              >
+                ✕
+              </button>
+            </div>
+          ) : null}
+
           <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
             {transcriptItems.length === 0 ? (
               <p className="px-1 text-center text-sm text-[#666666]">
@@ -2314,12 +2548,11 @@ export function WorkspaceRightRail() {
                   }
                   if (item.kind === "assistant_partial") {
                     return (
-                      <div key={item.key} className="nd-stream-assistant">
-                        <div className="nd-stream-assistant__meta">
-                          <span className="nd-stream-assistant__label">Streaming</span>
-                          <span className="nd-stream-assistant__persona">{focusedPersona}</span>
-                        </div>
-                        <div className="nd-stream-assistant__body">
+                      <div key={item.key} className="text-xs leading-snug">
+                        <span className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
+                          {focusedPersona}
+                        </span>
+                        <div className="nd-stream-assistant__body mt-1">
                           <div className="min-w-0 flex-1">
                             <WorkspaceMarkdownStreamBody
                               text={item.text}
@@ -2354,6 +2587,77 @@ export function WorkspaceRightRail() {
               </div>
             )}
           </div>
+
+          {/* ── Observable activity panel — shown while agent is working ── */}
+          {activityItems.length > 0 ? (
+            <div className="shrink-0 border-t border-[#111111] bg-[#040404]">
+              <div className="px-3 pt-2 pb-1 space-y-1 max-h-[7.5rem] overflow-hidden">
+                {activityItems.slice(-7).map((item) => (
+                  <div key={item.id} className="flex items-center gap-2 min-w-0">
+                    {/* Status dot */}
+                    <span className="shrink-0 flex items-center justify-center w-3">
+                      {item.status === "in_progress" ? (
+                        <span className="relative flex size-1.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#4a9eff]/60" />
+                          <span className="relative inline-flex size-1.5 rounded-full bg-[#4a9eff]" />
+                        </span>
+                      ) : item.status === "done" ? (
+                        <span className="size-1.5 rounded-full bg-[#1e2e1e]" />
+                      ) : item.status === "error" ? (
+                        <span className="size-1.5 rounded-full bg-[#5a2020]" />
+                      ) : (
+                        <span className="size-1.5 rounded-full bg-[#2a2a2a]" />
+                      )}
+                    </span>
+                    {/* Label + detail */}
+                    <span
+                      className={cn(
+                        "flex-1 min-w-0 font-mono text-[10px] truncate",
+                        item.status === "done"
+                          ? "text-[#2a2a2a]"
+                          : item.status === "error"
+                            ? "text-[#8a4040]"
+                            : item.status === "in_progress"
+                              ? "text-[#606060]"
+                              : "text-[#3a3a3a]",
+                      )}
+                    >
+                      {item.label}
+                      {item.detail ? (
+                        <span className="ml-1 opacity-50">· {item.detail}</span>
+                      ) : null}
+                    </span>
+                    {/* Status label */}
+                    <span
+                      className={cn(
+                        "shrink-0 font-mono text-[9px] uppercase tracking-wide",
+                        item.status === "in_progress"
+                          ? "text-[#444444]"
+                          : item.status === "done"
+                            ? "text-[#222222]"
+                            : item.status === "error"
+                              ? "text-[#7a3030]"
+                              : "text-[#333333]",
+                      )}
+                    >
+                      {item.status === "in_progress"
+                        ? "In progress"
+                        : item.status === "done"
+                          ? "Done"
+                          : item.status === "error"
+                            ? "Error"
+                            : "Interrupted"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {activityPhaseLabel ? (
+                <p className="px-3 pb-1.5 font-mono text-[9px] text-[#252525] truncate">
+                  {activityPhaseLabel}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="shrink-0 border-t border-[#222222] bg-[#0a0a0a] p-3">
             {sendErr ? (

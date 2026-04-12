@@ -14,6 +14,7 @@ import {
   buildCompactedContextBundle,
   buildSystemPrompt,
   CHAT_MODEL,
+  compactNotesForLlm,
   deriveToolExecutionPolicy,
   detectSkillDispatch,
   dispatchSkillToWorker,
@@ -24,6 +25,7 @@ import {
   parseOptimizeCommand,
   readOpenRouterApiKey,
   resolveAgentForPersona,
+  saveCompactionToMemory,
   UPSTREAM,
   upsertThreadSessionState,
 } from "@/app/lib/agent-chat-server";
@@ -90,6 +92,8 @@ export async function POST(req: NextRequest) {
       skillSlug: detectedSkill,
       externalSystem: "worker-dispatch",
       persistAgentNote: true,
+      waitForTelemetryMs: 120_000,
+      requireWorkerEvidence: true,
       runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
       dispatchNoteText: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
       extraMeta: {
@@ -123,12 +127,16 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({
       ok: true,
-      reply: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
+      reply: result.finalized
+        ? `Completed \`${detectedSkill}\` in worker agent runtime.`
+        : `Dispatched \`${detectedSkill}\` to worker runtime. Waiting for completion evidence.`,
       at: new Date().toISOString(),
       run_id: result.runId ?? undefined,
       skill: detectedSkill,
       status: result.status,
       execution_mode: result.executionMode,
+      worker_evidence: result.workerEvidence,
+      execution_verified: result.executionVerified,
       finalized: result.finalized,
     });
   }
@@ -272,6 +280,8 @@ export async function POST(req: NextRequest) {
         skillSlug: "operator-chat",
         externalSystem: "worker-dispatch-chat",
         persistAgentNote: true,
+        waitForTelemetryMs: 120_000,
+        requireWorkerEvidence: true,
         runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
         dispatchNoteText,
         extraMeta: {
@@ -309,6 +319,8 @@ export async function POST(req: NextRequest) {
         skill: "worker-agent-loop",
         status: result.status,
         execution_mode: result.executionMode,
+        worker_evidence: result.workerEvidence,
+        execution_verified: result.executionVerified,
         finalized: result.finalized,
         streaming: true,
       });
@@ -352,12 +364,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const messages = notes
-    .filter((n) => n.text?.trim())
-    .map((n) => ({
-      role: n.actor === "operator" ? ("user" as const) : ("assistant" as const),
-      content: n.text,
-    }));
+  // Compact the note history so long threads don't overflow the context window.
+  const compaction = compactNotesForLlm(notes);
+  if (compaction.compacted && compaction.compactionSummary) {
+    enrichedSystem = `${enrichedSystem}\n\n${compaction.compactionSummary}`;
+    if (companyId) {
+      saveCompactionToMemory(companyId, taskId, persona, compaction.compactionSummary).catch(() => {});
+    }
+  }
+
+  const messages = compaction.messageHistory;
 
   if (messages.length === 0 || messages[messages.length - 1].role !== "user") {
     return NextResponse.json({ error: "No operator message to respond to" }, { status: 400 });

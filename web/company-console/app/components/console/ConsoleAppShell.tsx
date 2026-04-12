@@ -20,6 +20,7 @@ import {
   ClipboardList,
   Command as CommandIcon,
   FolderKanban,
+  GitBranch,
   LayoutDashboard,
   Layers,
   Network,
@@ -30,6 +31,7 @@ import {
   PlugZap,
   ShieldCheck,
   Store,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -72,8 +74,10 @@ const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
     items: [
       { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard, title: "Overview and queues" },
       { href: "/workspace/issues", label: "Issues", icon: FolderKanban, title: "Tasks and filters" },
+      { href: "/workspace/workflows", label: "Workflows", icon: GitBranch, title: "Pipeline workflows" },
       { href: "/workspace/approvals", label: "Approvals", icon: ShieldCheck, title: "Human and policy gates" },
       { href: "/workspace/my-work", label: "My work", icon: ClipboardList, title: "Your queue" },
+      { href: "/workspace/council", label: "Council", icon: Users, title: "Socratic agent deliberation" },
     ],
   },
   {
@@ -132,6 +136,7 @@ function breadcrumbsForPath(pathname: string): Crumb[] {
   if (pathname.startsWith("/workspace/agents")) return [root, { label: "Agents", href: null }];
   if (pathname.startsWith("/workspace/credentials")) return [root, { label: "Credentials", href: null }];
   if (pathname.startsWith("/workspace/issues")) return [root, { label: "Issues", href: null }];
+  if (pathname.startsWith("/workspace/workflows")) return [root, { label: "Workflows", href: null }];
   if (pathname.startsWith("/workspace/approvals")) return [root, { label: "Approvals", href: null }];
   if (pathname.startsWith("/workspace/costs")) return [root, { label: "Costs", href: null }];
   if (pathname.startsWith("/workspace/graph")) return [root, { label: "Graph", href: null }];

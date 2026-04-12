@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, ChevronDown, Map, Paperclip, Plus, Repeat, Sparkles, User } from "lucide-react";
+import { CheckCircle2, ChevronDown, Compass, GitBranch, Map, Paperclip, Plus, Repeat, Sparkles, User } from "lucide-react";
 import { Button } from "@/app/components/ui/button";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import {
@@ -26,7 +26,8 @@ import { useCompanyAgents, useCompanyIssueLabels, useCompanyProjects } from "@/a
 import { specificationWithWorkspacePaths, truncatePath } from "@/app/lib/workspace-issue";
 import { cn } from "@/app/lib/utils";
 
-type IssueKind = "plan" | "todo";
+/** "todo" = atomic task · "plan" = design-first · "explore" = investigation (feeds Explore→Plan→Build pipeline) · "workflow" = multi-stage pipeline */
+type IssueKind = "plan" | "todo" | "explore" | "workflow";
 type Recurring = "none" | "daily" | "weekly" | "monthly";
 /** API: numeric `priority` on task (higher sorts first); `reviewer` adds `mode: priority:reviewer`. */
 type PriorityTier = "low" | "medium" | "high" | "reviewer";
@@ -212,11 +213,13 @@ export function WorkspaceNewIssueForm({
 
   const buildCapabilityRefs = useCallback((): Record<string, unknown>[] => {
     const caps: Record<string, unknown>[] = [];
-    caps.push(
-      issueKind === "plan"
-        ? { kind: "mode", ref: "plan" }
-        : { kind: "mode", ref: "todo" },
-    );
+    caps.push({ kind: "mode", ref: issueKind === "todo" ? "todo" : issueKind });
+    // Explore and workflow kinds carry a pipeline intent marker for the agent runtime
+    if (issueKind === "explore") {
+      caps.push({ kind: "mode", ref: "pipeline:explore_plan_build" });
+    } else if (issueKind === "workflow") {
+      caps.push({ kind: "mode", ref: "pipeline:workflow" });
+    }
     if (priorityTier === "reviewer") {
       caps.push({ kind: "mode", ref: "priority:reviewer" });
     }
@@ -425,11 +428,26 @@ export function WorkspaceNewIssueForm({
         <div className="space-y-1">
           <Label className="text-xs font-medium text-foreground">Issue type</Label>
           <p className="text-[11px] text-muted-foreground">
-            Choose <span className="font-medium text-foreground/90">Plan</span> (design first) or{" "}
-            <span className="font-medium text-foreground/90">Task</span> (executable work) before you fill in the rest.
+            What kind of work is this? Choose the type that best fits before filling in the rest.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Plan or task">
+        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Issue kind">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            role="radio"
+            aria-checked={issueKind === "todo"}
+            className={cn(
+              "gap-1.5 px-3 py-2 font-medium",
+              issueKind === "todo" &&
+                "border-sky-500/70 bg-sky-500/15 text-sky-100 ring-2 ring-sky-500/50 dark:border-sky-400/60 dark:bg-sky-500/10",
+            )}
+            onClick={() => setIssueKind("todo")}
+          >
+            <CheckCircle2 className="size-3.5 opacity-90" aria-hidden />
+            Task
+          </Button>
           <Button
             type="button"
             size="sm"
@@ -437,7 +455,7 @@ export function WorkspaceNewIssueForm({
             role="radio"
             aria-checked={issueKind === "plan"}
             className={cn(
-              "gap-1.5 px-4 py-2 font-medium",
+              "gap-1.5 px-3 py-2 font-medium",
               issueKind === "plan" &&
                 "border-sky-500/70 bg-sky-500/15 text-sky-100 ring-2 ring-sky-500/50 dark:border-sky-400/60 dark:bg-sky-500/10",
             )}
@@ -451,22 +469,42 @@ export function WorkspaceNewIssueForm({
             size="sm"
             variant="outline"
             role="radio"
-            aria-checked={issueKind === "todo"}
+            aria-checked={issueKind === "explore"}
             className={cn(
-              "gap-1.5 px-4 py-2 font-medium",
-              issueKind === "todo" &&
-                "border-sky-500/70 bg-sky-500/15 text-sky-100 ring-2 ring-sky-500/50 dark:border-sky-400/60 dark:bg-sky-500/10",
+              "gap-1.5 px-3 py-2 font-medium",
+              issueKind === "explore" &&
+                "border-violet-500/70 bg-violet-500/15 text-violet-100 ring-2 ring-violet-500/50 dark:border-violet-400/60 dark:bg-violet-500/10",
             )}
-            onClick={() => setIssueKind("todo")}
+            onClick={() => setIssueKind("explore")}
           >
-            <CheckCircle2 className="size-3.5 opacity-90" aria-hidden />
-            Task
+            <Compass className="size-3.5 opacity-90" aria-hidden />
+            Explore
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            role="radio"
+            aria-checked={issueKind === "workflow"}
+            className={cn(
+              "gap-1.5 px-3 py-2 font-medium",
+              issueKind === "workflow" &&
+                "border-amber-500/70 bg-amber-500/15 text-amber-100 ring-2 ring-amber-500/50 dark:border-amber-400/60 dark:bg-amber-500/10",
+            )}
+            onClick={() => setIssueKind("workflow")}
+          >
+            <GitBranch className="size-3.5 opacity-90" aria-hidden />
+            Workflow
           </Button>
         </div>
         <p className="text-[11px] leading-snug text-muted-foreground">
           {issueKind === "plan"
             ? "Plan — outline approach and sequencing; use Build on the task row to spawn implementation work when the plan is done."
-            : "Task — normal work item for an agent to execute."}
+            : issueKind === "explore"
+              ? "Explore — research and investigate the problem space first, then feed findings into a Plan stage, and finally a Build task. Creates an Explore → Plan → Build pipeline."
+              : issueKind === "workflow"
+                ? "Workflow — a multi-stage pipeline that composes stages (Explore, Plan, Build, Review) into an executable sequence visible on the Workflows page."
+                : "Task — atomic work item for an agent to execute directly."}
         </p>
       </div>
 

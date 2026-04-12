@@ -95,6 +95,7 @@ export async function POST(req: NextRequest) {
     externalRunId: body.external_run_id?.trim(),
     persistAgentNote: body.persist_note !== false,
     waitForTelemetryMs,
+    requireWorkerEvidence: true,
     runSummary: `Skill run via worker agent loop: ${skillSlug}`,
     dispatchNoteText: `Running \`${skillSlug}\` in worker agent loop runtime.`,
     extraMeta: {
@@ -136,6 +137,8 @@ export async function POST(req: NextRequest) {
     run_id: result.runId,
     status: result.status,
     execution_mode: result.executionMode,
+    worker_evidence: result.workerEvidence,
+    execution_verified: result.executionVerified,
     summary: result.summary,
     finalized: result.finalized,
     message: result.finalized

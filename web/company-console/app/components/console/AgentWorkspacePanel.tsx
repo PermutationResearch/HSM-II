@@ -113,6 +113,12 @@ type Props = {
   assigneeDisplayName: string;
   /** Company issue key prefix (e.g. COM) for task id column. */
   issueKeyPrefix: string;
+  /** Optional deep-link file path from Run Artifacts. */
+  initialOpenPath?: string | null;
+  /** Optional before-snapshot for diff preview (from run artifact metadata). */
+  initialArtifactBefore?: string | null;
+  /** Optional after-snapshot for diff preview (from run artifact metadata). */
+  initialArtifactAfter?: string | null;
 };
 
 export function AgentWorkspacePanel({
@@ -121,6 +127,9 @@ export function AgentWorkspacePanel({
   agentPackName,
   assigneeDisplayName,
   issueKeyPrefix,
+  initialOpenPath,
+  initialArtifactBefore,
+  initialArtifactAfter,
 }: Props) {
   const rootPrefix = `agents/${agentPackName}`;
   const [browsePath, setBrowsePath] = useState(rootPrefix);
@@ -139,7 +148,11 @@ export function AgentWorkspacePanel({
   const [readerMode, setReaderMode] = useState<"preview" | "edit">("preview");
   const [workspaceMode, setWorkspaceMode] = useState<"review" | "manage">("review");
   const [filterQuery, setFilterQuery] = useState("");
+  const [artifactDiff, setArtifactDiff] = useState<{ before: string | null; after: string | null } | null>(
+    null,
+  );
   const autoDescendTried = useRef(false);
+  const artifactJumpAppliedRef = useRef<string | null>(null);
 
   useEffect(() => {
     setBrowsePath(rootPrefix);
@@ -151,7 +164,9 @@ export function AgentWorkspacePanel({
     setReaderMode("preview");
     setWorkspaceMode("review");
     setFilterQuery("");
+    setArtifactDiff(null);
     autoDescendTried.current = false;
+    artifactJumpAppliedRef.current = null;
   }, [rootPrefix]);
 
   const dirty =
@@ -233,6 +248,7 @@ export function AgentWorkspacePanel({
       setFileLoading(true);
       setFileError(null);
       setSaveState("idle");
+      setArtifactDiff(null);
       setReaderMode(isMarkdownPath(relPath) ? "preview" : "edit");
       try {
         const r = await fetch(
@@ -256,6 +272,31 @@ export function AgentWorkspacePanel({
     },
     [apiBase, companyId],
   );
+
+  useEffect(() => {
+    const path = (initialOpenPath ?? "").trim();
+    if (!path || !pathUnderAgentRoot(path, rootPrefix)) return;
+    const jumpKey = `${path}|${initialArtifactBefore ?? ""}|${initialArtifactAfter ?? ""}`;
+    if (artifactJumpAppliedRef.current === jumpKey) return;
+    artifactJumpAppliedRef.current = jumpKey;
+    const slash = path.lastIndexOf("/");
+    const targetBrowse = slash > 0 ? path.slice(0, slash) : rootPrefix;
+    const validBrowse =
+      targetBrowse === rootPrefix || pathUnderAgentRoot(targetBrowse, rootPrefix);
+    setBrowsePath(validBrowse ? targetBrowse : rootPrefix);
+    void (async () => {
+      await openFile(path);
+      const before = initialArtifactBefore != null && initialArtifactBefore.length > 0 ? initialArtifactBefore : null;
+      const after = initialArtifactAfter != null && initialArtifactAfter.length > 0 ? initialArtifactAfter : null;
+      if (before !== null || after !== null) {
+        setArtifactDiff({ before, after });
+        setReaderMode("preview");
+        setWorkspaceMode("review");
+        if (before !== null) setBaselineContent(before);
+        if (after !== null) setEditorContent(after);
+      }
+    })();
+  }, [initialOpenPath, initialArtifactBefore, initialArtifactAfter, openFile, rootPrefix]);
 
   const saveFile = useCallback(async () => {
     if (!openFilePath) return;
@@ -679,6 +720,32 @@ export function AgentWorkspacePanel({
                   </ScrollArea>
                 </div>
               )}
+              {artifactDiff ? (
+                <div className="rounded-2xl border border-admin-border bg-black/10 p-3">
+                  <p className="text-xs font-medium text-foreground">Run artifact diff snapshot</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Snapshot captured from tool-call arguments at run time. This may differ from current disk state.
+                  </p>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-xl border border-admin-border bg-card p-2">
+                      <p className="mb-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Before
+                      </p>
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-foreground/90">
+                        {artifactDiff.before ?? "No captured before snapshot"}
+                      </pre>
+                    </div>
+                    <div className="rounded-xl border border-admin-border bg-card p-2">
+                      <p className="mb-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        After
+                      </p>
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-foreground/90">
+                        {artifactDiff.after ?? "No captured after snapshot"}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
               <div className="flex flex-wrap items-center gap-2">
                 {workspaceMode === "manage" ? (
                   <>

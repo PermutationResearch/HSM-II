@@ -80,6 +80,8 @@ export async function POST(req: NextRequest) {
     skillSlug: skill,
     externalSystem: "worker-dispatch-resume",
     persistAgentNote: true,
+    waitForTelemetryMs: 120_000,
+    requireWorkerEvidence: true,
     runSummary: `Resumed run ${runId}: ${replayInstruction}`,
     extraMeta: {
       resumed_from_run_id: runId,
@@ -135,6 +137,7 @@ export async function POST(req: NextRequest) {
     run_id: result.runId,
     status: result.status,
     execution_mode: result.executionMode,
+    execution_verified: result.executionVerified,
     finalized: result.finalized,
   });
 }

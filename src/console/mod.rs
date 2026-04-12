@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::error;
 
 use crate::architecture_blueprint::embedded_blueprint;
@@ -170,8 +170,13 @@ pub fn console_router(state: ConsoleState) -> Router {
 }
 
 fn console_cors_layer() -> CorsLayer {
-    let origins_raw = std::env::var("HSM_CONSOLE_ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://127.0.0.1:3001,http://localhost:3001".to_string());
+    // Company-console `next dev` uses 3050 / 3051 by default (`web/company-console/package.json`).
+    // When `NEXT_PUBLIC_API_BASE` points the browser at this API, `Origin` is the Next origin, not 3001.
+    let origins_raw = std::env::var("HSM_CONSOLE_ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "http://127.0.0.1:3050,http://localhost:3050,http://127.0.0.1:3051,http://localhost:3051,\
+http://127.0.0.1:3001,http://localhost:3001"
+            .to_string()
+    });
     let origins = origins_raw
         .split(',')
         .map(str::trim)
@@ -180,14 +185,18 @@ fn console_cors_layer() -> CorsLayer {
     let methods = [Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS];
     if origins.iter().any(|s| *s == "*") {
         return CorsLayer::new()
-            .allow_origin(tower_http::cors::Any)
-            .allow_methods(methods);
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(Any);
     }
     let parsed = origins
         .into_iter()
         .filter_map(|s| s.parse::<HeaderValue>().ok())
         .collect::<Vec<_>>();
-    CorsLayer::new().allow_origin(parsed).allow_methods(methods)
+    CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods(methods)
+        .allow_headers(Any)
 }
 
 /// Browser-friendly hint: this process is an API; the Next.js UI runs on another port.

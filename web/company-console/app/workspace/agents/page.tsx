@@ -168,8 +168,8 @@ function SkillBankPanel({
                 <div className="mt-4">
                   <p className="text-[11px] font-medium text-foreground/90">Linked agents</p>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {selectedSkill.linked_agents.map((agentName) => (
-                      <Badge key={agentName} variant="outline" className="text-[10px]">
+                    {selectedSkill.linked_agents.map((agentName, i) => (
+                      <Badge key={`${agentName}-${i}`} variant="outline" className="text-[10px]">
                         {agentName}
                       </Badge>
                     ))}

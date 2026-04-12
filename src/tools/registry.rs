@@ -169,14 +169,19 @@ impl ToolRegistry {
         let start = Instant::now();
         let timestamp = chrono::Utc::now();
         crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "start");
-        crate::runtime_control::publish_completion(crate::runtime_control::CompletionEvent::tool_start(
-            &call.name,
-            &call.call_id,
-            format!(
-                "tool started args={}",
-                crate::harness::redact_secrets(&serde_json::to_string(&call.parameters).unwrap_or_else(|_| "{}".into()))
+        crate::runtime_control::publish_completion(
+            crate::runtime_control::CompletionEvent::tool_start_with_input(
+                &call.name,
+                &call.call_id,
+                call.parameters.clone(),
+                format!(
+                    "tool started args={}",
+                    crate::harness::redact_secrets(
+                        &serde_json::to_string(&call.parameters).unwrap_or_else(|_| "{}".into())
+                    )
+                ),
             ),
-        ));
+        );
 
         let env_merged: Option<crate::harness::HarnessRunEnvelope> = call
             .harness_run

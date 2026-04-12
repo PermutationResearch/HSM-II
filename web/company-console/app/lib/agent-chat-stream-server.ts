@@ -15,6 +15,7 @@ import {
   buildStrictToolFlowTrace,
   buildSystemPrompt,
   CHAT_MODEL,
+  compactNotesForLlm,
   deriveToolExecutionPolicy,
   detectSkillDispatch,
   dispatchSkillToWorker,
@@ -25,6 +26,7 @@ import {
   parseOptimizeCommand,
   readOpenRouterApiKey,
   resolveAgentForPersona,
+  saveCompactionToMemory,
   type WorkerDispatchResult,
   UPSTREAM,
   upsertThreadSessionState,
@@ -50,6 +52,135 @@ export type AgentChatRequestBody = {
 };
 
 export type NdjsonLineWriter = (obj: Record<string, unknown>) => Promise<void>;
+type RuntimePayloadHandler = (payload: Record<string, unknown>) => void | Promise<void>;
+
+type MutableRunArtifact = {
+  path: string;
+  callCount: number;
+  tools: Set<string>;
+  lastTool: string;
+  beforeSnapshot: string | null;
+  afterSnapshot: string | null;
+  updatedAt: string;
+};
+
+type RunArtifactsPayload = {
+  version: number;
+  generated_at: string;
+  touched_files: Array<{
+    path: string;
+    call_count: number;
+    tools: string[];
+    last_tool: string;
+    before_snapshot: string | null;
+    after_snapshot: string | null;
+    updated_at: string;
+  }>;
+};
+
+const ARTIFACT_SNAPSHOT_MAX_CHARS = 800;
+
+function truncateSnapshot(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  return trimmed.length > ARTIFACT_SNAPSHOT_MAX_CHARS
+    ? `${trimmed.slice(0, ARTIFACT_SNAPSHOT_MAX_CHARS)}…`
+    : trimmed;
+}
+
+function extractPathFromInput(input: Record<string, unknown> | null): string | null {
+  if (!input) return null;
+  const raw = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : "";
+  const p = raw.trim().replace(/^\.\/+/, "");
+  return p.length > 0 ? p : null;
+}
+
+function captureRunArtifactFromRuntime(payload: Record<string, unknown>, bag: Map<string, MutableRunArtifact>) {
+  const eventType = typeof payload.event_type === "string" ? payload.event_type : "";
+  if (eventType !== "tool_start") return;
+  const toolName = typeof payload.tool_name === "string" ? payload.tool_name.trim() : "";
+  if (!toolName) return;
+  const input = asObject(payload.input);
+  const path = extractPathFromInput(input);
+  if (!path) return;
+  const now = new Date().toISOString();
+  const existing = bag.get(path);
+  const rec: MutableRunArtifact =
+    existing ??
+    ({
+      path,
+      callCount: 0,
+      tools: new Set<string>(),
+      lastTool: toolName,
+      beforeSnapshot: null,
+      afterSnapshot: null,
+      updatedAt: now,
+    } satisfies MutableRunArtifact);
+
+  rec.callCount += 1;
+  rec.tools.add(toolName);
+  rec.lastTool = toolName;
+  rec.updatedAt = now;
+
+  if (toolName === "edit") {
+    rec.beforeSnapshot =
+      truncateSnapshot(input?.oldText) ?? truncateSnapshot(input?.old_string) ?? rec.beforeSnapshot;
+    rec.afterSnapshot =
+      truncateSnapshot(input?.newText) ?? truncateSnapshot(input?.new_string) ?? rec.afterSnapshot;
+  } else if (toolName === "write") {
+    rec.afterSnapshot = truncateSnapshot(input?.content) ?? rec.afterSnapshot;
+  } else if (toolName === "delete") {
+    rec.afterSnapshot = "";
+  }
+
+  bag.set(path, rec);
+}
+
+function serializeRunArtifacts(bag: Map<string, MutableRunArtifact>): RunArtifactsPayload | null {
+  if (bag.size === 0) return null;
+  const touched = [...bag.values()]
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((x) => ({
+      path: x.path,
+      call_count: x.callCount,
+      tools: [...x.tools].sort(),
+      last_tool: x.lastTool,
+      before_snapshot: x.beforeSnapshot,
+      after_snapshot: x.afterSnapshot,
+      updated_at: x.updatedAt,
+    }));
+  return {
+    version: 1,
+    generated_at: new Date().toISOString(),
+    touched_files: touched,
+  };
+}
+
+async function patchRunArtifactsMeta(
+  companyId: string,
+  runId: string | null | undefined,
+  artifacts: RunArtifactsPayload | null,
+): Promise<void> {
+  if (!runId || !artifacts) return;
+  try {
+    const runRes = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`);
+    if (!runRes.ok) return;
+    const runJson = (await runRes.json().catch(() => ({}))) as { run?: { meta?: Record<string, unknown> } };
+    const currentMeta = asObject(runJson.run?.meta) ?? {};
+    const mergedMeta: Record<string, unknown> = {
+      ...currentMeta,
+      run_artifacts: artifacts,
+    };
+    await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta: mergedMeta }),
+    });
+  } catch {
+    // Best-effort only.
+  }
+}
 
 /** Serialize writes so parallel `streamOpenRouterChat` + SSE mirror cannot interleave NDJSON lines. */
 function createSerializedNdjsonWriter(write: NdjsonLineWriter): NdjsonLineWriter {
@@ -76,6 +207,7 @@ export async function forwardRuntimeSseAsNdjson(
   upstreamBase: string,
   signal: AbortSignal,
   write: NdjsonLineWriter,
+  onRuntimePayload?: RuntimePayloadHandler,
 ): Promise<void> {
   const url = `${upstreamBase.replace(/\/+$/, "")}/api/company/runtime/events/stream`;
   let res: Response;
@@ -113,11 +245,26 @@ export async function forwardRuntimeSseAsNdjson(
         if (!data || data === "[DONE]") continue;
         try {
           const payload = JSON.parse(data) as Record<string, unknown>;
+          if (onRuntimePayload) {
+            try {
+              await onRuntimePayload(payload);
+            } catch {
+              // Best-effort observer callback.
+            }
+          }
           const et = typeof payload.event_type === "string" ? payload.event_type : "";
           const inner = payload.stream_event;
           if (et === "stream_event" && inner != null && typeof inner === "object") {
             await write(wrapSdkStreamEvent(inner as Record<string, unknown>) as Record<string, unknown>);
           } else {
+            if ((et === "tool_start" || et === "tool_start_delta") && typeof payload.tool_name === "string") {
+              await write({
+                type: et,
+                tool_name: payload.tool_name,
+                call_id: typeof payload.call_id === "string" ? payload.call_id : null,
+                input: payload.input ?? null,
+              });
+            }
             await write({ type: "runtime", payload });
           }
         } catch {
@@ -220,9 +367,10 @@ async function withRuntimeMirror(
   upstream: string,
   write: NdjsonLineWriter,
   work: () => Promise<void>,
+  onRuntimePayload?: RuntimePayloadHandler,
 ): Promise<void> {
   const ac = new AbortController();
-  const mirror = forwardRuntimeSseAsNdjson(upstream, ac.signal, write);
+  const mirror = forwardRuntimeSseAsNdjson(upstream, ac.signal, write, onRuntimePayload);
   try {
     await work();
   } finally {
@@ -264,15 +412,20 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       budgetBytes: 5200,
     });
     const companionOptOut = process.env.HSM_DISABLE_WORKER_COMPANION_STREAM === "1";
-    const companionKey = companionOptOut ? undefined : readOpenRouterApiKey();
+    const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM !== "0";
+    const companionKey = companionOptOut || !workerCompanionEnabled ? undefined : readOpenRouterApiKey();
     await write({
       type: "phase",
       phase: "skill_dispatch_runtime",
       live_companion_stream: !!companionKey,
     });
     const ser = createSerializedNdjsonWriter(write);
+    const runArtifacts = new Map<string, MutableRunArtifact>();
     let result: WorkerDispatchResult | undefined;
-    await withRuntimeMirror(UPSTREAM, ser, async () => {
+    await withRuntimeMirror(
+      UPSTREAM,
+      ser,
+      async () => {
       const dispatchPromise = dispatchSkillToWorker({
         companyId,
         taskId,
@@ -280,6 +433,8 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         skillSlug: detectedSkill,
         externalSystem: "worker-dispatch",
         persistAgentNote: true,
+        waitForTelemetryMs: 120_000,
+        requireWorkerEvidence: true,
         runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
         dispatchNoteText: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
         extraMeta: {
@@ -311,7 +466,10 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       } else {
         result = await dispatchPromise;
       }
-    });
+      },
+      (payload) => captureRunArtifactFromRuntime(payload, runArtifacts),
+    );
+    await patchRunArtifactsMeta(companyId, result?.runId, serializeRunArtifacts(runArtifacts));
     if (!result || result.ok !== true) {
       const r = result;
       await write({
@@ -337,12 +495,16 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     await write({
       type: "done",
       ok: true,
-      reply: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
+      reply: result.finalized
+        ? `Completed \`${detectedSkill}\` in worker agent runtime.`
+        : `Dispatched \`${detectedSkill}\` to worker runtime. Waiting for completion evidence.`,
       at: new Date().toISOString(),
       run_id: result.runId,
       skill: detectedSkill,
       status: result.status,
       execution_mode: result.executionMode,
+      worker_evidence: result.workerEvidence,
+      execution_verified: result.executionVerified,
       finalized: result.finalized,
     });
     return;
@@ -465,19 +627,22 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
   if (!detectedSkill && companyId) {
     const openRouterKey = readOpenRouterApiKey();
     const executionIntent = looksLikeExecutionIntent(lastOperatorText);
-    const routeWorker = executionIntent || !openRouterKey;
+    const forceWorkerDispatch = process.env.HSM_FORCE_OPERATOR_WORKER_DISPATCH === "1";
+    const routeWorker = forceWorkerDispatch || !openRouterKey;
     if (routeWorker) {
       const companionOptOut = process.env.HSM_DISABLE_WORKER_COMPANION_STREAM === "1";
-      const sidecarKey = companionOptOut ? undefined : openRouterKey;
+      const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM !== "0";
+      const sidecarKey = companionOptOut || !workerCompanionEnabled ? undefined : openRouterKey;
       await write({
         type: "phase",
         phase: "operator_chat_worker",
         execution_intent: executionIntent,
+        force_worker_dispatch: forceWorkerDispatch,
         openrouter_configured: !!openRouterKey,
         token_stream: !!sidecarKey,
         companion_sidecar: !!sidecarKey,
-        reason: executionIntent
-          ? "execution_intent_uses_worker"
+        reason: forceWorkerDispatch
+          ? "forced_worker_dispatch"
           : "missing_openrouter_key_in_next_env",
       });
       const policy = deriveToolExecutionPolicy(agentAdapterConfig);
@@ -492,8 +657,12 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           ? "Routed to worker — no OpenRouter key in this Next.js process, so this panel cannot stream answer tokens. Set OPENROUTER_API_KEY (or HSM_OPENROUTER_API_KEY) for web/company-console and restart, or put it in the repo-root .env (loaded by next.config). Worker is still running in the background."
           : "Routed this turn through the worker agent loop runtime.";
       const ser = createSerializedNdjsonWriter(write);
+      const runArtifacts = new Map<string, MutableRunArtifact>();
       let result: WorkerDispatchResult | undefined;
-      await withRuntimeMirror(UPSTREAM, ser, async () => {
+      await withRuntimeMirror(
+        UPSTREAM,
+        ser,
+        async () => {
         const dispatchPromise = dispatchSkillToWorker({
           companyId,
           taskId,
@@ -501,6 +670,8 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           skillSlug: "operator-chat",
           externalSystem: "worker-dispatch-chat",
           persistAgentNote: true,
+          waitForTelemetryMs: 120_000,
+          requireWorkerEvidence: true,
           runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
           dispatchNoteText,
           extraMeta: {
@@ -536,7 +707,10 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         } else {
           result = await dispatchPromise;
         }
-      });
+        },
+        (payload) => captureRunArtifactFromRuntime(payload, runArtifacts),
+      );
+      await patchRunArtifactsMeta(companyId, result?.runId, serializeRunArtifacts(runArtifacts));
       if (!result || result.ok !== true) {
         const r = result;
         await write({
@@ -566,6 +740,8 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         skill: "worker-agent-loop",
         status: result.status,
         execution_mode: result.executionMode,
+        worker_evidence: result.workerEvidence,
+        execution_verified: result.executionVerified,
         finalized: result.finalized,
         streaming: true,
       });
@@ -614,12 +790,26 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     }
   }
 
-  const messages = notes
-    .filter((n) => n.text?.trim())
-    .map((n) => ({
-      role: n.actor === "operator" ? ("user" as const) : ("assistant" as const),
-      content: n.text,
-    }));
+  // Compact the note history if it has grown large — keeps LLM cost/latency
+  // bounded and avoids context-window overflows on long operator threads.
+  const compaction = compactNotesForLlm(notes);
+  if (compaction.compacted) {
+    await write({
+      type: "phase",
+      phase: "context_compaction",
+      notes_compacted: compaction.compactedCount,
+      notes_kept: notes.length - compaction.compactedCount,
+    });
+    // Fold the prose summary into the system prompt so the model has the full
+    // thread narrative without it counting against the message-turn budget.
+    enrichedSystem = `${enrichedSystem}\n\n${compaction.compactionSummary}`;
+    // Persist to supermemory so the history is searchable later.
+    if (companyId && compaction.compactionSummary) {
+      saveCompactionToMemory(companyId, taskId, persona, compaction.compactionSummary).catch(() => {});
+    }
+  }
+
+  const messages = compaction.messageHistory;
 
   if (messages.length === 0 || messages[messages.length - 1].role !== "user") {
     await write({ type: "error", message: "No operator message to respond to" });

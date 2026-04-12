@@ -1025,13 +1025,23 @@ impl EnhancedPersonalAgent {
                     (json.get("tool").and_then(|v| v.as_str()), params)
                 {
                     if ALLOWED.contains(&tool_name) && self.tool_registry.has(tool_name) {
+                        let call_id = uuid::Uuid::new_v4().to_string();
+                        Self::publish_tool_input_deltas(tool_name, &call_id, params);
                         let call = ToolCallEntry {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
-                            call_id: uuid::Uuid::new_v4().to_string(),
+                            call_id: call_id.clone(),
                             harness_run: None,
                             idempotency_key: None,
                         };
+                        crate::runtime_control::publish_completion(
+                            crate::runtime_control::CompletionEvent::tool_start_with_input(
+                                &call.name,
+                                &call.call_id,
+                                call.parameters.clone(),
+                                "model emitted tool call".to_string(),
+                            ),
+                        );
                         let result = self.tool_registry.execute(call).await;
                         if result.output.success {
                             crate::tools::web_ingest::ingest_web_tool_success(
@@ -2147,13 +2157,23 @@ impl EnhancedPersonalAgent {
                 ) {
                     if self.tool_registry.has(tool_name) {
                         info!("Hermes turn {}: calling tool {}", turn + 1, tool_name);
+                        let call_id = uuid::Uuid::new_v4().to_string();
+                        Self::publish_tool_input_deltas(tool_name, &call_id, params);
                         let call = ToolCallEntry {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
-                            call_id: uuid::Uuid::new_v4().to_string(),
+                            call_id: call_id.clone(),
                             harness_run: None,
                             idempotency_key: None,
                         };
+                        crate::runtime_control::publish_completion(
+                            crate::runtime_control::CompletionEvent::tool_start_with_input(
+                                &call.name,
+                                &call.call_id,
+                                call.parameters.clone(),
+                                "model emitted tool call".to_string(),
+                            ),
+                        );
 
                         let result = self.tool_registry.execute(call).await;
                         if result.output.success {
@@ -2988,13 +3008,23 @@ impl EnhancedPersonalAgent {
                             "Tool call detected: {} with params: {:?}",
                             tool_name, params
                         );
+                        let call_id = uuid::Uuid::new_v4().to_string();
+                        Self::publish_tool_input_deltas(tool_name, &call_id, params);
                         let call = ToolCallEntry {
                             name: tool_name.to_string(),
                             parameters: params.clone(),
-                            call_id: uuid::Uuid::new_v4().to_string(),
+                            call_id: call_id.clone(),
                             harness_run: None,
                             idempotency_key: None,
                         };
+                        crate::runtime_control::publish_completion(
+                            crate::runtime_control::CompletionEvent::tool_start_with_input(
+                                &call.name,
+                                &call.call_id,
+                                call.parameters.clone(),
+                                "model emitted tool call".to_string(),
+                            ),
+                        );
 
                         let result = self.tool_registry.execute(call).await;
                         if result.output.success {
@@ -3179,6 +3209,46 @@ impl EnhancedPersonalAgent {
             }
         }
         None
+    }
+
+    /// Emit provider-agnostic incremental input previews so UI can render tool args before execution.
+    fn publish_tool_input_deltas(tool_name: &str, call_id: &str, params: &serde_json::Value) {
+        let rendered = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
+        if rendered.is_empty() {
+            return;
+        }
+        let chunk_bytes = 220usize;
+        let mut emitted = 0usize;
+        let mut consumed = 0usize;
+        while consumed < rendered.len() && emitted < 12 {
+            let mut next = (consumed + chunk_bytes).min(rendered.len());
+            while next < rendered.len() && !rendered.is_char_boundary(next) {
+                next += 1;
+            }
+            let partial = rendered[..next].to_string();
+            let done = next >= rendered.len();
+            crate::runtime_control::publish_completion(
+                crate::runtime_control::CompletionEvent::tool_start_delta(
+                    tool_name,
+                    call_id,
+                    serde_json::json!({
+                        "partial_json": partial,
+                        "chars": next,
+                        "done": done,
+                    }),
+                    if done {
+                        "tool input preview complete".to_string()
+                    } else {
+                        "tool input preview".to_string()
+                    },
+                ),
+            );
+            emitted += 1;
+            consumed = next;
+            if done {
+                break;
+            }
+        }
     }
 
     /// Strip leaked chat template tokens from LLM output

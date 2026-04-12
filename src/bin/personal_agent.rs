@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 
 use hyper_stigmergy::api::{ApiState, HonchoApiState, SharedState};
 use hyper_stigmergy::console::{console_router, ConsoleState};
-use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent};
+use hyper_stigmergy::personal::{gateway, resolve_hsmii_home, EnhancedPersonalAgent, Heartbeat};
 use hyper_stigmergy::tui_codex_style::{AutocompleteSuggestion, CodexEvent, CodexState};
 use hyper_stigmergy::{ApprovalOutcome, ApprovalService};
 use std::sync::Arc;
@@ -1023,18 +1023,27 @@ async fn cmd_memory(home: &PathBuf, action: MemoryAction) -> Result<()> {
 
 /// Run DKS evolution tick
 async fn cmd_heartbeat(home: &PathBuf) -> Result<()> {
+    let mut heartbeat = Heartbeat::load(home).await?;
+    let hb_results = heartbeat.tick(home).await?;
+    if hb_results.is_empty() {
+        println!("Heartbeat: no checklist/routine actions due.");
+    } else {
+        println!("Heartbeat actions:");
+        for row in &hb_results {
+            let status = if row.success { "ok" } else { "error" };
+            println!("- [{}] {}: {}", status, row.action, row.message);
+        }
+    }
+
     let mut agent = EnhancedPersonalAgent::initialize(home).await?;
-
-    println!("Running DKS evolution tick...\n");
-
+    println!("\nRunning DKS evolution tick...\n");
     let tick = agent.services.dks.tick();
     let stats = agent.services.dks.stats();
     println!("Generation: {}", tick.generation);
     println!("Population: {}", stats.size);
     println!("Avg persistence: {:.3}", stats.average_persistence);
-
     agent.save().await?;
-    println!("\n✓ State saved to LadybugDB");
+    println!("\nState saved to LadybugDB");
 
     Ok(())
 }

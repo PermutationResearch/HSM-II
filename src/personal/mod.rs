@@ -24,6 +24,7 @@ pub mod hsm_cron;
 pub mod hypergraph_client;
 pub mod integrated_agent;
 pub mod kairos;
+pub mod kb_manifest;
 pub mod memory;
 pub mod ops_config;
 pub mod outbound;
@@ -42,6 +43,7 @@ pub use integrated_agent::{
     integrated_home, AgentComponents, ComponentStatus, IntegratedAgentConfig,
     IntegratedPersonalAgent,
 };
+pub use kb_manifest::{load_kb_manifest_report, KbManifestReport};
 
 /// Full-stack agent: same as [`IntegratedPersonalAgent`] (shared `EnhancedPersonalAgent` core + integration layer).
 pub type UnifiedPersonalAgent = IntegratedPersonalAgent;

@@ -207,6 +207,135 @@ export async function fetchWorkspaceFile(companyId: string, path: string): Promi
   return typeof content === "string" ? content : null;
 }
 
+async function writeWorkspaceFile(companyId: string, path: string, content: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/workspace/file`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeRunSlug(text: string): string {
+  const s = text
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s || "run";
+}
+
+async function ensureRecursiveDocsForRun(params: {
+  companyId: string;
+  runId: string;
+  persona: string;
+  skillSlug: string;
+  taskId: string;
+  userPrompt: string;
+}): Promise<{ recursiveRunPath: string; recursiveReqPath: string } | null> {
+  const { companyId, runId, persona, skillSlug, taskId, userPrompt } = params;
+  const day = new Date().toISOString().slice(0, 10);
+  const slug = sanitizeRunSlug(`${day}-${persona}-${skillSlug}-${runId.slice(0, 8)}`);
+  const runPath = `.recursive/run/${slug}`;
+  const reqPath = `${runPath}/00-requirements.md`;
+  const asIsPath = `${runPath}/01-as-is.md`;
+  const toBePath = `${runPath}/02-to-be.md`;
+  const implPath = `${runPath}/03-implementation-summary.md`;
+  const testPath = `${runPath}/04-test-summary.md`;
+  const qaPath = `${runPath}/05-manual-qa.md`;
+
+  const recursiveSpec = `# RECURSIVE (HSM adaptation)
+
+This repository uses a file-backed run protocol for long-horizon agent work.
+
+## Required phases per run
+1. requirements (\`00-requirements.md\`)
+2. as-is (\`01-as-is.md\`)
+3. to-be (\`02-to-be.md\`)
+4. implementation summary (\`03-implementation-summary.md\`)
+5. test summary (\`04-test-summary.md\`)
+6. manual QA (\`05-manual-qa.md\`)
+
+## Exit criteria
+- No run may be marked complete without execution evidence (\`execution_verified=true\`).
+- Tool traces, touched files, and run artifacts must be persisted.
+- Manual QA checklist must be present for user-facing changes.
+`;
+
+  const stateLine = `- ${new Date().toISOString()} run=${runId} task=${taskId} persona=${persona} skill=${skillSlug} path=${runPath}`;
+  const existingState = (await fetchWorkspaceFile(companyId, ".recursive/STATE.md")) ?? "# STATE\n\n## Active runs\n";
+  const stateContent = existingState.includes(stateLine) ? existingState : `${existingState.trimEnd()}\n${stateLine}\n`;
+
+  const decisionLine = `- ${new Date().toISOString()}: run ${runId} uses recursive artifacts in \`${runPath}\` and requires worker evidence for completion.`;
+  const existingDecisions =
+    (await fetchWorkspaceFile(companyId, ".recursive/DECISIONS.md")) ?? "# DECISIONS\n\n## Ledger\n";
+  const decisionsContent = existingDecisions.includes(decisionLine)
+    ? existingDecisions
+    : `${existingDecisions.trimEnd()}\n${decisionLine}\n`;
+
+  const reqContent = `# Requirements
+
+- run_id: ${runId}
+- task_id: ${taskId}
+- persona: ${persona}
+- skill: ${skillSlug}
+
+## Operator request
+${userPrompt.trim() || "(empty prompt)"}
+`;
+  const asIsContent = `# As-Is
+
+- run_id: ${runId}
+- current execution mode: worker-dispatch
+- source task: ${taskId}
+
+## Current known constraints
+- Worker run must emit tool evidence.
+- Completion requires \`execution_verified=true\`.
+`;
+  const toBeContent = `# To-Be
+
+## Planned implementation path
+1. gather context
+2. emit tool calls and execute
+3. persist artifacts + touched files
+4. validate outputs and tests
+`;
+  const implContent = `# Implementation Summary
+
+_Populate during/after execution with concrete files and tool outputs._
+`;
+  const testContent = `# Test Summary
+
+_Record automated checks and outcomes._
+`;
+  const qaContent = `# Manual QA
+
+- [ ] Behavior verified by operator
+- [ ] Artifacts visible in run panel
+- [ ] Touched files open correctly
+`;
+
+  const writes = await Promise.all([
+    writeWorkspaceFile(companyId, ".recursive/RECURSIVE.md", recursiveSpec),
+    writeWorkspaceFile(companyId, ".recursive/memory/README.md", "# Recursive Memory\n\nDurable operational notes.\n"),
+    writeWorkspaceFile(companyId, ".recursive/STATE.md", stateContent),
+    writeWorkspaceFile(companyId, ".recursive/DECISIONS.md", decisionsContent),
+    writeWorkspaceFile(companyId, reqPath, reqContent),
+    writeWorkspaceFile(companyId, asIsPath, asIsContent),
+    writeWorkspaceFile(companyId, toBePath, toBeContent),
+    writeWorkspaceFile(companyId, implPath, implContent),
+    writeWorkspaceFile(companyId, testPath, testContent),
+    writeWorkspaceFile(companyId, qaPath, qaContent),
+  ]);
+  if (writes.some((ok) => !ok)) return null;
+  return { recursiveRunPath: runPath, recursiveReqPath: reqPath };
+}
+
 /** Map free-text / bracket hint to a canonical slug from the allow-list. */
 export function resolveSkillSlugHint(hint: string, slugs: string[]): string | null {
   const h = hint.trim().toLowerCase().replace(/\s+/g, " ");
@@ -297,7 +426,7 @@ export async function createAgentRun(
       company_agent_id: agentId ?? null,
       external_system,
       summary: opts?.summary ?? `Skill dispatched: ${skillSlug}`,
-      meta: { skill: skillSlug, triggered_by: external_system, execution_mode },
+      meta: { skill: skillSlug, triggered_by: external_system, execution_mode, execution_verified: false },
     };
     if (computedExternalRunId) {
       body.external_run_id = computedExternalRunId;
@@ -508,6 +637,8 @@ export type WorkerDispatchResult =
       runId: string | null;
       status: "running" | "success" | "error";
       executionMode: "pending" | "worker" | "llm_simulated";
+      workerEvidence: boolean;
+      executionVerified: boolean;
       summary: string | null;
       finalized: boolean;
     }
@@ -645,14 +776,66 @@ async function patchRunMetaExecutionMode(
   runId: string,
   meta: Record<string, unknown> | undefined,
   executionMode: "pending" | "worker" | "llm_simulated",
+  executionVerified?: boolean,
 ): Promise<void> {
   await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      meta: { ...(meta ?? {}), execution_mode: executionMode },
+      meta: {
+        ...(meta ?? {}),
+        execution_mode: executionMode,
+        ...(typeof executionVerified === "boolean" ? { execution_verified: executionVerified } : {}),
+      },
     }),
   });
+}
+
+async function checkoutTaskForWorker(taskId: string, persona: string): Promise<{ ok: boolean; error?: string; status: number }> {
+  const checkoutRes = await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_ref: persona, ttl_sec: 3600 }),
+  });
+  const checkoutJ = (await checkoutRes.json().catch(() => ({}))) as { error?: string };
+  if (!checkoutRes.ok) {
+    return {
+      ok: false,
+      error: checkoutJ.error ?? checkoutRes.statusText,
+      status: checkoutRes.status,
+    };
+  }
+  return { ok: true, status: checkoutRes.status };
+}
+
+async function createFallbackDispatchTask(params: {
+  companyId: string;
+  persona: string;
+  skillSlug: string;
+  sourceTaskId: string;
+  runSummary?: string;
+}): Promise<string | null> {
+  const { companyId, persona, skillSlug, sourceTaskId, runSummary } = params;
+  const title = `${persona} worker turn (${skillSlug})`;
+  const specification = [
+    `Auto-created fallback task because checkout failed on source task ${sourceTaskId}.`,
+    runSummary ? `Original summary: ${runSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const res = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      specification,
+      owner_persona: persona,
+      priority: 0,
+    }),
+  });
+  if (!res.ok) return null;
+  const j = (await res.json().catch(() => ({}))) as { task?: { id?: string } };
+  return typeof j.task?.id === "string" ? j.task.id : null;
 }
 
 /**
@@ -668,6 +851,7 @@ export async function dispatchSkillToWorker(params: {
   externalRunId?: string;
   persistAgentNote?: boolean;
   waitForTelemetryMs?: number;
+  requireWorkerEvidence?: boolean;
   runSummary?: string;
   extraMeta?: Record<string, unknown>;
   dispatchNoteText?: string;
@@ -681,13 +865,50 @@ export async function dispatchSkillToWorker(params: {
     externalRunId,
     persistAgentNote = true,
     waitForTelemetryMs = 15_000,
+    requireWorkerEvidence = false,
     runSummary,
     extraMeta,
     dispatchNoteText,
   } = params;
 
   const { agentRegistryId } = await resolveAgentForPersona(companyId, persona);
-  const runId = await createAgentRun(companyId, agentRegistryId, taskId, skillSlug, {
+
+  let activeTaskId = taskId;
+  let checkout = await checkoutTaskForWorker(activeTaskId, persona);
+  let checkoutFallbackUsed = false;
+  const canFallbackTask =
+    externalSystem === "worker-dispatch-chat" || externalSystem === "worker-dispatch";
+  if (!checkout.ok && canFallbackTask) {
+    const msg = String(checkout.error ?? "").toLowerCase();
+    const shouldRetryWithFreshTask =
+      msg.includes("task not found") ||
+      msg.includes("already checked out") ||
+      msg.includes("checkout failed");
+    if (shouldRetryWithFreshTask) {
+      const fallbackTaskId = await createFallbackDispatchTask({
+        companyId,
+        persona,
+        skillSlug,
+        sourceTaskId: taskId,
+        runSummary,
+      });
+      if (fallbackTaskId) {
+        activeTaskId = fallbackTaskId;
+        checkout = await checkoutTaskForWorker(activeTaskId, persona);
+        checkoutFallbackUsed = true;
+      }
+    }
+  }
+
+  if (!checkout.ok) {
+    return {
+      ok: false,
+      error: checkout.error ?? "checkout failed",
+      httpStatus: checkout.status || 502,
+    };
+  }
+
+  const runId = await createAgentRun(companyId, agentRegistryId, activeTaskId, skillSlug, {
     externalSystem,
     externalRunId,
     summary: runSummary ?? `Skill dispatched to worker (${externalSystem}): ${skillSlug}`,
@@ -701,56 +922,120 @@ export async function dispatchSkillToWorker(params: {
     await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meta: { skill: skillSlug, triggered_by: externalSystem, execution_mode: "pending", ...extraMeta } }),
+      body: JSON.stringify({
+        meta: {
+          skill: skillSlug,
+          triggered_by: externalSystem,
+          execution_mode: "pending",
+          checkout_fallback_task: checkoutFallbackUsed ? activeTaskId : null,
+          checkout_source_task: checkoutFallbackUsed ? taskId : null,
+          ...extraMeta,
+        },
+      }),
     }).catch(() => {});
   }
 
-  const checkoutRes = await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/checkout`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent_ref: persona, ttl_sec: 3600 }),
+  const recursiveScaffold = await ensureRecursiveDocsForRun({
+    companyId,
+    runId,
+    persona,
+    skillSlug,
+    taskId: activeTaskId,
+    userPrompt:
+      (typeof extraMeta?.operator_message === "string" ? extraMeta.operator_message : runSummary) ??
+      "",
   });
-  const checkoutJ = (await checkoutRes.json().catch(() => ({}))) as { error?: string };
-  if (!checkoutRes.ok) {
-    await finalizeAgentRun(
-      companyId,
-      runId,
-      `Worker dispatch failed: ${checkoutJ.error ?? checkoutRes.statusText}`,
-      "error",
-    );
-    return {
-      ok: false,
-      error: checkoutJ.error ?? `Worker dispatch failed (${checkoutRes.status})`,
-      httpStatus: 502,
-      runId,
-    };
+  if (recursiveScaffold) {
+    let currentMeta: Record<string, unknown> = {};
+    try {
+      const runRes = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`);
+      const runJson = (await runRes.json().catch(() => ({}))) as { run?: { meta?: Record<string, unknown> } };
+      currentMeta = toObject(runJson.run?.meta) ?? {};
+    } catch {
+      currentMeta = {};
+    }
+    await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        meta: {
+          ...currentMeta,
+          recursive_run_path: recursiveScaffold.recursiveRunPath,
+          recursive_requirements_path: recursiveScaffold.recursiveReqPath,
+        },
+      }),
+    }).catch(() => {});
   }
 
   if (persistAgentNote) {
-    await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+    await fetch(`${UPSTREAM}/api/company/tasks/${activeTaskId}/stigmergic-note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: dispatchNoteText ?? `Dispatched skill \`${skillSlug}\` to worker runtime.`,
+        text:
+          dispatchNoteText ??
+          `Dispatched skill \`${skillSlug}\` to worker runtime.${checkoutFallbackUsed ? ` (fallback task ${activeTaskId})` : ""}`,
         actor: persona,
       }),
     }).catch(() => {});
   }
   // Integrate existing coordinator path: allow spawn-rules to fan out background subtasks.
-  await fetch(`${UPSTREAM}/api/company/companies/${companyId}/tasks/${taskId}/spawn-subagents`, {
+  await fetch(`${UPSTREAM}/api/company/companies/${companyId}/tasks/${activeTaskId}/spawn-subagents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ actor: persona, reason: "operator-chat-dispatch" }),
   }).catch(() => {});
 
+  const executePrompt =
+    (typeof extraMeta?.operator_message === "string" && extraMeta.operator_message.trim().length > 0
+      ? extraMeta.operator_message.trim()
+      : runSummary?.trim()) ??
+    `Run skill ${skillSlug} for task ${activeTaskId}`;
+  const executeRes = await fetch(`${UPSTREAM}/api/company/tasks/${activeTaskId}/execute-worker`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actor: persona,
+      skill_slug: skillSlug,
+      prompt: executePrompt,
+    }),
+  });
+  if (!executeRes.ok) {
+    const errText = await executeRes.text().catch(() => executeRes.statusText);
+    return {
+      ok: false,
+      error: `worker execute start failed: ${errText || executeRes.statusText}`,
+      httpStatus: executeRes.status || 502,
+      runId,
+    };
+  }
+
   const endAt = Date.now() + Math.max(0, waitForTelemetryMs);
   let latestSummary: string | null = null;
   let latestMode: "pending" | "worker" | "llm_simulated" = "pending";
+  let sawWorkerEvidence = false;
+  const dispatchStartedAt = Date.now();
+  let baselineActivityMs = 0;
+  try {
+    const activityRes = await fetch(`${UPSTREAM}/api/company/runtime/activity`);
+    if (activityRes.ok) {
+      const activityJson = (await activityRes.json().catch(() => ({}))) as {
+        activity?: { last_activity_ms?: number };
+      };
+      baselineActivityMs =
+        typeof activityJson.activity?.last_activity_ms === "number"
+          ? activityJson.activity.last_activity_ms
+          : 0;
+    }
+  } catch {
+    baselineActivityMs = 0;
+  }
 
   while (Date.now() < endAt) {
-    const [runRes, tasksRes] = await Promise.all([
+    const [runRes, tasksRes, activityRes] = await Promise.all([
       fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`),
       fetch(`${UPSTREAM}/api/company/companies/${companyId}/tasks`),
+      fetch(`${UPSTREAM}/api/company/runtime/activity`).catch(() => null),
     ]);
     if (!runRes.ok || !tasksRes.ok) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -763,18 +1048,63 @@ export async function dispatchSkillToWorker(params: {
     const tasksJson = (await tasksRes.json()) as {
       tasks?: Array<{ id: string; run?: { status?: string; tool_calls?: number; log_tail?: string } | null }>;
     };
-    const task = (tasksJson.tasks ?? []).find((t) => t.id === taskId);
+    const task = (tasksJson.tasks ?? []).find((t) => t.id === activeTaskId);
     const taskRunStatus = (task?.run?.status ?? "").toLowerCase();
     const taskToolCalls = task?.run?.tool_calls ?? 0;
-    const observedWorker = taskToolCalls > 0;
+    const observedFromTask = taskToolCalls > 0;
+    let observedFromRuntime = false;
+    if (activityRes && "ok" in activityRes && activityRes.ok) {
+      const activityJson = (await activityRes.json().catch(() => ({}))) as {
+        activity?: {
+          last_activity_ms?: number;
+          phase?: string;
+          tool_name?: string | null;
+        };
+      };
+      const lastActivityMs =
+        typeof activityJson.activity?.last_activity_ms === "number"
+          ? activityJson.activity.last_activity_ms
+          : 0;
+      const activityAdvanced =
+        lastActivityMs > Math.max(baselineActivityMs, dispatchStartedAt - 1_000);
+      const hasToolName = typeof activityJson.activity?.tool_name === "string" && activityJson.activity.tool_name.length > 0;
+      const phase = typeof activityJson.activity?.phase === "string" ? activityJson.activity.phase : "";
+      observedFromRuntime = activityAdvanced && (hasToolName || phase === "start" || phase === "finish");
+    }
+    const observedWorker = observedFromTask || observedFromRuntime;
+    sawWorkerEvidence = sawWorkerEvidence || observedWorker;
 
-    latestMode = observedWorker ? "worker" : latestMode;
+    latestMode = sawWorkerEvidence ? "worker" : latestMode;
     if (observedWorker && runJson.run?.meta?.execution_mode !== "worker") {
-      await patchRunMetaExecutionMode(companyId, runId, runJson.run?.meta, "worker");
+      await patchRunMetaExecutionMode(companyId, runId, runJson.run?.meta, "worker", true);
     }
 
     if (taskRunStatus === "success" || taskRunStatus === "error") {
-      const finalMode = observedWorker ? "worker" : "llm_simulated";
+      if (requireWorkerEvidence && !sawWorkerEvidence) {
+        const summary = "Worker run finished without tool evidence; refusing optimistic completion.";
+        await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "error",
+            summary,
+            finished_at: true,
+            meta: {
+              ...(runJson.run?.meta ?? {}),
+              execution_mode: "pending",
+              execution_verified: false,
+              needs_human: true,
+            },
+          }),
+        }).catch(() => {});
+        return {
+          ok: false,
+          error: summary,
+          httpStatus: 409,
+          runId,
+        };
+      }
+      const finalMode = sawWorkerEvidence ? "worker" : "llm_simulated";
       latestSummary =
         runJson.run?.summary?.trim() ||
         (typeof task?.run?.log_tail === "string" && task.run.log_tail.trim()
@@ -787,7 +1117,11 @@ export async function dispatchSkillToWorker(params: {
           status: taskRunStatus,
           summary: latestSummary,
           finished_at: true,
-          meta: { ...(runJson.run?.meta ?? {}), execution_mode: finalMode },
+          meta: {
+            ...(runJson.run?.meta ?? {}),
+            execution_mode: finalMode,
+            execution_verified: sawWorkerEvidence,
+          },
         }),
       });
       return {
@@ -795,6 +1129,8 @@ export async function dispatchSkillToWorker(params: {
         runId,
         status: taskRunStatus as "success" | "error",
         executionMode: finalMode,
+        workerEvidence: sawWorkerEvidence,
+        executionVerified: sawWorkerEvidence,
         summary: latestSummary,
         finalized: true,
       };
@@ -803,11 +1139,45 @@ export async function dispatchSkillToWorker(params: {
     await new Promise((r) => setTimeout(r, 2500));
   }
 
+  // Soft-timeout behavior: keep the run alive if no evidence was observed yet.
+  // We still enforce strict proof if/when the task reaches success/error without evidence.
+  if (requireWorkerEvidence && !sawWorkerEvidence) {
+    const pendingSummary =
+      latestSummary ??
+      "No worker tool activity observed within telemetry window yet; run remains pending until evidence arrives.";
+    await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status: "running",
+        summary: pendingSummary,
+        meta: {
+          execution_mode: latestMode,
+          execution_verified: false,
+          evidence_pending: true,
+          evidence_timeout_ms: waitForTelemetryMs,
+        },
+      }),
+    }).catch(() => {});
+    return {
+      ok: true,
+      runId,
+      status: "running",
+      executionMode: latestMode,
+      workerEvidence: false,
+      executionVerified: false,
+      summary: pendingSummary,
+      finalized: false,
+    };
+  }
+
   return {
     ok: true,
     runId,
     status: "running",
     executionMode: latestMode,
+    workerEvidence: sawWorkerEvidence,
+    executionVerified: sawWorkerEvidence,
     summary: latestSummary,
     finalized: false,
   };
@@ -916,4 +1286,119 @@ export async function executeSkillLlmFlow(params: {
   }
 
   return { ok: true, reply, runId };
+}
+
+// ---------------------------------------------------------------------------
+// Context compaction — keeps LLM message history bounded so long operator
+// threads don't blow the context window or inflate costs.
+//
+// Strategy:
+//   • If notes ≤ COMPACT_NOTE_THRESHOLD AND total chars ≤ COMPACT_CHAR_THRESHOLD → no-op.
+//   • Otherwise: take the older (N - COMPACT_KEEP_RECENT) notes, build a
+//     compact prose summary, fold it into the system prompt extension, and
+//     only send the COMPACT_KEEP_RECENT most recent notes as actual
+//     user/assistant turns.
+//   • The summary is also written to company_memory_entries (scope=shared,
+//     source=agent_chat_compaction) so the supermemory can surface it later
+//     as relevant history.
+// ---------------------------------------------------------------------------
+
+/** Compact when the thread exceeds this many notes … */
+const COMPACT_NOTE_THRESHOLD = 18;
+/** … or this many total characters across all note texts. */
+const COMPACT_CHAR_THRESHOLD = 7_000;
+/** How many recent notes to keep verbatim as LLM messages after compaction. */
+const COMPACT_KEEP_RECENT = 8;
+
+export type CompactionResult = {
+  /** Whether compaction was applied. */
+  compacted: boolean;
+  /** Older notes condensed into prose (present only when compacted). */
+  compactionSummary: string | null;
+  /** Number of notes that were compacted away. */
+  compactedCount: number;
+  /** LLM message history ready to be sent (recent notes only after compaction). */
+  messageHistory: Array<{ role: "user" | "assistant"; content: string }>;
+};
+
+/**
+ * Decide whether to compact and build the message history + optional summary.
+ *
+ * Call this **before** building the `messages` array for the LLM.  When
+ * `compacted === true`, prepend `compactionSummary` to the system prompt.
+ */
+export function compactNotesForLlm(notes: StigNote[]): CompactionResult {
+  const filtered = notes.filter((n) => n.text?.trim());
+  const totalChars = filtered.reduce((s, n) => s + n.text.length, 0);
+  const needsCompaction =
+    filtered.length > COMPACT_NOTE_THRESHOLD || totalChars > COMPACT_CHAR_THRESHOLD;
+
+  if (!needsCompaction) {
+    return {
+      compacted: false,
+      compactionSummary: null,
+      compactedCount: 0,
+      messageHistory: filtered.map((n) => ({
+        role: (n.actor === "operator" ? "user" : "assistant") as "user" | "assistant",
+        content: n.text,
+      })),
+    };
+  }
+
+  const olderNotes = filtered.slice(0, -COMPACT_KEEP_RECENT);
+  const recentNotes = filtered.slice(-COMPACT_KEEP_RECENT);
+
+  // Build a compact prose summary of the older notes.
+  const summaryLines = olderNotes.map((n) => {
+    const actor = n.actor === "operator" ? "Operator" : n.actor;
+    const ts = n.at ? n.at.slice(0, 16).replace("T", " ") : "";
+    const snippet = n.text.trim().replace(/\n+/g, " ").slice(0, 240);
+    const ellipsis = n.text.length > 240 ? "…" : "";
+    return `- [${actor}${ts ? ` @ ${ts}` : ""}]: ${snippet}${ellipsis}`;
+  });
+
+  const compactionSummary = [
+    `## Compacted conversation history (${olderNotes.length} earlier message${olderNotes.length === 1 ? "" : "s"})`,
+    "",
+    "The following is a condensed record of the thread before the current exchange.",
+    "Treat it as authoritative context but do not repeat or re-summarize it in your reply.",
+    "",
+    summaryLines.join("\n"),
+  ].join("\n");
+
+  return {
+    compacted: true,
+    compactionSummary,
+    compactedCount: olderNotes.length,
+    messageHistory: recentNotes.map((n) => ({
+      role: (n.actor === "operator" ? "user" : "assistant") as "user" | "assistant",
+      content: n.text,
+    })),
+  };
+}
+
+/**
+ * Persist a compaction summary to company shared memory (supermemory) so it
+ * remains searchable after the active task thread is long gone.
+ *
+ * Fire-and-forget — callers should `.catch(() => {})` the returned promise.
+ */
+export async function saveCompactionToMemory(
+  companyId: string,
+  taskId: string,
+  persona: string,
+  summary: string,
+): Promise<void> {
+  await fetch(`${UPSTREAM}/api/company/companies/${companyId}/memory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: `Chat compaction · ${persona} · task ${taskId.slice(0, 8)}`,
+      body: summary,
+      scope: "shared",
+      source: "agent_chat_compaction",
+      kind: "general",
+      tags: ["compaction", `task:${taskId}`, `persona:${persona}`],
+    }),
+  });
 }

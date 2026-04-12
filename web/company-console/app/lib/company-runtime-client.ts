@@ -162,7 +162,7 @@ export async function callResumeRun(payload: {
   runId: string;
   taskId: string;
   persona: string;
-}): Promise<{ run_id?: string; status?: string; execution_mode?: string }> {
+}): Promise<{ run_id?: string; status?: string; execution_mode?: string; execution_verified?: boolean }> {
   const res = await fetch("/api/agent-runs/resume", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -177,6 +177,7 @@ export async function callResumeRun(payload: {
     run_id: typeof o?.run_id === "string" ? o.run_id : undefined,
     status: typeof o?.status === "string" ? o.status : undefined,
     execution_mode: typeof o?.execution_mode === "string" ? o.execution_mode : undefined,
+    execution_verified: o?.execution_verified === true,
   };
 }
 

@@ -64,6 +64,9 @@ function AgentDetailContent() {
   const rawTab = searchParams.get("tab");
   const tab: AgentTab =
     rawTab && (TAB_VALUES as readonly string[]).includes(rawTab) ? (rawTab as AgentTab) : "workspace";
+  const requestedPath = searchParams.get("path");
+  const artifactBefore = searchParams.get("artifact_before");
+  const artifactAfter = searchParams.get("artifact_after");
 
   const setTab = (next: string) => {
     if (!(TAB_VALUES as readonly string[]).includes(next)) return;
@@ -173,6 +176,9 @@ function AgentDetailContent() {
             agentPackName={agent.name}
             assigneeDisplayName={displayName}
             issueKeyPrefix={issueKeyPrefix}
+            initialOpenPath={requestedPath}
+            initialArtifactBefore={artifactBefore}
+            initialArtifactAfter={artifactAfter}
           />
         </TabsContent>
 
@@ -249,25 +255,49 @@ function AgentDetailContent() {
           <Card className="border-admin-border">
             <CardHeader>
               <CardTitle className="text-base">Configuration</CardTitle>
-              <CardDescription>Roster fields from Postgres.</CardDescription>
+              <CardDescription>Roster fields and run-policy guidance.</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-2 font-mono text-xs text-muted-foreground">
-              <p>
-                <span className="text-foreground">name</span> {agent.name}
-              </p>
-              <p>
-                <span className="text-foreground">role</span> {agent.role}
-              </p>
-              <p>
-                <span className="text-foreground">title</span> {agent.title ?? "—"}
-              </p>
-              <p>
-                <span className="text-foreground">status</span> {agent.status}
-              </p>
-              <p>
-                <span className="text-foreground">budget_monthly_cents</span>{" "}
-                {agent.budget_monthly_cents ?? "—"}
-              </p>
+            <CardContent className="space-y-4">
+              <div className="space-y-2 font-mono text-xs text-muted-foreground">
+                <p>
+                  <span className="text-foreground">name</span> {agent.name}
+                </p>
+                <p>
+                  <span className="text-foreground">role</span> {agent.role}
+                </p>
+                <p>
+                  <span className="text-foreground">title</span> {agent.title ?? "—"}
+                </p>
+                <p>
+                  <span className="text-foreground">status</span> {agent.status}
+                </p>
+                <p>
+                  <span className="text-foreground">budget_monthly_cents</span>{" "}
+                  {agent.budget_monthly_cents ?? "—"}
+                </p>
+              </div>
+
+              <div className="rounded-md border border-admin-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                <p className="font-medium text-foreground">Run Policy: default heartbeat OFF</p>
+                <ol className="mt-2 list-inside list-decimal space-y-1">
+                  <li>Open the agent.</li>
+                  <li>In Configuration, find Run Policy.</li>
+                  <li>Set Heartbeat interval to OFF.</li>
+                </ol>
+                <p className="mt-3">
+                  Keep heartbeat ON only for monitoring agents that must poll systems with no webhook.
+                  When needed, prefer long intervals (hourly or every few hours).
+                </p>
+                <p className="mt-2">
+                  Scheduled work belongs in routines (cron/webhook trigger → task creation → assignment
+                  → agent wake-up), not heartbeats.
+                </p>
+                <ul className="mt-2 list-inside list-disc space-y-1">
+                  <li>Task agents (most): heartbeat OFF.</li>
+                  <li>Monitoring agents (rare): heartbeat ON with long interval.</li>
+                  <li>Burst agents (rare): usually better handled by webhooks/comments.</li>
+                </ul>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
