@@ -290,6 +290,11 @@ pub fn resolve_risk_based_model(
     _workflow_pack: &str,
     risk_band: &str,
 ) -> (String, &'static str) {
+    // Never downgrade a cloud model (openrouter/, openai/, anthropic/, etc.) to a local one.
+    // Cloud models are explicitly configured; auto-routing should not override them.
+    if crate::ollama_client::is_cloud_model_pub(current_model) {
+        return (current_model.to_string(), "cloud_passthrough");
+    }
     if let Ok(raw) = std::env::var("HSM_MODEL_ROUTING_JSON") {
         if let Ok(v) = serde_json::from_str::<Value>(&raw) {
             let key = risk_band.trim().to_ascii_lowercase();

@@ -328,29 +328,42 @@ struct CloudConfig {
     model_id: String,
 }
 
+/// Public re-export for use by model-routing logic outside this module.
+pub fn is_cloud_model_pub(model: &str) -> bool {
+    is_cloud_model(model)
+}
+
 fn is_cloud_model(model: &str) -> bool {
     let m = model.to_lowercase();
     m.contains(":cloud")
         || m.contains("-cloud")
         || m == "qwencoder:480b-cloud"
         || m == "qwen3-coder:480b-cloud"
+        || m.starts_with("openrouter/")
+        || m.starts_with("openai/")
+        || m.starts_with("anthropic/")
+        || m.starts_with("google/")
+        || m.starts_with("meta-llama/")
+        || m.starts_with("mistralai/")
 }
 
 fn get_cloud_config(model: &str) -> Option<CloudConfig> {
     if !is_cloud_model(model) {
         return None;
     }
-    // OpenRouter: free tier qwen3-coder
+    // If the model name itself is a provider-namespaced ID (e.g. "openrouter/elephant-alpha"),
+    // use it directly as the model_id. CLOUD_MODEL_ID can still override this.
+    let default_model_id = std::env::var("CLOUD_MODEL_ID").unwrap_or_else(|_| model.to_string());
+
+    // OpenRouter: preferred when OPENROUTER_API_KEY is set
     if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
         if !api_key.is_empty() {
             let base_url = std::env::var("OPENROUTER_API_BASE")
                 .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-            let model_id = std::env::var("CLOUD_MODEL_ID")
-                .unwrap_or_else(|_| "qwen/qwen3-coder:free".to_string());
             return Some(CloudConfig {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 api_key,
-                model_id,
+                model_id: default_model_id,
             });
         }
     }
@@ -360,12 +373,10 @@ fn get_cloud_config(model: &str) -> Option<CloudConfig> {
         std::env::var("OPENAI_BASE_URL"),
     ) {
         if !api_key.is_empty() && !base_url.is_empty() {
-            let model_id = std::env::var("CLOUD_MODEL_ID")
-                .unwrap_or_else(|_| "qwen/qwen3-coder:free".to_string());
             return Some(CloudConfig {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 api_key,
-                model_id,
+                model_id: default_model_id,
             });
         }
     }
@@ -622,6 +633,36 @@ impl OllamaClient {
             Err(e) => {
                 let err_msg = e.to_string();
                 eprintln!("Ollama chat error: {}", err_msg);
+                // Fall back to cloud API if model is cloud-named and configured
+                if let Some(cloud) = get_cloud_config(&self.config.model) {
+                    let mut api_messages =
+                        vec![json!({"role": "system", "content": system_prompt})];
+                    for (user_msg, assistant_msg) in history {
+                        api_messages.push(json!({"role": "user", "content": user_msg}));
+                        api_messages
+                            .push(json!({"role": "assistant", "content": assistant_msg}));
+                    }
+                    api_messages.push(json!({"role": "user", "content": user_message}));
+                    if let Ok(r) = call_cloud_chat(
+                        &cloud,
+                        api_messages,
+                        self.config.temperature,
+                        self.config.max_tokens,
+                    )
+                    .await
+                    {
+                        self.record_latency(r.latency_ms).await;
+                        crate::company_os::spawn_record_llm_spend(
+                            &self.config.model,
+                            &r.text,
+                            r.tokens_generated,
+                            r.latency_ms,
+                            r.timed_out,
+                            r.cached,
+                        );
+                        return r;
+                    }
+                }
                 self.fallback_result(&err_msg)
             }
         };

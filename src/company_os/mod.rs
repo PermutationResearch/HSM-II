@@ -2693,6 +2693,206 @@ struct ExecuteTaskRow {
     title: String,
     specification: Option<String>,
     checked_out_by: Option<String>,
+    company_id: Uuid,
+    goal_ancestry: serde_json::Value,
+    context_notes: serde_json::Value,
+    capability_refs: serde_json::Value,
+    owner_persona: Option<String>,
+}
+
+/// Assemble the rich company context prefix injected into every execute-worker prompt.
+/// Fetches goals, team roster, skills catalog, active assignments, and stigmergic notes.
+async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> String {
+    let cid = task.company_id;
+    let mut out = String::with_capacity(4096);
+
+    // ── Company context markdown ───────────────────────────────────────────────
+    if let Ok(Some(md)) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context_markdown FROM companies WHERE id = $1",
+    )
+    .bind(cid)
+    .fetch_optional(pool)
+    .await
+    {
+        if let Some(md) = md.filter(|s| !s.trim().is_empty()) {
+            out.push_str("## Company context\n\n");
+            // include first 1500 chars to stay compact
+            let truncated: String = md.chars().take(1500).collect();
+            out.push_str(&truncated);
+            if md.chars().count() > 1500 {
+                out.push_str("\n\n*(context continues — see `/company-context` for full text)*");
+            }
+            out.push_str("\n\n");
+        }
+    }
+
+    // ── Active goals ──────────────────────────────────────────────────────────
+    #[derive(sqlx::FromRow)]
+    struct GoalRow {
+        title: String,
+        status: String,
+        parent_goal_id: Option<Uuid>,
+    }
+    if let Ok(goals) = sqlx::query_as::<_, GoalRow>(
+        "SELECT title, status, parent_goal_id FROM goals WHERE company_id = $1
+         ORDER BY sort_order, created_at LIMIT 20",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    {
+        if !goals.is_empty() {
+            out.push_str("## Company goals\n\n");
+            for g in &goals {
+                let indent = if g.parent_goal_id.is_some() { "  - " } else { "- " };
+                out.push_str(&format!("{indent}[{}] {}\n", g.status, g.title));
+            }
+            out.push('\n');
+        }
+    }
+
+    // ── Goal ancestry for this task ────────────────────────────────────────────
+    let ancestry = task.goal_ancestry.as_array().cloned().unwrap_or_default();
+    if !ancestry.is_empty() {
+        out.push_str("## This task's goal chain\n\n");
+        for entry in &ancestry {
+            if let Some(title) = entry.get("title").and_then(|v| v.as_str()) {
+                let status = entry
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                out.push_str(&format!("- [{status}] {title}\n"));
+            }
+        }
+        out.push('\n');
+    }
+
+    // ── Team roster + current assignments ─────────────────────────────────────
+    #[derive(sqlx::FromRow)]
+    struct AgentRow {
+        name: String,
+        role: String,
+        title: Option<String>,
+    }
+    if let Ok(agents) = sqlx::query_as::<_, AgentRow>(
+        "SELECT a.name, a.role, a.title
+         FROM company_agents a
+         WHERE a.company_id = $1 AND a.status = 'active'
+         ORDER BY a.sort_order, a.name LIMIT 20",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    {
+        if !agents.is_empty() {
+            out.push_str("## Team roster\n\n");
+            // Collect agents with their current task assignments
+            for ag in &agents {
+                let display_title = ag
+                    .title
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&ag.role);
+                // check what task this agent currently has checked out
+                let current: Option<String> = sqlx::query_scalar(
+                    "SELECT title FROM tasks WHERE company_id = $1 AND checked_out_by = $2
+                     AND state NOT IN ('done','closed','cancelled') LIMIT 1",
+                )
+                .bind(cid)
+                .bind(&ag.name)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+                if let Some(task_title) = current {
+                    out.push_str(&format!(
+                        "- **{}** ({}) — currently working on: *{}*\n",
+                        ag.name, display_title, task_title
+                    ));
+                } else {
+                    out.push_str(&format!("- **{}** ({}) — available\n", ag.name, display_title));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    // ── Open / in-progress tasks (work-in-flight overview) ────────────────────
+    #[derive(sqlx::FromRow)]
+    struct TaskSummaryRow {
+        title: String,
+        state: String,
+        owner_persona: Option<String>,
+    }
+    if let Ok(active) = sqlx::query_as::<_, TaskSummaryRow>(
+        "SELECT title, state, owner_persona FROM tasks
+         WHERE company_id = $1 AND state IN ('open','in_progress')
+         ORDER BY priority DESC, updated_at DESC LIMIT 10",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    {
+        if !active.is_empty() {
+            out.push_str("## Active task queue\n\n");
+            for t in &active {
+                let owner = t
+                    .owner_persona
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("unassigned");
+                out.push_str(&format!(
+                    "- [{}] {} (owner: {})\n",
+                    t.state, t.title, owner
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
+    // ── Available skills catalog ───────────────────────────────────────────────
+    #[derive(sqlx::FromRow)]
+    struct SkillRow {
+        slug: String,
+        name: String,
+        description: String,
+    }
+    if let Ok(skills) = sqlx::query_as::<_, SkillRow>(
+        "SELECT slug, name, LEFT(description, 120) as description FROM company_skills
+         WHERE company_id = $1 ORDER BY slug LIMIT 30",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    {
+        if !skills.is_empty() {
+            out.push_str("## Available skills\n\n");
+            for sk in &skills {
+                let desc = if sk.description.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", sk.description.trim())
+                };
+                out.push_str(&format!("- `{}`{}\n", sk.slug, desc));
+            }
+            out.push('\n');
+        }
+    }
+
+    // ── Stigmergic handoff notes on this task ─────────────────────────────────
+    let notes = task.context_notes.as_array().cloned().unwrap_or_default();
+    if !notes.is_empty() {
+        out.push_str("## Handoff notes (stigmergic context)\n\n");
+        // Show up to 10 most recent notes (array is ordered oldest-first)
+        let start = notes.len().saturating_sub(10);
+        for note in &notes[start..] {
+            let actor = note.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
+            let text = note.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let at = note.get("at").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!("**{}** ({}):\n{}\n\n", actor, at, text));
+        }
+    }
+
+    out
 }
 
 fn truncate_worker_log(s: &str, max_chars: usize) -> String {
@@ -2717,7 +2917,8 @@ async fn post_execute_task_worker(
         return Err(no_db());
     };
     let task = sqlx::query_as::<_, ExecuteTaskRow>(
-        r#"SELECT title, specification, checked_out_by
+        r#"SELECT title, specification, checked_out_by,
+                  company_id, goal_ancestry, context_notes, capability_refs, owner_persona
            FROM tasks WHERE id = $1"#,
     )
     .bind(task_id)
@@ -2751,7 +2952,11 @@ async fn post_execute_task_worker(
         })
         .unwrap_or_else(|| "worker-agent-loop".to_string());
 
-    let prompt = body
+    // Build rich company context prefix (goals, team, skills, handoff notes)
+    let context_prefix = build_worker_context_prefix(pool, &task).await;
+
+    // Assemble the base task instruction
+    let base_task = body
         .prompt
         .as_deref()
         .map(str::trim)
@@ -2759,11 +2964,19 @@ async fn post_execute_task_worker(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             format!(
-                "Execute this task with real tools and return what was changed.\n\nTitle: {}\n\nSpecification:\n{}",
+                "Execute this task with real tools and return what was done.\n\nTitle: {}\n\nSpecification:\n{}",
                 task.title,
-                task.specification.as_deref().unwrap_or("")
+                task.specification.as_deref().unwrap_or("(no specification)")
             )
         });
+
+    // Prefix with /hermes to always route through the agentic tool loop,
+    // then inject company context so the agent has full situational awareness.
+    let prompt = if context_prefix.is_empty() {
+        format!("/hermes {base_task}")
+    } else {
+        format!("/hermes {context_prefix}\n---\n\n## Your task\n\n{base_task}")
+    };
 
     let skill_slug = body
         .skill_slug
@@ -2776,7 +2989,17 @@ async fn post_execute_task_worker(
     let actor_for_response = actor.clone();
     let skill_slug_for_response = skill_slug.clone();
     let st_bg = st.clone();
+    let pool_bg = pool.clone();
+    let task_company_id = task.company_id;
     tokio::spawn(async move {
+        // ── Mark task as in_progress ───────────────────────────────────────────
+        let _ = sqlx::query(
+            "UPDATE tasks SET state = 'in_progress', updated_at = now() WHERE id = $1 AND state = 'open'",
+        )
+        .bind(task_id)
+        .execute(&pool_bg)
+        .await;
+
         let _ = post_task_run_telemetry(
             State(st_bg.clone()),
             Path(task_id),
@@ -2796,7 +3019,7 @@ async fn post_execute_task_worker(
 
         let start_ms = Utc::now().timestamp_millis();
         let mut rx = crate::runtime_control::subscribe_completions();
-        let (run_status, mut tool_calls, log_append) =
+        let (run_status, mut tool_calls, log_append, agent_reply) =
             match EnhancedPersonalAgent::initialize(&st_bg.home).await {
                 Ok(mut agent) => {
                     let msg = Message {
@@ -2812,18 +3035,26 @@ async fn post_execute_task_worker(
                         reply_to: None,
                     };
                     match agent.handle_message(msg).await {
-                        Ok(reply) => (
-                            "success".to_string(),
+                        Ok(reply) => {
+                            let log = format!(
+                                "worker reply: {}\n",
+                                truncate_worker_log(&reply, 1400)
+                            );
+                            ("success".to_string(), 0i32, log, Some(reply))
+                        }
+                        Err(e) => (
+                            "error".to_string(),
                             0i32,
-                            format!("worker reply: {}\n", truncate_worker_log(&reply, 1400)),
+                            format!("worker error: {e}\n"),
+                            None,
                         ),
-                        Err(e) => ("error".to_string(), 0i32, format!("worker error: {e}\n")),
                     }
                 }
                 Err(e) => (
                     "error".to_string(),
                     0i32,
                     format!("worker init failed: {e}\n"),
+                    None,
                 ),
             };
 
@@ -2849,13 +3080,53 @@ async fn post_execute_task_worker(
             State(st_bg.clone()),
             Path(task_id),
             Json(PostRunTelemetryBody {
-                run_status: Some(run_status),
+                run_status: Some(run_status.clone()),
                 tool_calls: Some(tool_calls),
                 log_append: Some(log_append),
                 clear_log: Some(false),
             }),
         )
         .await;
+
+        // ── On success: mark task done + append stigmergic completion note ─────
+        if run_status == "success" {
+            let _ = sqlx::query(
+                "UPDATE tasks SET state = 'done', updated_at = now() WHERE id = $1",
+            )
+            .bind(task_id)
+            .execute(&pool_bg)
+            .await;
+
+            if let Some(reply) = agent_reply {
+                let summary = truncate_worker_log(&reply, 600);
+                let note = serde_json::json!({
+                    "text": summary,
+                    "actor": actor,
+                    "at": Utc::now().to_rfc3339(),
+                });
+                let _ = sqlx::query(
+                    "UPDATE tasks SET context_notes = context_notes || $1::jsonb, updated_at = now()
+                     WHERE id = $2",
+                )
+                .bind(serde_json::json!([note]))
+                .bind(task_id)
+                .execute(&pool_bg)
+                .await;
+            }
+
+            // Emit a governance event so the activity feed reflects the completed work
+            let _ = sqlx::query(
+                r#"INSERT INTO governance_events
+                   (company_id, actor, action, subject_type, subject_id, payload, severity)
+                   VALUES ($1, $2, 'task_completed', 'task', $3, $4, 'info')"#,
+            )
+            .bind(task_company_id)
+            .bind(&actor)
+            .bind(task_id.to_string())
+            .bind(serde_json::json!({ "skill": skill_slug }))
+            .execute(&pool_bg)
+            .await;
+        }
 
         let _ = release_task(
             State(st_bg),

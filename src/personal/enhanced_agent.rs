@@ -1494,17 +1494,9 @@ impl EnhancedPersonalAgent {
         } else if msg.content.starts_with("/tool") {
             // Tool execution command
             self.process_tool_command(&msg, &mut context).await?
-        } else if self.should_use_ralph(&msg.content) {
-            // Auto-detect coding tasks for Ralph Loop
-            info!("Auto-detected coding task, using Ralph Loop");
-            self.process_with_ralph(&msg, &mut context, &msg.content)
-                .await?
-        } else if self.should_use_rlm(&msg.content) {
-            // Auto-detect large document processing
-            info!("Auto-detected document processing, using RLM");
-            self.process_with_rlm(&msg, &mut context).await?
         } else if msg.content.starts_with("/hermes ") || msg.content.trim() == "/hermes" {
-            // Explicit Hermes execution command
+            // Explicit Hermes execution command — must be checked BEFORE auto-detect blocks
+            // so that execute-worker prompts prefixed with /hermes always reach the agentic loop.
             let task = msg.content.trim_start_matches("/hermes").trim().to_string();
             if task.is_empty() {
                 AgentResponse {
@@ -1519,6 +1511,15 @@ impl EnhancedPersonalAgent {
             } else {
                 self.process_with_hermes(&msg, &mut context, &task).await?
             }
+        } else if self.should_use_ralph(&msg.content) {
+            // Auto-detect coding tasks for Ralph Loop
+            info!("Auto-detected coding task, using Ralph Loop");
+            self.process_with_ralph(&msg, &mut context, &msg.content)
+                .await?
+        } else if self.should_use_rlm(&msg.content) {
+            // Auto-detect large document processing
+            info!("Auto-detected document processing, using RLM");
+            self.process_with_rlm(&msg, &mut context).await?
         } else if self.should_use_council(&msg.content) && self.config.enable_council {
             // Complex decision - use council
             self.process_with_council(&msg, &mut context).await?
