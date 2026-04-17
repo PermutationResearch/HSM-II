@@ -1,296 +1,2783 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HSM-II - Hyper-Stigmergic Morphogenesis II</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 40px 20px;
-        }
-        
-        header {
-            text-align: center;
-            color: white;
-            padding: 60px 20px;
-        }
-        
-        h1 {
-            font-size: 3.5rem;
-            margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        .subtitle {
-            font-size: 1.5rem;
-            opacity: 0.95;
-            max-width: 700px;
-            margin: 0 auto 30px;
-        }
-        
-        .badges {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-bottom: 30px;
-        }
-        
-        .badge {
-            background: rgba(255,255,255,0.2);
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-size: 0.9rem;
-            backdrop-filter: blur(10px);
-        }
-        
-        .btn-group {
-            display: flex;
-            justify-content: center;
-            gap: 15px;
-            flex-wrap: wrap;
-        }
-        
-        .btn {
-            display: inline-block;
-            padding: 15px 30px;
-            background: white;
-            color: #667eea;
-            text-decoration: none;
-            border-radius: 30px;
-            font-weight: bold;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        }
-        
-        .btn:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-        }
-        
-        .btn-outline {
-            background: transparent;
-            color: white;
-            border: 2px solid white;
-        }
-        
-        .btn-outline:hover {
-            background: white;
-            color: #667eea;
-        }
-        
-        .features {
-            background: white;
-            border-radius: 20px;
-            padding: 60px 40px;
-            margin-top: 40px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-        }
-        
-        .features h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 50px;
-            color: #333;
-        }
-        
-        .feature-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 30px;
-        }
-        
-        .feature-card {
-            padding: 30px;
-            border-radius: 15px;
-            background: #f8f9fa;
-            transition: transform 0.3s ease;
-        }
-        
-        .feature-card:hover {
-            transform: translateY(-5px);
-        }
-        
-        .feature-card h3 {
-            color: #667eea;
-            margin-bottom: 15px;
-            font-size: 1.3rem;
-        }
-        
-        .feature-card p {
-            color: #666;
-        }
-        
-        .architecture {
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            border-radius: 20px;
-            padding: 60px 40px;
-            margin-top: 40px;
-            text-align: center;
-        }
-        
-        .architecture h2 {
-            font-size: 2.5rem;
-            margin-bottom: 30px;
-        }
-        
-        .arch-diagram {
-            background: white;
-            border-radius: 15px;
-            padding: 40px;
-            margin-top: 30px;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-            font-family: 'Courier New', monospace;
-            text-align: left;
-            overflow-x: auto;
-            white-space: pre;
-            font-size: 0.85rem;
-            line-height: 1.4;
-        }
-        
-        footer {
-            text-align: center;
-            color: white;
-            padding: 40px 20px;
-            margin-top: 40px;
-        }
-        
-        footer a {
-            color: white;
-            text-decoration: underline;
-        }
-        
-        @media (max-width: 768px) {
-            h1 { font-size: 2.5rem; }
-            .subtitle { font-size: 1.1rem; }
-            .features, .architecture { padding: 40px 20px; }
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HSM-II — Emergent Collective Intelligence for AI Agents</title>
+  <meta name="description" content="HSM-II is a federated multi-agent hypergraph system. Swarms of LLM-powered agents that think together, learn from each other, and grow smarter over time. Built in Rust.">
+  <meta property="og:title" content="HSM-II — Emergent Collective Intelligence">
+  <meta property="og:description" content="Federated multi-agent hypergraph system. Agents that think together, learn from each other, and grow smarter over time.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#000000">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Doto:wght@400;700;900&family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+  <style>
+    /* ── RESET ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 15px; scroll-behavior: smooth; }
+    img, video, canvas { max-width: 100%; display: block; }
+    a { color: inherit; text-decoration: none; }
+    button { cursor: pointer; border: none; background: none; font: inherit; }
+
+    /* ── DESIGN TOKENS ── */
+    :root {
+      --bg:              #000000;
+      --surface:         #111111;
+      --surface-raised:  #1A1A1A;
+      --surface-high:    #242424;
+
+      --text-display:    #FFFFFF;
+      --text-primary:    #E8E8E8;
+      --text-secondary:  #999999;
+      --text-tertiary:   #555555;
+
+      --border:          rgba(255,255,255,0.07);
+      --border-visible:  rgba(255,255,255,0.12);
+      --border-strong:   rgba(255,255,255,0.20);
+
+      --accent:          #D71921;
+      --coral:           #de5849;
+      --coral-dark:      #c94537;
+      --coral-text:      #000000;
+
+      --font-display:    'Doto', 'Space Mono', monospace;
+      --font-body:       'Space Grotesk', system-ui, sans-serif;
+      --font-mono:       'Space Mono', 'Courier New', monospace;
+
+      --ease:            cubic-bezier(0.25, 0.1, 0.25, 1);
+      --ease-out:        cubic-bezier(0, 0, 0.2, 1);
+      --duration:        200ms;
+
+      --dot-size:        1px;
+      --dot-space:       16px;
+
+      --r-sm:  0px;
+      --r-md:  0px;
+      --r-lg:  0px;
+      --r-pill: 0px;
+    }
+
+    /* ── BASE ── */
+    body {
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow-x: hidden;
+    }
+
+    /* Noise grain overlay — fixed, pointer-events none, GPU-layer only */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      pointer-events: none;
+      opacity: 0.028;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
+    }
+
+    /* ── TYPOGRAPHY SCALE ── */
+    .t-display {
+      font-family: var(--font-body);
+      font-size: clamp(2.8rem, 6vw, 5.2rem);
+      font-weight: 700;
+      line-height: 1.06;
+      letter-spacing: -0.03em;
+      color: var(--text-display);
+    }
+    .t-h1 {
+      font-size: clamp(2.2rem, 4.5vw, 3.4rem);
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.028em;
+      color: var(--text-display);
+    }
+    .t-h2 {
+      font-size: clamp(1.4rem, 2.5vw, 1.9rem);
+      font-weight: 600;
+      line-height: 1.25;
+      letter-spacing: -0.015em;
+      color: var(--text-display);
+    }
+    .t-h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      line-height: 1.4;
+      color: var(--text-display);
+    }
+    .t-body { font-size: 1rem; line-height: 1.7; color: var(--text-secondary); }
+    .t-body-lg { font-size: 1.1rem; line-height: 1.7; color: var(--text-secondary); }
+    .t-small { font-size: 0.875rem; line-height: 1.6; color: var(--text-secondary); }
+
+    /* Mono labels — ALWAYS ALL CAPS */
+    .t-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+    }
+    .t-tag {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    /* Doto display numbers */
+    .t-doto {
+      font-family: var(--font-display);
+      font-weight: 900;
+      color: var(--text-display);
+      line-height: 1;
+    }
+
+    /* ── LAYOUT ── */
+    .container    { max-width: 1320px; margin: 0 auto; padding: 0 2rem; }
+    .container-md { max-width: 1080px; margin: 0 auto; padding: 0 2rem; }
+    .container-sm { max-width: 800px;  margin: 0 auto; padding: 0 2rem; }
+
+    .section    { padding: 7rem 0; }
+    .section-sm { padding: 5rem 0; }
+
+    .divider { border: none; border-top: 1px solid var(--border); }
+
+    @media (max-width: 768px) {
+      .container, .container-md, .container-sm { padding: 0 1.25rem; }
+      .section { padding: 5rem 0; }
+      .section-sm { padding: 3.5rem 0; }
+    }
+
+    /* ── DOT-MATRIX BACKGROUND ── */
+    .dot-bg {
+      background-image: radial-gradient(circle, var(--border-visible) var(--dot-size), transparent var(--dot-size));
+      background-size: var(--dot-space) var(--dot-space);
+    }
+
+    /* ── BUTTONS ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      border-radius: var(--r-pill);
+      padding: 0.65rem 1.5rem;
+      transition: opacity var(--duration) var(--ease), background var(--duration) var(--ease), transform 0.12s var(--ease);
+      white-space: nowrap;
+    }
+    .btn:active { transform: translateY(1px) scale(0.985); }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover { opacity: 0.88; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-primary);
+      border: 1px solid var(--border-visible);
+    }
+    .btn-ghost:hover { border-color: var(--border-strong); color: var(--text-display); }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text-display);
+      border: 1px solid var(--border-strong);
+    }
+    .btn-outline:hover { background: var(--surface); }
+
+    /* Technical (square) button variant */
+    .btn-tech {
+      border-radius: var(--r-sm);
+    }
+
+    /* ── TAGS / BADGES ── */
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary);
+      border: 1px solid var(--border-visible);
+      border-radius: var(--r-sm);
+      padding: 0.25rem 0.6rem;
+    }
+    .tag-accent {
+      color: var(--accent);
+      border-color: rgba(215,25,33,0.3);
+    }
+    /* ASCII bracket label — industrial-brutalist */
+    .ascii-tag {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+    }
+    .ascii-tag::before { content: '[ '; }
+    .ascii-tag::after  { content: ' ]'; }
+
+    /* ── CARD ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 1.75rem;
+      transition: border-color var(--duration) var(--ease);
+    }
+    .card:hover { border-color: var(--border-visible); }
+
+    /* ── NAV — full-width sticky bar ── */
+    #nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: rgba(0,0,0,0.92);
+      backdrop-filter: blur(12px) saturate(180%);
+      -webkit-backdrop-filter: blur(12px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+      transition: border-color 0.3s var(--ease), background 0.3s var(--ease);
+    }
+    #nav.scrolled {
+      border-bottom-color: var(--border-visible);
+      background: rgba(0,0,0,0.97);
+    }
+
+    .nav-inner {
+      padding: 0 2rem;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      max-width: 1440px;
+      margin: 0 auto;
+      gap: 2rem;
+    }
+
+    .nav-logo {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-display);
+      white-space: nowrap;
+    }
+    .nav-logo span { color: var(--coral); }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      list-style: none;
+    }
+    .nav-links li + li::before {
+      content: '/';
+      padding: 0 0.75rem;
+      color: var(--text-tertiary);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+    }
+    .nav-links a {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-secondary);
+      transition: color var(--duration) var(--ease);
+      position: relative;
+    }
+    .nav-links a:hover { color: var(--text-display); }
+
+    .nav-cta {
+      margin-left: 0;
+      font-size: 0.62rem !important;
+      padding: 0.55rem 1.25rem !important;
+      background: var(--coral) !important;
+      color: #000 !important;
+      border: none !important;
+    }
+    .nav-cta:hover { opacity: 0.88 !important; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+    }
+
+    /* ── HERO — coral editorial ── */
+    #hero {
+      position: relative;
+      min-height: 100svh;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      overflow: hidden;
+      background: var(--coral);
+    }
+
+    /* Animated horizontal stripes — very subtle */
+    #hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        180deg,
+        rgba(0,0,0,0) 0px,
+        rgba(0,0,0,0) 56px,
+        rgba(0,0,0,0.028) 56px,
+        rgba(0,0,0,0.028) 58px
+      );
+      animation: stripeScroll 24s linear infinite;
+      pointer-events: none;
+      z-index: 1;
+    }
+    @keyframes stripeScroll {
+      from { background-position: 0 0; }
+      to   { background-position: 0 116px; }
+    }
+
+    /* Bottom gradient fade coral → dark */
+    #hero::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 220px;
+      background: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.18) 60%, rgba(0,0,0,0.55) 100%);
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Hidden — keep for JS compat, canvas won't render on coral bg */
+    #hero-canvas { display: none; }
+    .hero-dot-grid { display: none; }
+
+    .hero-wordmark {
+      position: absolute;
+      bottom: 8%;
+      right: -2%;
+      font-family: var(--font-mono);
+      font-size: clamp(7rem, 20vw, 22rem);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: -0.04em;
+      color: rgba(0,0,0,0.08);
+      white-space: nowrap;
+      user-select: none;
+      pointer-events: none;
+      z-index: 1;
+      line-height: 1;
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 3;
+      width: 100%;
+      padding-top: 8rem;
+    }
+
+    .hero-pre {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+    }
+    .hero-pre-line {
+      width: 32px;
+      height: 1px;
+      background: rgba(0,0,0,0.35);
+    }
+
+    .hero-headline {
+      font-family: var(--font-body);
+      font-size: clamp(3.5rem, 9vw, 9rem);
+      font-weight: 700;
+      line-height: 0.95;
+      letter-spacing: -0.045em;
+      color: #000000;
+      max-width: 1200px;
+      margin-bottom: 2.5rem;
+    }
+    .hero-headline em {
+      font-style: normal;
+      color: rgba(0,0,0,0.45);
+    }
+
+    .hero-sub {
+      font-size: clamp(1rem, 1.5vw, 1.15rem);
+      line-height: 1.7;
+      color: rgba(0,0,0,0.65);
+      max-width: 520px;
+      margin-bottom: 2.5rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .hero-actions .btn-primary {
+      background: #000 !important;
+      color: var(--coral) !important;
+    }
+    .hero-actions .btn-ghost {
+      border-color: rgba(0,0,0,0.3) !important;
+      color: #000 !important;
+    }
+    .hero-actions .btn-ghost:hover {
+      border-color: #000 !important;
+      background: rgba(0,0,0,0.08) !important;
+    }
+
+    /* Hero metadata strip */
+    .hero-meta-strip {
+      position: relative;
+      z-index: 3;
+      margin-top: 4rem;
+      padding: 1.25rem 0;
+      border-top: 1px solid rgba(0,0,0,0.18);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .hero-meta-strip-item {
+      display: flex;
+      align-items: baseline;
+      gap: 0.75rem;
+    }
+    .hero-meta-num {
+      font-family: var(--font-display);
+      font-size: 1.8rem;
+      font-weight: 900;
+      color: #000;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .hero-meta-label {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: rgba(0,0,0,0.5);
+    }
+    .hero-meta-divider {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      color: rgba(0,0,0,0.25);
+    }
+
+    /* ── TICKER / TECH STRIP ── */
+    .ticker-wrap {
+      overflow: hidden;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      padding: 1rem 0;
+      position: relative;
+    }
+    .ticker-wrap::before,
+    .ticker-wrap::after {
+      content: '';
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 80px;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .ticker-wrap::before { left: 0; background: linear-gradient(to right, var(--surface), transparent); }
+    .ticker-wrap::after  { right: 0; background: linear-gradient(to left, var(--surface), transparent); }
+
+    .ticker-track {
+      display: flex;
+      gap: 0;
+      width: max-content;
+      animation: ticker 30s linear infinite;
+    }
+    @keyframes ticker {
+      from { transform: translateX(0); }
+      to   { transform: translateX(-50%); }
+    }
+    .ticker-item {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0 2.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+    }
+    .ticker-item::before {
+      content: '//';
+      color: var(--text-tertiary);
+      opacity: 0.4;
+    }
+
+    /* ── SECTION INDEX STRIP ── */
+    .meta-strip {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      padding: 0.75rem 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      margin: 0 0 4rem;
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-tertiary);
+    }
+    .meta-strip-label {
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .meta-strip-rule {
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .meta-strip-num {
+      white-space: nowrap;
+      flex-shrink: 0;
+      color: var(--text-secondary);
+    }
+    .meta-strip-kw {
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* ── STATS ── */
+    #stats {
+      border-bottom: 1px solid var(--border);
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0;
+    }
+    .stat-cell {
+      padding: 3rem 2rem;
+      border-right: 1px solid var(--border);
+      position: relative;
+    }
+    .stat-cell:last-child { border-right: none; }
+
+    .stat-number {
+      font-family: var(--font-display);
+      font-size: clamp(2.5rem, 4vw, 3.8rem);
+      font-weight: 900;
+      color: var(--text-display);
+      line-height: 1;
+      letter-spacing: -0.02em;
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+    .stat-unit {
+      font-family: var(--font-display);
+      font-size: 1.8rem;
+      color: var(--text-secondary);
+    }
+    .stat-label { margin-top: 0.5rem; }
+    .stat-desc {
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--text-tertiary);
+      line-height: 1.5;
+    }
+
+    @media (max-width: 900px) {
+      .stats-grid { grid-template-columns: repeat(2,1fr); }
+      .stat-cell:nth-child(2) { border-right: none; }
+      .stat-cell:nth-child(3), .stat-cell:nth-child(4) { border-top: 1px solid var(--border); }
+      .stat-cell:nth-child(4) { border-right: none; }
+    }
+    @media (max-width: 480px) {
+      .stats-grid { grid-template-columns: 1fr; }
+      .stat-cell { border-right: none; border-bottom: 1px solid var(--border); }
+    }
+
+    /* ── SECTION HEADER ── */
+    .section-header {
+      margin-bottom: 3.5rem;
+    }
+    .section-header-row {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+    .section-num {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+      display: block;
+      margin-bottom: 0.75rem;
+    }
+
+    /* ── FEATURES ── */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      background: var(--border);
+    }
+    .feature-card {
+      background: var(--bg);
+      padding: 2rem;
+      position: relative;
+      transition: background var(--duration) var(--ease);
+    }
+    .feature-card:hover { background: var(--surface); }
+
+    .feature-icon {
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border-visible);
+      border-radius: var(--r-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1.25rem;
+    }
+    .feature-icon svg {
+      width: 16px;
+      height: 16px;
+      stroke: var(--text-secondary);
+      fill: none;
+      stroke-width: 1.5;
+    }
+    .feature-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-display);
+      margin-bottom: 0.5rem;
+      line-height: 1.3;
+    }
+    .feature-desc {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.65;
+    }
+    .feature-tag {
+      position: absolute;
+      top: 1.25rem;
+      right: 1.25rem;
+    }
+
+    @media (max-width: 900px) { .features-grid { grid-template-columns: repeat(2,1fr); } }
+    @media (max-width: 560px) { .features-grid { grid-template-columns: 1fr; } }
+
+    /* ── ARCHITECTURE ── */
+    .arch-layers {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .arch-layer {
+      display: grid;
+      grid-template-columns: 80px 1fr auto;
+      gap: 1.5rem;
+      padding: 1.5rem 2rem;
+      align-items: start;
+      border-bottom: 1px solid var(--border);
+      transition: background var(--duration) var(--ease);
+    }
+    .arch-layer:last-child { border-bottom: none; }
+    .arch-layer:hover { background: var(--surface); }
+
+    .arch-layer-num {
+      font-family: var(--font-display);
+      font-size: 2.5rem;
+      font-weight: 900;
+      color: var(--text-tertiary);
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .arch-layer-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-display);
+      margin-bottom: 0.3rem;
+    }
+    .arch-layer-desc {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+    .arch-layer-tags {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      align-items: flex-end;
+      padding-top: 0.1rem;
+    }
+
+    @media (max-width: 640px) {
+      .arch-layer { grid-template-columns: 50px 1fr; }
+      .arch-layer-tags { display: none; }
+      .arch-layer-num { font-size: 1.8rem; }
+    }
+
+    /* ── BENTO ── */
+    .bento-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      grid-template-rows: auto;
+      grid-auto-flow: dense;
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .bento-cell {
+      background: var(--bg);
+      padding: 2rem;
+      transition: background var(--duration) var(--ease);
+    }
+    .bento-cell:hover { background: var(--surface); }
+    .bento-a { grid-column: span 7; }
+    .bento-b { grid-column: span 5; }
+    .bento-c { grid-column: span 4; }
+    .bento-d { grid-column: span 4; }
+    .bento-e { grid-column: span 4; }
+    .bento-f { grid-column: span 5; }
+    .bento-g { grid-column: span 7; }
+
+    .bento-num {
+      font-family: var(--font-display);
+      font-size: clamp(3rem, 5vw, 5rem);
+      font-weight: 900;
+      color: var(--text-display);
+      line-height: 1;
+      margin-bottom: 0.75rem;
+      letter-spacing: -0.02em;
+    }
+    .bento-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-display);
+      margin-bottom: 0.4rem;
+    }
+    .bento-desc {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .bento-code-block {
+      background: var(--surface);
+      border: 1px solid var(--border-visible);
+      border-radius: 0;
+      padding: 1rem;
+      margin-top: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      overflow-x: auto;
+    }
+    .bento-code-block .k { color: var(--text-tertiary); }
+    .bento-code-block .v { color: var(--text-primary); }
+    .bento-code-block .s { color: var(--text-secondary); }
+
+    @media (max-width: 900px) {
+      .bento-a,.bento-b,.bento-c,.bento-d,.bento-e,.bento-f,.bento-g {
+        grid-column: span 12;
+      }
+    }
+
+    /* ── USE CASES ── */
+    .use-tabs {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border-visible);
+      margin-bottom: 2.5rem;
+      overflow-x: auto;
+    }
+    .use-tab {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+      padding: 0.875rem 1.75rem;
+      white-space: nowrap;
+      transition: color var(--duration) var(--ease), background var(--duration) var(--ease);
+      cursor: pointer;
+      border-right: 1px solid var(--border);
+    }
+    .use-tab:last-child { border-right: none; }
+    .use-tab:hover { color: var(--text-primary); background: var(--surface); }
+    .use-tab.active {
+      color: #000;
+      background: var(--coral);
+    }
+
+    .use-panel { display: none; }
+    .use-panel.active { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+
+    .use-content {}
+    .use-title {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--text-display);
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+      margin-bottom: 1rem;
+    }
+    .use-desc {
+      font-size: 0.95rem;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      margin-bottom: 1.5rem;
+    }
+    .use-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .use-list li {
+      display: flex;
+      gap: 0.75rem;
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+    .use-list li::before {
+      content: '—';
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+    }
+
+    .use-terminal {
+      background: var(--surface);
+      border: 1px solid var(--border-visible);
+      border-radius: 0;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-secondary);
+      line-height: 1.8;
+    }
+    .use-terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .term-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--border-visible);
+    }
+    .term-title {
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+      margin-left: 0.25rem;
+    }
+    .use-terminal-body {
+      padding: 1.25rem;
+      min-height: 220px;
+    }
+    .term-line { display: flex; gap: 0.5rem; }
+    .term-prompt { color: var(--text-tertiary); }
+    .term-cmd { color: var(--text-primary); }
+    .term-out { color: var(--text-secondary); padding-left: 0.75rem; }
+    .term-ok { color: var(--text-tertiary); }
+    .term-blink::after {
+      content: '_';
+      animation: blink 1.2s step-end infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+    @media (max-width: 768px) {
+      .use-panel.active { grid-template-columns: 1fr; }
+      .use-terminal { display: none; }
+    }
+
+    /* ── HOW IT WORKS ── */
+    .steps-grid {
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .step-cell {
+      background: var(--bg);
+      padding: 2.5rem 2rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .step-num {
+      font-family: var(--font-display);
+      font-size: 5rem;
+      font-weight: 900;
+      color: var(--surface-raised);
+      line-height: 1;
+      position: absolute;
+      top: 1rem;
+      right: 1.5rem;
+      letter-spacing: -0.04em;
+    }
+    .step-label { margin-bottom: 1.25rem; }
+    .step-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-display);
+      margin-bottom: 0.6rem;
+      line-height: 1.3;
+    }
+    .step-desc {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.65;
+    }
+
+    @media (max-width: 768px) { .steps-grid { grid-template-columns: 1fr; } }
+
+    /* ── DEPLOY OPTIONS ── */
+    .deploy-grid {
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 1.5rem;
+    }
+    .deploy-card {
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 2rem;
+      transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
+      cursor: default;
+    }
+    .deploy-card:hover { border-color: var(--border-visible); background: var(--surface); }
+    .deploy-card.featured { border-color: var(--border-strong); background: var(--surface); }
+
+    .deploy-badge {
+      display: inline-flex;
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      border: 1px solid rgba(215,25,33,0.25);
+      border-radius: var(--r-sm);
+      padding: 0.15rem 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .deploy-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-display);
+      margin-bottom: 0.5rem;
+    }
+    .deploy-desc {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.65;
+      margin-bottom: 1.5rem;
+    }
+    .deploy-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .deploy-list li {
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      display: flex;
+      gap: 0.6rem;
+    }
+    .deploy-list li::before {
+      content: '>';
+      color: var(--text-tertiary);
+    }
+
+    @media (max-width: 768px) { .deploy-grid { grid-template-columns: 1fr; } }
+
+    /* ── TOOLS ── */
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .tool-category {
+      padding: 1.75rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .tool-category:nth-child(3n) { border-right: none; }
+    .tool-category:nth-last-child(-n+3) { border-bottom: none; }
+
+    .tool-cat-label { margin-bottom: 1rem; }
+    .tool-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .tool-item {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+      border-radius: 0;
+      padding: 0.3rem 0.6rem;
+      transition: border-color var(--duration) var(--ease), color var(--duration) var(--ease), background var(--duration) var(--ease);
+    }
+    .tool-item:hover { border-color: var(--border-strong); color: var(--text-primary); background: var(--surface); }
+
+    @media (max-width: 900px) {
+      .tools-grid { grid-template-columns: repeat(2,1fr); }
+      .tool-category:nth-child(3n) { border-right: 1px solid var(--border); }
+      .tool-category:nth-child(2n) { border-right: none; }
+      .tool-category:nth-last-child(-n+2) { border-bottom: none; }
+      .tool-category:nth-last-child(3) { border-bottom: 1px solid var(--border); }
+    }
+    @media (max-width: 560px) { .tools-grid { grid-template-columns: 1fr; } }
+
+    /* ── OBSERVABILITY — card grid ── */
+    .obs-frame { position: relative; }
+
+    /* Crosshair corner marks (observability frame only) */
+    .obs-mark {
+      position: absolute;
+      width: 10px; height: 10px;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .obs-mark::before, .obs-mark::after {
+      content: '';
+      position: absolute;
+      background: var(--text-tertiary);
+    }
+    .obs-mark::before { width: 100%; height: 1px; top: 50%; transform: translateY(-50%); left: 0; }
+    .obs-mark::after  { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); top: 0; }
+    .obs-mark.tl  { top: -5px;  left: -5px; }
+    .obs-mark.tr  { top: -5px;  right: -5px; }
+    .obs-mark.bl  { bottom: -5px; left: -5px; }
+    .obs-mark.br  { bottom: -5px; right: -5px; }
+    .obs-mark.tc1 { top: -5px;  left: calc(33.333% - 5px); }
+    .obs-mark.tc2 { top: -5px;  left: calc(66.666% - 5px); }
+    .obs-mark.bc1 { bottom: -5px; left: calc(33.333% - 5px); }
+    .obs-mark.bc2 { bottom: -5px; left: calc(66.666% - 5px); }
+
+    .obs-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--border-visible);
+    }
+    .obs-card {
+      padding: 2rem 1.75rem 2.25rem;
+      border-right: 1px solid var(--border-visible);
+    }
+    .obs-card:last-child { border-right: none; }
+
+    .obs-card-index {
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-tertiary);
+      margin-bottom: 1.5rem;
+    }
+
+    /* Mini bar chart */
+    .obs-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 48px;
+      margin-bottom: 1.5rem;
+    }
+    .obs-bar {
+      flex: 1;
+      background: var(--border-visible);
+      min-height: 3px;
+      transition: background 0.2s;
+    }
+    .obs-bar.hi { background: rgba(255,255,255,0.2); }
+    .obs-bar.active { background: var(--coral); }
+
+    /* 30-day uptime grid */
+    .obs-uptime-grid {
+      display: grid;
+      grid-template-columns: repeat(15, 1fr);
+      gap: 3px;
+      height: 48px;
+      margin-bottom: 1.5rem;
+    }
+    .obs-uptime-block { background: rgba(61,153,112,0.5); }
+    .obs-uptime-block.ok { background: rgba(61,153,112,0.5); }
+    .obs-uptime-block.miss { background: var(--border-visible); }
+
+    /* Signal sparkline SVG */
+    .obs-sparkline {
+      height: 48px;
+      margin-bottom: 1.5rem;
+    }
+    .obs-sparkline svg { width: 100%; height: 100%; overflow: visible; }
+
+    .obs-value {
+      font-family: var(--font-display);
+      font-size: clamp(2.8rem, 4vw, 4rem);
+      font-weight: 900;
+      color: var(--text-display);
+      line-height: 1;
+      display: block;
+      margin-bottom: 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    .obs-unit {
+      font-size: 0.45em;
+      color: var(--text-secondary);
+      font-weight: 400;
+      vertical-align: baseline;
+    }
+    .obs-label {
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+      margin-bottom: 0.75rem;
+      display: block;
+    }
+    .obs-desc {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+
+    /* Secondary strip */
+    .obs-secondary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border: 1px solid var(--border-visible);
+      border-top: none;
+    }
+    .obs-sec-item {
+      padding: 1.1rem 1.75rem;
+      border-right: 1px solid var(--border-visible);
+      display: flex;
+      align-items: baseline;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .obs-sec-item:last-child { border-right: none; }
+    .obs-sec-value {
+      font-family: var(--font-display);
+      font-size: 1.3rem;
+      font-weight: 900;
+      color: var(--text-display);
+      line-height: 1;
+    }
+    .obs-sec-label {
+      font-family: var(--font-mono);
+      font-size: 0.56rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-tertiary);
+    }
+
+    @media (max-width: 768px) {
+      .obs-grid { grid-template-columns: 1fr; }
+      .obs-card { border-right: none; border-bottom: 1px solid var(--border-visible); }
+      .obs-card:last-child { border-bottom: none; }
+      .obs-secondary { grid-template-columns: repeat(2, 1fr); }
+      .obs-mark.tc1, .obs-mark.tc2, .obs-mark.bc1, .obs-mark.bc2 { display: none; }
+    }
+
+    /* ── WHY HSM-II ── */
+    .quotes-grid {
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 1.5rem;
+    }
+    .quote-card {
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 2rem;
+      transition: border-color var(--duration) var(--ease);
+    }
+    .quote-card:hover { border-color: var(--border-visible); }
+
+    .quote-text {
+      font-size: 0.95rem;
+      color: var(--text-primary);
+      line-height: 1.7;
+      margin-bottom: 1.5rem;
+      position: relative;
+    }
+    .quote-text::before {
+      content: '"';
+      font-family: var(--font-display);
+      font-size: 3rem;
+      font-weight: 900;
+      color: var(--text-tertiary);
+      line-height: 0;
+      display: block;
+      margin-bottom: 1rem;
+      padding-top: 1.2rem;
+    }
+
+    .quote-author {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .quote-avatar {
+      width: 32px;
+      height: 32px;
+      border: 1px solid var(--border-visible);
+      border-radius: 50%;
+      background: var(--surface-raised);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+    .quote-name {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-display);
+      display: block;
+    }
+    .quote-role {
+      font-size: 0.72rem;
+      color: var(--text-tertiary);
+    }
+
+    @media (max-width: 900px) { .quotes-grid { grid-template-columns: 1fr; } }
+
+    /* ── COMPARISON TABLE ── */
+    .compare-wrap {
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    .compare-table th {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-weight: 400;
+      color: var(--text-tertiary);
+      padding: 1rem 1.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-visible);
+      background: var(--surface);
+    }
+    .compare-table th.col-hsm {
+      color: var(--text-display);
+    }
+    .compare-table td {
+      padding: 0.875rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-secondary);
+      vertical-align: middle;
+    }
+    .compare-table tr:last-child td { border-bottom: none; }
+    .compare-table tr:hover td { background: var(--surface); }
+    .compare-table .col-feature {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+    .compare-table .col-hsm {
+      color: var(--text-display);
+      font-weight: 500;
+    }
+
+    .check { color: var(--text-display); }
+    .cross { color: var(--text-tertiary); }
+    .partial { color: var(--text-secondary); }
+
+    @media (max-width: 768px) {
+      .compare-table th:nth-child(3),
+      .compare-table td:nth-child(3),
+      .compare-table th:nth-child(4),
+      .compare-table td:nth-child(4) { display: none; }
+    }
+
+    /* ── CTA BANNER — editorial dark ── */
+    #cta {
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+    }
+    .cta-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2.5rem;
+      padding: 7rem 0 6rem;
+    }
+    .cta-label {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .cta-label::before {
+      content: '';
+      display: inline-block;
+      width: 24px;
+      height: 1px;
+      background: var(--text-tertiary);
+    }
+    .cta-title {
+      font-size: clamp(3rem, 7vw, 7rem);
+      font-weight: 700;
+      line-height: 0.95;
+      letter-spacing: -0.04em;
+      color: var(--text-display);
+      max-width: 900px;
+    }
+    .cta-actions {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .cta-actions .btn-primary {
+      background: var(--coral) !important;
+      color: #000 !important;
+      font-size: 0.65rem;
+      padding: 0.85rem 2rem;
+    }
+    .cta-actions .btn-outline {
+      font-size: 0.65rem;
+      padding: 0.85rem 2rem;
+    }
+
+    /* ── FOOTER — coral surface ── */
+    footer {
+      padding: 0;
+      background: var(--coral);
+    }
+    .footer-top {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1fr 1fr;
+      gap: 3rem;
+      padding: 4rem 0 3rem;
+      border-bottom: 1px solid rgba(0,0,0,0.15);
+      margin-bottom: 0;
+    }
+    .footer-brand {}
+    .footer-logo {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #000;
+      display: block;
+      margin-bottom: 1rem;
+    }
+    .footer-tagline {
+      font-size: 0.8rem;
+      color: rgba(0,0,0,0.6);
+      line-height: 1.6;
+      max-width: 260px;
+    }
+    .footer-col-title {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: rgba(0,0,0,0.5);
+      margin-bottom: 1.25rem;
+      display: block;
+    }
+    .footer-links {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .footer-links a {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: rgba(0,0,0,0.75);
+      transition: color var(--duration) var(--ease);
+    }
+    .footer-links a:hover { color: #000; }
+
+    .footer-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      padding: 1.5rem 0;
+    }
+    .footer-copy {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(0,0,0,0.45);
+    }
+    .footer-meta {
+      display: flex;
+      gap: 1.5rem;
+    }
+    .footer-meta a {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(0,0,0,0.45);
+      transition: color var(--duration) var(--ease);
+    }
+    .footer-meta a:hover { color: #000; }
+
+    @media (max-width: 900px) {
+      .footer-top { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 560px) {
+      .footer-top { grid-template-columns: 1fr; gap: 2rem; }
+    }
+
+    /* ── SCROLL TO TOP ── */
+    #scroll-top {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      width: 40px;
+      height: 40px;
+      background: var(--surface);
+      border: 1px solid var(--border-visible);
+      border-radius: var(--r-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--duration) var(--ease), background var(--duration) var(--ease);
+      z-index: 50;
+    }
+    #scroll-top.visible { opacity: 1; pointer-events: auto; }
+    #scroll-top:hover { background: var(--surface-raised); }
+    #scroll-top svg { width: 14px; height: 14px; stroke: var(--text-secondary); fill: none; stroke-width: 2; }
+
+    /* ── COPY BUTTON ── */
+    .copy-btn {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 0.2rem 0.5rem;
+      transition: all var(--duration) var(--ease);
+    }
+    .copy-btn:hover { color: var(--text-secondary); border-color: var(--border-visible); }
+
+    /* ── SCROLL REVEAL — with blur lift ── */
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      filter: blur(4px);
+      transition: opacity 0.5s var(--ease-out), transform 0.5s var(--ease-out), filter 0.5s var(--ease-out);
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+      filter: blur(0);
+    }
+    .reveal-delay-1 { transition-delay: 0.07s; }
+    .reveal-delay-2 { transition-delay: 0.14s; }
+    .reveal-delay-3 { transition-delay: 0.21s; }
+    .reveal-delay-4 { transition-delay: 0.28s; }
+    .reveal-delay-5 { transition-delay: 0.35s; }
+    .reveal-delay-6 { transition-delay: 0.42s; }
+
+    /* ── SEGMENTED BAR ── */
+    .seg-bar {
+      display: flex;
+      gap: 2px;
+      margin-top: 0.5rem;
+    }
+    .seg-bar-fill {
+      height: 3px;
+      border-radius: 1px;
+      background: var(--text-display);
+      flex: 1;
+    }
+    .seg-bar-empty {
+      height: 3px;
+      border-radius: 1px;
+      background: var(--surface-raised);
+      flex: 1;
+    }
+
+    /* ── STATUS DOT ── */
+    .status-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+      margin-right: 0.4rem;
+    }
+    .status-dot.live {
+      background: #3d9970;
+      animation: pulse-live 2.4s ease-in-out infinite;
+      box-shadow: 0 0 0 0 rgba(61,153,112,0.5);
+    }
+    @keyframes pulse-live {
+      0%  { opacity: 1; box-shadow: 0 0 0 0 rgba(61,153,112,0.5); }
+      60% { opacity: 0.5; box-shadow: 0 0 0 5px rgba(61,153,112,0); }
+      100%{ opacity: 1; box-shadow: 0 0 0 0 rgba(61,153,112,0); }
+    }
+
+    /* ── ARCH LAYER — scan accent ── */
+    .arch-layer {
+      position: relative;
+    }
+    .arch-layer::after {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 2px;
+      background: var(--accent);
+      transform: scaleY(0);
+      transform-origin: bottom;
+      transition: transform 0.2s var(--ease-out);
+    }
+    .arch-layer:hover::after { transform: scaleY(1); }
+
+    /* ── CODE SNIPPET ── */
+    .code-snippet {
+      background: var(--surface);
+      border: 1px solid var(--border-visible);
+      border-radius: 0;
+      overflow: hidden;
+      font-family: var(--font-mono);
+    }
+    .code-snippet-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .code-snippet-body {
+      padding: 1.25rem;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      line-height: 1.8;
+      overflow-x: auto;
+    }
+    .code-comment { color: var(--text-tertiary); }
+    .code-key { color: var(--text-primary); }
+    .code-val { color: var(--text-secondary); }
+    .code-fn { color: var(--text-primary); }
+
+  </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🔄 HSM-II</h1>
-            <p class="subtitle">Hyper-Stigmergic Morphogenesis II — A self-organizing multi-agent system with stigmergic coordination</p>
-            <div class="badges">
-                <span class="badge">Rust</span>
-                <span class="badge">Multi-Agent</span>
-                <span class="badge">AI</span>
-                <span class="badge">Stigmergy</span>
-            </div>
-            <div class="btn-group">
-                <a href="https://github.com/PermutationResearch/hyper-stigmergy" class="btn">View on GitHub</a>
-                <a href="viz/" class="btn btn-outline">Live Visualization</a>
-                <a href="static/chat.html" class="btn btn-outline">Web Chat</a>
-            </div>
-        </header>
-        
-        <section class="features">
-            <h2>🚀 Key Features</h2>
-            <div class="feature-grid">
-                <div class="feature-card">
-                    <h3>🧠 Hypergraph Engine</h3>
-                    <p>Stigmergic morphogenesis through environmental markers. Agents coordinate indirectly via a shared hypergraph state.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>⚖️ Council System</h3>
-                    <p>Multi-agent debate with evidence-based voting, mode switching between simple/orchestrate/debate modes.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>🎓 CASS</h3>
-                    <p>Continuous Automated Skill Synthesis — learn from interactions and distill reusable skills.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>🛠️ 57 Real Tools</h3>
-                    <p>Web search, browser automation, Git operations, shell commands, file operations, and more.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>🤖 Multi-Provider LLM</h3>
-                    <p>Support for OpenAI, Anthropic, and Ollama with automatic failover between providers.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>🌐 Federation</h3>
-                    <p>Distributed multi-node coordination with conflict resolution and trust management.</p>
-                </div>
-            </div>
-        </section>
-        
-        <section class="architecture">
-            <h2>🏗️ Architecture</h2>
-            <p>Self-organizing agents coordinate through a shared stigmergic field</p>
-            <div class="arch-diagram">
-╔═════════════════════════════════════════════════════════════════╗
-║                      HSM-II SYSTEM                              ║
-╠═════════════════════════════════════════════════════════════════╣
-║                                                                 ║
-║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          ║
-║  │   AGENTS     │  │   COUNCIL    │  │     CASS     │          ║
-║  │              │  │              │  │   (Skills)   │          ║
-║  │  • Roles     │  │  • Debate    │  │              │          ║
-║  │  • Drives    │  │  • Vote      │  │  • Learning  │          ║
-║  │  • Coherence │  │  • Evidence  │  │  • Distill   │          ║
-║  └──────────────┘  └──────────────┘  └──────────────┘          ║
-║         │                 │                 │                   ║
-║         └─────────────────┼─────────────────┘                   ║
-║                           ▼                                     ║
-║              ┌────────────────────────┐                         ║
-║              │    STIGMERGIC FIELD    │                         ║
-║              │   (Hypergraph State)   │                         ║
-║              └────────────────────────┘                         ║
-║                           │                                     ║
-║         ┌─────────────────┼─────────────────┐                   ║
-║         ▼                 ▼                 ▼                   ║
-║  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          ║
-║  │     DKS      │  │    SOCIAL    │  │  FEDERATION  │          ║
-║  │  (Distributed│  │    MEMORY    │  │  (Multi-Node)│          ║
-║  │   Knowledge) │  │              │  │              │          ║
-║  │              │  │  • Promises  │  │  • Trust     │          ║
-║  │  • Selection │  │  • Reputation│  │  • Conflict  │          ║
-║  │  • Flux      │  │  • Evidence  │  │  • Sync      │          ║
-║  └──────────────┘  └──────────────┘  └──────────────┘          ║
-║                                                                 ║
-╚═════════════════════════════════════════════════════════════════╝
-            </div>
-        </section>
-        
-        <section class="features">
-            <h2>📚 Documentation</h2>
-            <div class="feature-grid">
-                <div class="feature-card">
-                    <h3>🚀 Getting Started</h3>
-                    <p><a href="https://github.com/PermutationResearch/HSM-II/blob/main/docs/guides/EASY_START.md">EASY_START.md</a> — Quick start guide for running the personal agent.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>🐳 Deployment</h3>
-                    <p><a href="https://github.com/PermutationResearch/HSM-II/blob/main/docs/guides/DEPLOYMENT.md">DEPLOYMENT.md</a> — Production deployment with Docker.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>📖 Architecture</h3>
-                    <p><a href="https://github.com/PermutationResearch/HSM-II/blob/main/docs/architecture/ANTIFRAGILE_ARCHITECTURE.md">Architecture docs</a> — Deep dive into the system design.</p>
-                </div>
-            </div>
-        </section>
-        
-        <footer>
-            <p>Built with ❤️ by <a href="https://github.com/PermutationResearch">Permutation Research</a></p>
-            <p>Licensed under MIT — <a href="https://github.com/PermutationResearch/hyper-stigmergy">View on GitHub</a></p>
-        </footer>
+
+<!-- ── NAV ── -->
+<nav id="nav">
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">HSM<span>-</span>II</a>
+    <ul class="nav-links">
+      <li><a href="#protocol">Protocol</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#deploy">Deploy</a></li>
+      <li><a href="#tools">Tooling</a></li>
+      <li><a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" target="_blank" rel="noopener">Github</a></li>
+    </ul>
+    <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-ghost nav-cta" target="_blank" rel="noopener">Get Started</a>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<section id="hero">
+  <canvas id="hero-canvas"></canvas>
+  <div class="hero-dot-grid"></div>
+
+  <!-- Giant background wordmark -->
+  <div class="hero-wordmark">HSM·II</div>
+
+  <div class="hero-content container">
+    <div class="hero-pre">
+      <span class="hero-pre-line"></span>
+      <span class="t-label" style="font-family:var(--font-mono);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.12em;color:rgba(0,0,0,0.55)"><span class="status-dot live"></span>Open Protocol &mdash; v0.9.4-beta</span>
     </div>
+    <h1 class="hero-headline">
+      Collective<br>
+      intelligence<br>
+      <em>for AI agents</em>
+    </h1>
+    <p class="hero-sub">
+      A federated multi-agent hypergraph system. Swarms of LLM-powered agents that think together, learn from each other, and grow smarter over time. Built in Rust.
+    </p>
+    <div class="hero-actions">
+      <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-primary" target="_blank" rel="noopener">Read the Docs</a>
+      <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-ghost" target="_blank" rel="noopener">View on Github</a>
+    </div>
+  </div>
+
+  <!-- Hero metadata strip pinned at bottom -->
+  <div class="hero-meta-strip container">
+    <div class="hero-meta-strip-item">
+      <span class="hero-meta-num t-doto" data-target="1000" data-suffix="+">000+</span>
+      <span class="hero-meta-label">Concurrent agents</span>
+    </div>
+    <span class="hero-meta-divider">/</span>
+    <div class="hero-meta-strip-item">
+      <span class="hero-meta-num t-doto" data-target="12" data-suffix="ms">&lt;12ms</span>
+      <span class="hero-meta-label">Pheromone propagation</span>
+    </div>
+    <span class="hero-meta-divider">/</span>
+    <div class="hero-meta-strip-item">
+      <span class="hero-meta-num t-doto" data-target="99.9" data-suffix="%">00.0%</span>
+      <span class="hero-meta-label">Uptime SLA</span>
+    </div>
+    <span class="hero-meta-divider">/</span>
+    <div class="hero-meta-strip-item">
+      <span class="hero-meta-num" style="font-family:var(--font-mono);font-size:1.4rem;font-weight:700;color:#000">Rust</span>
+      <span class="hero-meta-label">Language</span>
+    </div>
+  </div>
+</section>
+
+<!-- ── TECH STRIP ── -->
+<div class="ticker-wrap">
+  <div class="ticker-track">
+    <span class="ticker-item">Ollama</span>
+    <span class="ticker-item">OpenAI</span>
+    <span class="ticker-item">Anthropic</span>
+    <span class="ticker-item">LangChain</span>
+    <span class="ticker-item">Docker</span>
+    <span class="ticker-item">Kubernetes</span>
+    <span class="ticker-item">Rust</span>
+    <span class="ticker-item">WASM</span>
+    <span class="ticker-item">Redis</span>
+    <span class="ticker-item">Prometheus</span>
+    <span class="ticker-item">Grafana</span>
+    <span class="ticker-item">OpenTelemetry</span>
+    <span class="ticker-item">Hypergraph Protocol</span>
+    <span class="ticker-item">MCP Server</span>
+    <span class="ticker-item">Tool Use API</span>
+    <span class="ticker-item">Ollama</span>
+    <span class="ticker-item">OpenAI</span>
+    <span class="ticker-item">Anthropic</span>
+    <span class="ticker-item">LangChain</span>
+    <span class="ticker-item">Docker</span>
+    <span class="ticker-item">Kubernetes</span>
+    <span class="ticker-item">Rust</span>
+    <span class="ticker-item">WASM</span>
+    <span class="ticker-item">Redis</span>
+    <span class="ticker-item">Prometheus</span>
+    <span class="ticker-item">Grafana</span>
+    <span class="ticker-item">OpenTelemetry</span>
+    <span class="ticker-item">Hypergraph Protocol</span>
+    <span class="ticker-item">MCP Server</span>
+    <span class="ticker-item">Tool Use API</span>
+  </div>
+</div>
+
+<!-- ── STATS ── -->
+<section id="stats">
+  <div class="container stats-grid">
+    <div class="stat-cell reveal">
+      <span class="stat-number">
+        <span class="t-doto" data-target="1000" data-suffix="+">1000+</span>
+      </span>
+      <div class="t-label stat-label">Concurrent Agents</div>
+      <p class="stat-desc">Per node, horizontally scalable across federated clusters</p>
+      <div class="seg-bar" aria-hidden="true">
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-empty"></div>
+      </div>
+    </div>
+    <div class="stat-cell reveal reveal-delay-1">
+      <span class="stat-number">
+        <span class="t-doto" data-target="12" data-suffix="ms">&lt;12ms</span>
+      </span>
+      <div class="t-label stat-label">Propagation Latency</div>
+      <p class="stat-desc">Pheromone signal spread across the full hypergraph</p>
+      <div class="seg-bar" aria-hidden="true">
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+      </div>
+    </div>
+    <div class="stat-cell reveal reveal-delay-2">
+      <span class="stat-number">
+        <span class="t-doto" data-target="5" data-suffix="">L1&ndash;L5</span>
+      </span>
+      <div class="t-label stat-label">Protocol Layers</div>
+      <p class="stat-desc">Cognitive through federation, full-stack architecture</p>
+      <div class="seg-bar" aria-hidden="true">
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-empty"></div>
+        <div class="seg-bar-empty"></div>
+      </div>
+    </div>
+    <div class="stat-cell reveal reveal-delay-3">
+      <span class="stat-number">
+        <span class="t-doto" data-target="100" data-suffix="%">100%</span>
+      </span>
+      <div class="t-label stat-label">Open Source</div>
+      <p class="stat-desc">MIT licensed, community-driven, no vendor lock-in</p>
+      <div class="seg-bar" aria-hidden="true">
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+        <div class="seg-bar-fill"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ── -->
+<section id="protocol" class="section">
+  <div class="container">
+
+    <div class="meta-strip">
+      <span class="meta-strip-label">/ Protocol</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-num">/001</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-kw">Architecture /</span>
+    </div>
+
+    <div class="section-header reveal">
+      <div class="section-header-row">
+        <h2 class="t-h1">Built different,<br>by design</h2>
+        <p class="t-body-lg" style="max-width:380px">Everything emerges from a core set of primitive operations — no orchestration framework required.</p>
+      </div>
+    </div>
+
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Core</span></div>
+        <h3 class="feature-title">Pheromone Signaling</h3>
+        <p class="feature-desc">Agents deposit and read stigmergic signals on the hypergraph, creating emergent coordination without central orchestration.</p>
+      </div>
+
+      <div class="feature-card reveal reveal-delay-1">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Core</span></div>
+        <h3 class="feature-title">Hypergraph Memory</h3>
+        <p class="feature-desc">Knowledge encoded in typed hyperedges allows n-ary relationships that flat graphs cannot represent. Context persists across agent lifecycles.</p>
+      </div>
+
+      <div class="feature-card reveal reveal-delay-2">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Protocol</span></div>
+        <h3 class="feature-title">Council Consensus</h3>
+        <p class="feature-desc">Disagreements resolved through structured multi-agent deliberation. Minority positions are preserved, not discarded, for future evaluation.</p>
+      </div>
+
+      <div class="feature-card reveal reveal-delay-3">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Runtime</span></div>
+        <h3 class="feature-title">Dynamic Skill Trees</h3>
+        <p class="feature-desc">Agents discover and load skills at runtime from the shared hypergraph. No restart required. Capability spreads laterally across the swarm.</p>
+      </div>
+
+      <div class="feature-card reveal reveal-delay-4">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Network</span></div>
+        <h3 class="feature-title">Federated Clusters</h3>
+        <p class="feature-desc">Multiple HSM-II nodes federate via the L5 protocol. Knowledge and agents migrate between clusters with cryptographic identity guarantees.</p>
+      </div>
+
+      <div class="feature-card reveal reveal-delay-5">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        </div>
+        <div class="feature-tag"><span class="ascii-tag">Ops</span></div>
+        <h3 class="feature-title">Full Observability</h3>
+        <p class="feature-desc">Every agent decision, pheromone trail, and council vote is traced. OpenTelemetry export, Prometheus metrics, structured JSON logs.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── ARCHITECTURE ── -->
+<section id="architecture" class="section" style="padding-top:0">
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-header-row">
+        <h2 class="t-h1">Five-layer<br>protocol stack</h2>
+        <p class="t-body-lg" style="max-width:380px">Separation of concerns from individual cognition through federated network coordination.</p>
+      </div>
+    </div>
+
+    <div class="arch-layers reveal">
+      <div class="arch-layer">
+        <span class="arch-layer-num">L1</span>
+        <div>
+          <div class="arch-layer-title">Cognitive Layer</div>
+          <p class="arch-layer-desc">Individual agent reasoning, LLM inference, tool dispatch, and local memory management. Each agent is a stateful process with a private working memory.</p>
+        </div>
+        <div class="arch-layer-tags">
+          <span class="tag">LLM Runtime</span>
+          <span class="tag">Tool Use</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <span class="arch-layer-num">L2</span>
+        <div>
+          <div class="arch-layer-title">Stigmergic Layer</div>
+          <p class="arch-layer-desc">Pheromone deposition and evaporation on the shared hypergraph. Encodes collective intent without explicit messaging between agents.</p>
+        </div>
+        <div class="arch-layer-tags">
+          <span class="tag">Pheromones</span>
+          <span class="tag">Signals</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <span class="arch-layer-num">L3</span>
+        <div>
+          <div class="arch-layer-title">Hypergraph Layer</div>
+          <p class="arch-layer-desc">Persistent shared knowledge base using typed n-ary hyperedges. Versioned, addressable, and queryable by all agents in the swarm.</p>
+        </div>
+        <div class="arch-layer-tags">
+          <span class="tag">Knowledge</span>
+          <span class="tag">Memory</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <span class="arch-layer-num">L4</span>
+        <div>
+          <div class="arch-layer-title">Council Layer</div>
+          <p class="arch-layer-desc">Structured deliberation protocol for multi-agent consensus. Handles conflict resolution, skill arbitration, and collective decision-making.</p>
+        </div>
+        <div class="arch-layer-tags">
+          <span class="tag">Consensus</span>
+          <span class="tag">Voting</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <span class="arch-layer-num">L5</span>
+        <div>
+          <div class="arch-layer-title">Federation Layer</div>
+          <p class="arch-layer-desc">Cross-cluster synchronization, agent migration, and knowledge exchange between independent HSM-II instances over the open federation protocol.</p>
+        </div>
+        <div class="arch-layer-tags">
+          <span class="tag">Network</span>
+          <span class="tag">Sync</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── BENTO ── -->
+<section class="section-sm">
+  <div class="container">
+
+    <div class="meta-strip">
+      <span class="meta-strip-label">/ Capabilities</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-num">/002</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-kw">Features /</span>
+    </div>
+
+    <div class="bento-grid reveal">
+
+      <div class="bento-cell bento-a">
+        <div class="bento-num">0 → N</div>
+        <div class="bento-title">Horizontal scaling</div>
+        <p class="bento-desc">Start with a single node. Add nodes to the federation at any time. Agents and knowledge migrate automatically. No configuration changes required on existing nodes.</p>
+      </div>
+
+      <div class="bento-cell bento-b" style="display:flex;flex-direction:column;justify-content:space-between">
+        <div>
+          <div class="t-label" style="margin-bottom:0.75rem">Rust-native performance</div>
+          <div class="bento-title">Zero-copy message passing</div>
+          <p class="bento-desc" style="margin-top:0.5rem">Agents pass hyperedge references, not serialized payloads.</p>
+        </div>
+        <div class="bento-code-block">
+<span class="k">let</span> <span class="v">edge</span> = hypergraph<span class="k">.</span>insert(<span class="s">HyperEdge</span> {<br>
+&nbsp;&nbsp;nodes: vec![agent_a, agent_b, ctx],<br>
+&nbsp;&nbsp;weight: <span class="s">0.94</span>,<br>
+&nbsp;&nbsp;kind: <span class="s">EdgeKind::Knowledge</span>,<br>
+});
+        </div>
+      </div>
+
+      <div class="bento-cell bento-c">
+        <div class="bento-num" style="font-size:clamp(2rem,3.5vw,3.2rem)">Adaptive</div>
+        <div class="bento-title">Skill diffusion</div>
+        <p class="bento-desc">New capabilities spread laterally through the swarm without redeployment.</p>
+      </div>
+
+      <div class="bento-cell bento-d">
+        <div class="bento-num" style="font-size:clamp(2rem,3.5vw,3.2rem)">Emergent</div>
+        <div class="bento-title">No orchestrator</div>
+        <p class="bento-desc">Coordination emerges from pheromone gradients — not from a central scheduler.</p>
+      </div>
+
+      <div class="bento-cell bento-e">
+        <div class="bento-num" style="font-size:clamp(2rem,3.5vw,3.2rem)">Open</div>
+        <div class="bento-title">MIT Licensed</div>
+        <p class="bento-desc">Full source, no telemetry, no phone-home. Deploy anywhere.</p>
+      </div>
+
+      <div class="bento-cell bento-f">
+        <div class="t-label" style="margin-bottom:0.75rem">Council Protocol</div>
+        <div class="bento-title">Deliberation, not dictatorship</div>
+        <p class="bento-desc">Minority positions are held in the hypergraph and re-evaluated as context changes. The swarm can change its mind.</p>
+      </div>
+
+      <div class="bento-cell bento-g">
+        <div class="t-label" style="margin-bottom:0.75rem">Observability Stack</div>
+        <div class="bento-title">Every decision is traceable</div>
+        <p class="bento-desc">From individual LLM token sampling through pheromone deposition to council votes — the full causal chain is recorded. Replay any execution deterministically.</p>
+        <div style="display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
+          <span class="tag">OpenTelemetry</span>
+          <span class="tag">Prometheus</span>
+          <span class="tag">Grafana</span>
+          <span class="tag">JSON Logs</span>
+          <span class="tag">Trace Replay</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── USE CASES ── -->
+<section class="section">
+  <div class="container-md">
+
+    <div class="meta-strip">
+      <span class="meta-strip-label">/ Use Cases</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-num">/003</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-kw">Applications /</span>
+    </div>
+
+    <div class="section-header reveal">
+      <h2 class="t-h1">What teams build<br>with HSM-II</h2>
+    </div>
+
+    <div class="use-tabs reveal">
+      <button class="use-tab active" data-tab="0">Research Automation</button>
+      <button class="use-tab" data-tab="1">Code Review Swarm</button>
+      <button class="use-tab" data-tab="2">Data Intelligence</button>
+    </div>
+
+    <div class="use-panel active" data-panel="0">
+      <div class="use-content">
+        <h3 class="use-title">Autonomous research coordination</h3>
+        <p class="use-desc">Distribute literature review, hypothesis generation, and experimental design across a specialized agent swarm. Results aggregate back to the hypergraph with full provenance.</p>
+        <ul class="use-list">
+          <li>Parallel literature search across sources</li>
+          <li>Automatic citation graph construction</li>
+          <li>Contradiction detection via council deliberation</li>
+          <li>Incremental knowledge synthesis</li>
+          <li>Human-in-the-loop checkpoints at L4</li>
+        </ul>
+      </div>
+      <div class="use-terminal">
+        <div class="use-terminal-bar">
+          <div class="term-dot"></div><div class="term-dot"></div><div class="term-dot"></div>
+          <span class="term-title">Research Swarm — 14 agents active</span>
+        </div>
+        <div class="use-terminal-body">
+          <div class="term-line"><span class="term-prompt">$</span><span class="term-cmd">hsmii swarm spawn research --agents 14 --topic "transformer architectures"</span></div>
+          <div class="term-out term-ok">[ OK ] Spawned 14 research agents</div>
+          <div class="term-out">       Hypergraph initialized: 0 nodes</div>
+          <div class="term-out term-ok">[ L2 ] Pheromone trail established</div>
+          <div class="term-out">[ 04s ] Agent 3 deposited 47 nodes</div>
+          <div class="term-out">[ 09s ] Agent 7 formed 12 hyperedges</div>
+          <div class="term-out term-ok">[ L4 ] Council convened: 3 contradictions</div>
+          <div class="term-out">[ 14s ] Consensus: 2 resolved, 1 deferred</div>
+          <div class="term-out term-ok">[ OK ] Report ready: research_output.json<span class="term-blink"></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="use-panel" data-panel="1">
+      <div class="use-content">
+        <h3 class="use-title">Swarm-based code review</h3>
+        <p class="use-desc">Specialized agents review security, performance, style, and correctness in parallel. Findings are deduplicated via the hypergraph and ranked by council consensus.</p>
+        <ul class="use-list">
+          <li>Security agent scans for OWASP patterns</li>
+          <li>Performance agent profiles hot paths</li>
+          <li>Style agent enforces project conventions</li>
+          <li>Correctness agent traces logic flows</li>
+          <li>Unified report with no duplicate findings</li>
+        </ul>
+      </div>
+      <div class="use-terminal">
+        <div class="use-terminal-bar">
+          <div class="term-dot"></div><div class="term-dot"></div><div class="term-dot"></div>
+          <span class="term-title">Code Review Swarm — PR #471</span>
+        </div>
+        <div class="use-terminal-body">
+          <div class="term-line"><span class="term-prompt">$</span><span class="term-cmd">hsmii review --pr 471 --swarm security,perf,style,logic</span></div>
+          <div class="term-out term-ok">[ OK ] 4 specialist agents spawned</div>
+          <div class="term-out">[ 02s ] Security: 2 findings (1 critical)</div>
+          <div class="term-out">[ 03s ] Performance: 3 hotpath candidates</div>
+          <div class="term-out">[ 03s ] Style: 8 minor violations</div>
+          <div class="term-out term-ok">[ L4 ] Deduplication: 13 → 11 unique</div>
+          <div class="term-out term-ok">[ OK ] Review posted to PR<span class="term-blink"></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="use-panel" data-panel="2">
+      <div class="use-content">
+        <h3 class="use-title">Continuous data intelligence</h3>
+        <p class="use-desc">Agents monitor data streams, detect anomalies, and update a shared hypergraph knowledge model. Insights propagate instantly across the swarm via pheromone signals.</p>
+        <ul class="use-list">
+          <li>Real-time stream ingestion at L1</li>
+          <li>Anomaly patterns encoded as hyperedges</li>
+          <li>Swarm-wide alert propagation via L2</li>
+          <li>Automated root-cause hypothesis at L4</li>
+          <li>Incident timeline reconstruction</li>
+        </ul>
+      </div>
+      <div class="use-terminal">
+        <div class="use-terminal-bar">
+          <div class="term-dot"></div><div class="term-dot"></div><div class="term-dot"></div>
+          <span class="term-title">Data Intelligence — Live Monitor</span>
+        </div>
+        <div class="use-terminal-body">
+          <div class="term-line"><span class="term-prompt">$</span><span class="term-cmd">hsmii monitor --stream prod-events --agents 8</span></div>
+          <div class="term-out term-ok">[ OK ] 8 monitor agents active</div>
+          <div class="term-out">       Watching: 3 streams, 420 events/s</div>
+          <div class="term-out">[ 06s ] Anomaly: p99 latency spike detected</div>
+          <div class="term-out term-ok">[ L2 ] Pheromone alert propagated</div>
+          <div class="term-out">[ 07s ] 6/8 agents converged on hypothesis</div>
+          <div class="term-out term-ok">[ L4 ] Root cause: cache eviction storm</div>
+          <div class="term-out term-ok">[ OK ] Incident #2847 filed<span class="term-blink"></span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ── -->
+<section class="section" style="padding-top:0">
+  <div class="container">
+    <div class="section-header reveal">
+      <h2 class="t-h1">From prompt to<br>collective answer</h2>
+    </div>
+
+    <div class="steps-grid reveal">
+      <div class="step-cell">
+        <span class="step-num">1</span>
+        <div class="step-label"><span class="ascii-tag">Spawn</span></div>
+        <h3 class="step-title">Define the task and spawn your swarm</h3>
+        <p class="step-desc">Declare the goal, the agent roles, and the LLM backends. HSM-II spawns agents and initializes a shared hypergraph namespace for this task.</p>
+      </div>
+      <div class="step-cell">
+        <span class="step-num">2</span>
+        <div class="step-label"><span class="ascii-tag">Converge</span></div>
+        <h3 class="step-title">Agents explore, signal, and cross-pollinate</h3>
+        <p class="step-desc">Each agent reasons independently, deposits pheromone signals on the hypergraph, and reads signals from peers. Emergent coordination follows gradient descent over stigmergic fields.</p>
+      </div>
+      <div class="step-cell">
+        <span class="step-num">3</span>
+        <div class="step-label"><span class="ascii-tag">Deliver</span></div>
+        <h3 class="step-title">Council convenes and delivers a verified result</h3>
+        <p class="step-desc">When convergence is detected, the Council layer convenes to resolve any remaining disagreements. The final answer, with full provenance, is written back to the hypergraph.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DEPLOY ── -->
+<section id="deploy" class="section" style="padding-top:0">
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-header-row">
+        <h2 class="t-h1">Run anywhere</h2>
+        <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-ghost btn-tech" target="_blank" rel="noopener">View Docs</a>
+      </div>
+    </div>
+
+    <div class="deploy-grid">
+      <div class="deploy-card reveal">
+        <span class="ascii-tag" style="display:inline-block;margin-bottom:1.25rem">Local</span>
+        <h3 class="deploy-title">Local Development</h3>
+        <p class="deploy-desc">Single binary, no dependencies beyond Ollama. Runs on any machine with 8GB RAM. Ideal for development and experimentation.</p>
+        <ul class="deploy-list">
+          <li>cargo install hsmii</li>
+          <li>hsmii init --local</li>
+          <li>hsmii swarm spawn --agents 4</li>
+        </ul>
+      </div>
+
+      <div class="deploy-card featured reveal reveal-delay-1">
+        <div class="deploy-badge">Recommended</div>
+        <h3 class="deploy-title">Docker Compose</h3>
+        <p class="deploy-desc">Full stack in a single compose file. Includes HSM-II node, Redis, Prometheus, and Grafana. Production-parity in minutes.</p>
+        <ul class="deploy-list">
+          <li>docker compose up -d</li>
+          <li>Grafana at :3000</li>
+          <li>API at :8080</li>
+        </ul>
+      </div>
+
+      <div class="deploy-card reveal reveal-delay-2">
+        <span class="ascii-tag" style="display:inline-block;margin-bottom:1.25rem">Cluster</span>
+        <h3 class="deploy-title">Kubernetes</h3>
+        <p class="deploy-desc">Helm chart with horizontal pod autoscaling. Federate multiple nodes across clusters. Full RBAC, network policies, and PodDisruptionBudgets included.</p>
+        <ul class="deploy-list">
+          <li>helm install hsmii ./chart</li>
+          <li>kubectl apply -f federation.yaml</li>
+          <li>Auto-scaling via KEDA</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── TOOLS ── -->
+<section id="tools" class="section" style="padding-top:0">
+  <div class="container">
+    <div class="section-header reveal">
+      <h2 class="t-h1">Full ecosystem<br>support</h2>
+    </div>
+
+    <div class="tools-grid reveal">
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">LLM Backends</div>
+        <div class="tool-items">
+          <span class="tool-item">Ollama</span>
+          <span class="tool-item">OpenAI</span>
+          <span class="tool-item">Anthropic</span>
+          <span class="tool-item">Gemini</span>
+          <span class="tool-item">Mistral</span>
+          <span class="tool-item">LM Studio</span>
+          <span class="tool-item">vLLM</span>
+        </div>
+      </div>
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">Orchestration</div>
+        <div class="tool-items">
+          <span class="tool-item">Docker</span>
+          <span class="tool-item">Kubernetes</span>
+          <span class="tool-item">Nomad</span>
+          <span class="tool-item">Fly.io</span>
+          <span class="tool-item">Render</span>
+        </div>
+      </div>
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">Observability</div>
+        <div class="tool-items">
+          <span class="tool-item">Prometheus</span>
+          <span class="tool-item">Grafana</span>
+          <span class="tool-item">OpenTelemetry</span>
+          <span class="tool-item">Jaeger</span>
+          <span class="tool-item">Datadog</span>
+        </div>
+      </div>
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">Storage</div>
+        <div class="tool-items">
+          <span class="tool-item">Redis</span>
+          <span class="tool-item">RocksDB</span>
+          <span class="tool-item">PostgreSQL</span>
+          <span class="tool-item">S3-compatible</span>
+        </div>
+      </div>
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">Agent Frameworks</div>
+        <div class="tool-items">
+          <span class="tool-item">LangChain</span>
+          <span class="tool-item">LlamaIndex</span>
+          <span class="tool-item">CrewAI</span>
+          <span class="tool-item">AutoGen</span>
+          <span class="tool-item">MCP Protocol</span>
+        </div>
+      </div>
+      <div class="tool-category">
+        <div class="t-label tool-cat-label">Languages</div>
+        <div class="tool-items">
+          <span class="tool-item">Rust SDK</span>
+          <span class="tool-item">Python SDK</span>
+          <span class="tool-item">TypeScript SDK</span>
+          <span class="tool-item">REST API</span>
+          <span class="tool-item">gRPC</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── OBSERVABILITY ── -->
+<section class="section-sm" style="padding-top:0">
+  <div class="container">
+    <div class="section-header reveal">
+      <h2 class="t-h2">Runtime metrics at a glance</h2>
+    </div>
+    <div class="obs-frame reveal">
+      <span class="obs-mark tl"></span><span class="obs-mark tr"></span>
+      <span class="obs-mark bl"></span><span class="obs-mark br"></span>
+      <span class="obs-mark tc1"></span><span class="obs-mark tc2"></span>
+      <span class="obs-mark bc1"></span><span class="obs-mark bc2"></span>
+
+      <div class="obs-grid">
+        <!-- Card 1: Latency -->
+        <div class="obs-card">
+          <div class="obs-card-index">L1 / Cognitive Layer</div>
+          <div class="obs-bars">
+            <div class="obs-bar" style="height:38%"></div>
+            <div class="obs-bar" style="height:55%"></div>
+            <div class="obs-bar" style="height:44%"></div>
+            <div class="obs-bar" style="height:70%"></div>
+            <div class="obs-bar" style="height:48%"></div>
+            <div class="obs-bar" style="height:62%"></div>
+            <div class="obs-bar active" style="height:32%"></div>
+          </div>
+          <div>
+            <span class="obs-value">3.2<span class="obs-unit">ms</span></span>
+          </div>
+          <div class="obs-label">Avg L1 latency</div>
+          <p class="obs-desc">Pheromone signal processed and written to the hypergraph</p>
+        </div>
+
+        <!-- Card 2: Uptime -->
+        <div class="obs-card">
+          <div class="obs-card-index">Uptime / 30-day SLA</div>
+          <div class="obs-uptime-grid">
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block miss"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+            <div class="obs-uptime-block ok"></div>
+          </div>
+          <div>
+            <span class="obs-value">99.97<span class="obs-unit">%</span></span>
+          </div>
+          <div class="obs-label">System uptime</div>
+          <p class="obs-desc">Across federated nodes with automatic failover</p>
+        </div>
+
+        <!-- Card 3: Signals -->
+        <div class="obs-card" style="border-right:none">
+          <div class="obs-card-index">L2 / Stigmergic Layer</div>
+          <div class="obs-sparkline">
+            <svg viewBox="0 0 160 48" preserveAspectRatio="none" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <polyline points="0,38 20,32 40,36 60,22 80,28 100,14 120,18 140,8 160,4"
+                stroke="var(--coral)" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+              <polyline points="0,38 20,32 40,36 60,22 80,28 100,14 120,18 140,8 160,4 160,48 0,48"
+                fill="var(--coral)" opacity="0.12"/>
+            </svg>
+          </div>
+          <div>
+            <span class="obs-value">12M<span class="obs-unit">+</span></span>
+          </div>
+          <div class="obs-label">Signals / day</div>
+          <p class="obs-desc">Pheromone depositions across the full hypergraph swarm</p>
+        </div>
+      </div>
+
+      <!-- Secondary strip -->
+      <div class="obs-secondary">
+        <div class="obs-sec-item">
+          <span class="obs-sec-value t-doto">100%</span>
+          <span class="obs-sec-label">Traces captured</span>
+        </div>
+        <div class="obs-sec-item">
+          <span class="obs-sec-value t-doto">0.4MB</span>
+          <span class="obs-sec-label">Binary size</span>
+        </div>
+        <div class="obs-sec-item">
+          <span class="obs-sec-value t-doto">5</span>
+          <span class="obs-sec-label">Protocol layers</span>
+        </div>
+        <div class="obs-sec-item">
+          <span class="obs-sec-value t-doto">&lt;50ms</span>
+          <span class="obs-sec-label">Council convergence</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── WHY HSM-II ── -->
+<section class="section" style="padding-top:2rem">
+  <div class="container">
+    <div class="section-header reveal">
+      <h2 class="t-h1">Why coordination<br>must be emergent</h2>
+    </div>
+
+    <div class="quotes-grid">
+      <div class="quote-card reveal">
+        <p class="quote-text">Centralized orchestration is an architectural antipattern for LLM agents. It creates a single point of brittleness and prevents the system from developing genuine adaptability. Stigmergic coordination is how complex systems actually work at scale.</p>
+        <div class="quote-author">
+          <div class="quote-avatar">AB</div>
+          <div>
+            <span class="quote-name">Arnaud Bellemare</span>
+            <span class="quote-role t-label">Lead Architect, HSM-II</span>
+          </div>
+        </div>
+      </div>
+      <div class="quote-card reveal reveal-delay-1">
+        <p class="quote-text">The key insight is that the hypergraph is not just storage — it is the medium of coordination. Agents don't talk to each other. They talk to the graph, and the graph talks back through pheromone gradients.</p>
+        <div class="quote-author">
+          <div class="quote-avatar">HS</div>
+          <div>
+            <span class="quote-name">Protocol Design</span>
+            <span class="quote-role t-label">L2 / L3 Specification</span>
+          </div>
+        </div>
+      </div>
+      <div class="quote-card reveal reveal-delay-2">
+        <p class="quote-text">Federation is not optional. Any serious multi-agent deployment needs to span organizational and geographic boundaries without centralizing trust. L5 gives you that without sacrificing consistency at L3.</p>
+        <div class="quote-author">
+          <div class="quote-avatar">FP</div>
+          <div>
+            <span class="quote-name">Federation Layer</span>
+            <span class="quote-role t-label">L5 Protocol Spec</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── COMPARISON ── -->
+<section class="section" style="padding-top:0">
+  <div class="container">
+
+    <div class="meta-strip">
+      <span class="meta-strip-label">/ Comparison</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-num">/004</span>
+      <span class="meta-strip-rule"></span>
+      <span class="meta-strip-kw">vs. Alternatives /</span>
+    </div>
+
+    <div class="section-header reveal">
+      <h2 class="t-h1">How HSM-II differs</h2>
+    </div>
+
+    <div class="compare-wrap reveal">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th class="col-hsm">HSM-II</th>
+            <th>LangChain Agents</th>
+            <th>AutoGen / CrewAI</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="col-feature">Emergent coordination</td>
+            <td class="col-hsm check">Pheromone-based</td>
+            <td class="cross">Orchestrator-driven</td>
+            <td class="cross">Orchestrator-driven</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Shared hypergraph memory</td>
+            <td class="col-hsm check">Native</td>
+            <td class="partial">Vector store only</td>
+            <td class="partial">Flat key-value</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Multi-agent consensus</td>
+            <td class="col-hsm check">Council protocol</td>
+            <td class="cross">None</td>
+            <td class="partial">Basic voting</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Federation across clusters</td>
+            <td class="col-hsm check">L5 protocol</td>
+            <td class="cross">Not supported</td>
+            <td class="cross">Not supported</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Runtime skill discovery</td>
+            <td class="col-hsm check">Dynamic skill trees</td>
+            <td class="partial">Static tools only</td>
+            <td class="partial">Static tools only</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Full execution tracing</td>
+            <td class="col-hsm check">Every decision</td>
+            <td class="partial">Partial</td>
+            <td class="partial">Partial</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Language</td>
+            <td class="col-hsm">Rust</td>
+            <td>Python</td>
+            <td>Python</td>
+          </tr>
+          <tr>
+            <td class="col-feature">LLM agnostic</td>
+            <td class="col-hsm check">Yes</td>
+            <td class="check">Yes</td>
+            <td class="check">Yes</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Single-binary deploy</td>
+            <td class="col-hsm check">Yes</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Open source license</td>
+            <td class="col-hsm check">MIT</td>
+            <td class="check">MIT</td>
+            <td class="check">MIT / Apache</td>
+          </tr>
+          <tr>
+            <td class="col-feature">Deterministic replay</td>
+            <td class="col-hsm check">Yes</td>
+            <td class="cross">No</td>
+            <td class="cross">No</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── CTA ── -->
+<section id="cta">
+  <div class="container">
+    <div class="cta-inner">
+      <div class="cta-label">Ready to deploy</div>
+      <h2 class="cta-title">Start building<br>with the swarm</h2>
+      <div class="cta-actions">
+        <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-primary" target="_blank" rel="noopener">Get Started →</a>
+        <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" class="btn btn-outline" target="_blank" rel="noopener">Read the Spec</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+  <div class="container">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <span class="footer-logo">HSM-II</span>
+        <p class="footer-tagline">Federated multi-agent hypergraph system. Emergent collective intelligence for AI agents.</p>
+      </div>
+      <div>
+        <span class="footer-col-title">Protocol</span>
+        <ul class="footer-links">
+          <li><a href="#">Specification</a></li>
+          <li><a href="#">Layer Reference</a></li>
+          <li><a href="#">Pheromone API</a></li>
+          <li><a href="#">Federation Protocol</a></li>
+        </ul>
+      </div>
+      <div>
+        <span class="footer-col-title">Resources</span>
+        <ul class="footer-links">
+          <li><a href="#">Documentation</a></li>
+          <li><a href="#">Quickstart</a></li>
+          <li><a href="#">Examples</a></li>
+          <li><a href="#">Changelog</a></li>
+        </ul>
+      </div>
+      <div>
+        <span class="footer-col-title">Community</span>
+        <ul class="footer-links">
+          <li><a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="#">Discord</a></li>
+          <li><a href="#">Contributing</a></li>
+          <li><a href="#">Security</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span class="footer-copy">HSM-II &mdash; MIT License &mdash; 2024&ndash;2026</span>
+      <div class="footer-meta">
+        <a href="#">Privacy</a>
+        <a href="#">Terms</a>
+        <a href="https://github.com/arnaud-bellemare/hyper-stigmergic-morphogenesisII" target="_blank" rel="noopener">Source</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- ── SCROLL TO TOP ── -->
+<button id="scroll-top" aria-label="Scroll to top" onclick="window.scrollTo({top:0,behavior:'smooth'})">
+  <svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>
+</button>
+
+<!-- ── SCRIPTS ── -->
+<script>
+// ── HERO CANVAS — monochrome particle network ──
+(function() {
+  const canvas = document.getElementById('hero-canvas');
+  const ctx = canvas.getContext('2d');
+  let W, H, nodes, raf;
+
+  const NODE_COUNT = 55;
+  const MAX_DIST   = 140;
+  const NODE_SPEED = 0.3;
+
+  function init() {
+    W = canvas.width  = canvas.offsetWidth;
+    H = canvas.height = canvas.offsetHeight;
+    nodes = Array.from({ length: NODE_COUNT }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * NODE_SPEED,
+      vy: (Math.random() - 0.5) * NODE_SPEED,
+      r: Math.random() * 1.5 + 0.5,
+    }));
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Edges
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const d  = Math.sqrt(dx * dx + dy * dy);
+        if (d < MAX_DIST) {
+          const alpha = (1 - d / MAX_DIST) * 0.18;
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+          ctx.lineWidth = 0.6;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Nodes
+    nodes.forEach(n => {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fill();
+    });
+  }
+
+  function update() {
+    nodes.forEach(n => {
+      n.x += n.vx;
+      n.y += n.vy;
+      if (n.x < 0 || n.x > W) n.vx *= -1;
+      if (n.y < 0 || n.y > H) n.vy *= -1;
+    });
+  }
+
+  function loop() {
+    update();
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  init();
+  loop();
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      cancelAnimationFrame(raf);
+      init();
+      loop();
+    }, 200);
+  });
+})();
+
+// ── NAV scroll state ──
+(function() {
+  const nav = document.getElementById('nav');
+  const onScroll = () => nav.classList.toggle('scrolled', window.scrollY > 40);
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+})();
+
+// ── SCROLL TO TOP button ──
+(function() {
+  const btn = document.getElementById('scroll-top');
+  window.addEventListener('scroll', () => {
+    btn.classList.toggle('visible', window.scrollY > 600);
+  }, { passive: true });
+})();
+
+// ── SCROLL REVEAL ──
+(function() {
+  const els = document.querySelectorAll('.reveal');
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('visible');
+        obs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.1 });
+  els.forEach(el => obs.observe(el));
+})();
+
+// ── COUNTER ANIMATION (Doto numbers) ──
+(function() {
+  const els = document.querySelectorAll('.t-doto[data-target]');
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      obs.unobserve(e.target);
+      const el     = e.target;
+      const target = parseFloat(el.dataset.target);
+      const suffix = el.dataset.suffix || '';
+      const text   = el.dataset.text || '';
+      const dur    = 1200;
+      const start  = performance.now();
+      const isFloat = target % 1 !== 0;
+
+      if (text) { el.textContent = text; return; }
+
+      const tick = (now) => {
+        const t = Math.min((now - start) / dur, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const val = target * eased;
+        el.textContent = isFloat
+          ? val.toFixed(1) + suffix
+          : Math.floor(val) + suffix;
+        if (t < 1) requestAnimationFrame(tick);
+        else el.textContent = (isFloat ? target.toFixed(1) : Math.floor(target)) + suffix;
+      };
+      requestAnimationFrame(tick);
+    });
+  }, { threshold: 0.5 });
+
+  els.forEach(el => obs.observe(el));
+})();
+
+// ── USE CASE TABS ──
+(function() {
+  const tabs   = document.querySelectorAll('.use-tab');
+  const panels = document.querySelectorAll('.use-panel');
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const idx = tab.dataset.tab;
+      tabs.forEach(t  => t.classList.remove('active'));
+      panels.forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelector(`.use-panel[data-panel="${idx}"]`).classList.add('active');
+    });
+  });
+})();
+</script>
+
 </body>
 </html>
