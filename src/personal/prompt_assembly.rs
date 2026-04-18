@@ -116,9 +116,9 @@ where
             let (piece, truncated) = if cap == usize::MAX {
                 (body, false)
             } else {
+                let was_truncated = body.len() > cap;
                 let t = truncate_bytes(&body, cap);
-                let tr = t.len() < body.len();
-                (t, tr)
+                (t, was_truncated)
             };
             let emitted_bytes = piece.len();
             manifest.sections.push(ContextSectionStat {

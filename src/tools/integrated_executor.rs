@@ -200,6 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_execution() {
+        // Disable Docker bash so the test uses host bash directly (Docker unavailable in CI).
+        std::env::set_var("HSM_DOCKER_BASH", "0");
         let agent_id: AgentId = 1;
         let mut executor = IntegratedToolExecutor::new(agent_id);
 
