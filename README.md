@@ -1,482 +1,399 @@
-# Hyper-Stigmergic Morphogenesis II (HSM-II)
+# HSM-II — Company OS
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Where swarms of AI agents think together, learn from each other, and grow smarter over time.**
+> **Every task your agents run makes the next one cheaper. The system compounds — it doesn't reset.**
 
-HSM-II is a **federated multi-agent hypergraph system** that brings emergent collective intelligence to life. Built in Rust, it enables autonomous AI agents to coordinate without central control, learn from collective experience, and solve complex problems through shared knowledge structures.
+Most AI agent setups are stateless pipelines. You run a task, it finishes, and everything learned evaporates. The next time you run the same kind of task, you start from zero.
 
-Think of it as *ants solving problems through pheromone trails* — except the ants are LLM-powered agents, the trails are hypergraph edges, and the colony learns to code, research, and coordinate autonomously.
+HSM-II is different. It's a **multi-agent operating system** built in Rust where agents operate under a five-phase control loop, govern each other, track spend, and distill every execution into durable knowledge that gets reused automatically.
 
-**[📄 Read the Paper](./documentation/paper.pdf)** | **[🚀 Quick Start](#-quick-start)** | **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)**
-
----
-
-## 🚀 Quick Start
-
-### Step 1: Create Your Telegram Bot (2 minutes)
-
-You need a Telegram bot token before anything else:
-
-1. Open Telegram and search for **[@BotFather](https://t.me/BotFather)**
-2. Send `/newbot`
-3. Choose a name (e.g. "My HSM-II Bot") and a username (e.g. `my_hsmii_bot`)
-4. BotFather gives you a token like `7123456789:AAF1k...` — **save this, you'll need it below**
+**[📄 Paper](./documentation/paper.pdf)** · **[🌐 Live Demo](https://permutationresearch.github.io/HSM-II/)** · **[🔄 Operating Loop](./docs/company-os/operating-loop.md)** · **[📋 Task SOP](./company-files/sop/task_lifecycle_sop.md)**
 
 ---
 
-### Step 2: Install Rust
+## What You Actually Get
 
-**macOS / Linux:**
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
+**A company staffed by AI agents** — with a real org chart, budget controls, governance, and a quality gate that blocks shipping until sign-off is complete.
+
+| What you have today | What you get with HSM-II |
+|---------------------|--------------------------|
+| Agents that forget everything after each run | Agents that distill every execution into reusable skills |
+| No way to know if agent output is safe to ship | Sovereign Gate — a separate verifier blocks anything with open approvals |
+| Costs you can't track or control | Per-agent spend tracking with hard-stop budgets |
+| One agent doing everything | Specialists coordinated by a Council with Debate mode for high-stakes decisions |
+| Manual re-runs when something breaks | Automatic Repair — failures re-enter the loop as new signals |
+
+---
+
+## The Operating Loop
+
+Every unit of work — a task, a goal, a heartbeat, an incoming message — follows the same five-phase loop:
+
+```
+Signal → Frame → Execute → Gate → Compound
 ```
 
-**Windows:**
-Download and run [rustup-init.exe](https://rustup.rs/), then restart your terminal.
+| Phase | What happens | Hard exit condition |
+|-------|-------------|---------------------|
+| **Signal** | Work enters; DRI assigned; duplicate check | Task has an owner, no duplicate open |
+| **Frame** | Council challenges the approach before any code is written | Framing artifact exists; complexity assessed |
+| **Execute** | Workers run in isolated git worktrees; spend tracked per agent | Deliverable produced; spend within budget |
+| **Gate** | A *different* agent verifies; nothing ships with open approvals | Verifier signed off; `approvals_pending = 0` |
+| **Compound** | Successful traces promoted to memory and versioned skills | Skill upserted; task closed as `completed` |
 
-Verify it worked:
-```bash
-rustc --version
-```
+When any phase fails, **Repair** re-hydrates context from Postgres and re-enters with `repair: true`. Two consecutive failures auto-escalate to governance with `escalation_reason` set — visible in the operator console immediately.
+
+Context is rebuilt from durable storage on every entry. The system does not rely on in-memory state surviving between runs.
 
 ---
 
-### Step 3: Choose Your LLM → Clone → Run
+## Company OS
 
-Pick **one** option below. All three end with a working Telegram bot.
+The Company OS is a **Postgres-backed multi-tenant control plane** (~200 REST endpoints) that gives each company running on HSM-II its own isolated operating environment:
 
-#### Option A: Local with Ollama (Free, Private — your data stays on your machine)
+- **Org chart** — agents with roles, DRI assignments, reporting structure
+- **Goals and tasks** — Postgres-backed, lifecycle-tracked, linked to capability refs
+- **Heartbeats** — scheduled checks with persisted runtime state
+- **Budget controls** — per-role monthly limits with hard-stop enforcement at task checkout
+- **Governance log** — every approval, escalation, and phase failure recorded
+- **Spend ledger** — grouped by kind and agent ref
+- **Audit trail** — `memory/task_trail.jsonl` per company with full task history
 
-**Install Ollama:**
+### Company Packs
 
-| Platform | Command |
-|----------|---------|
-| macOS | `brew install ollama` |
-| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
-| Windows | Download from [ollama.com/download](https://ollama.com/download) |
+HSM-II ships with **18 pre-built company configurations** from the Paperclip/companies.sh ecosystem — engineering teams, research labs, creative studios, capital groups. Each pack includes agents, skills, SOPs, and a governance structure.
 
-**Then run these commands:**
+Packs are **auto-updated at point of use**: every time you load a company, HSM-II pulls the latest skill and agent files from the upstream GitHub source before reading the pack.
+
+```
+Signal comes in → company loaded → upstream files fetched → agents read → task runs
+```
+
+Install a pack, and the next time you run that company it's already up to date. No manual `paperclip install` step needed.
+
+---
+
+## How Agents Get Smarter Over Time
+
+**CASS — Continuous Automated Skill Synthesis:**
+
+1. **Harvest** — successful execution traces are captured
+2. **Distill** — repeated patterns become named skills with slugs
+3. **Gate** — skills pass a consensus jury before promotion
+4. **Compound** — next agent that hits the same problem uses the distilled skill instead of reasoning from scratch
+
+The result: the first time HSM-II solves a problem takes the full loop. The tenth time costs a fraction.
+
+---
+
+## Memory Architecture
+
+HSM-II uses a **layered memory stack** — not a single store. Each layer has a different durability, scope, and purpose. Together they ensure that knowledge compounds and context survives crashes, restarts, and context window flushes.
+
+### Layer 1 — Hypergraph World Model (in-process, snapshotted)
+
+The primary in-process store. Agents share a **hypergraph** where edges can connect multiple nodes at once, enabling relational knowledge that a flat vector store can't represent.
+
+- **Beliefs** — claims with confidence scores, supporting/contradicting evidence, ownership scopes (`local` / `shared` / `restricted`)
+- **Hyperedges** — multi-participant connections with weights, provenance chains, and federation scope
+- **Experiences** — timestamped execution records with L0/L1/L2 tiered abstractions
+- **Stigmergic coordination** — agents detect each other's work through state changes, not direct messages
+
+Persisted to `world_state.ladybug.bincode` via a write-ahead log with atomic rename. On crash, the WAL replays and the full state is rebuilt.
+
+### Layer 2 — PostgreSQL (durable, company-scoped)
+
+Every Company OS tenant has an isolated slice of Postgres. This is where task lifecycle state, memory entries, governance events, and spend live — and where context is rebuilt after any failure.
+
+Key tables: `tasks`, `company_memory_entries` (scope: local/shared), `agent_runs`, `governance_events`, `spend_events`, `store_promotions`, `approvals`.
+
+Memory entries have `summary_l0` and `summary_l1` fields — progressive summarization so agents query at the right detail level without loading full bodies.
+
+### Layer 3 — Task Trail (append-only audit, per company)
+
+`memory/task_trail.jsonl` — a JSONL file written after every turn. Never overwritten, only appended.
+
+Each entry records: skills used, council mode, tool step count, token counts, world edge/belief deltas. This is the **context recovery surface** — when an agent re-enters after a crash or context flush, it reads the task trail to reconstruct what happened before.
+
+### Layer 4 — Skills (versioned, hash-locked)
+
+Skills distilled from execution live in two places: a `SkillBank` in-process (with semantic embeddings for retrieval) and a `skills-lock.json` with SHA-256 content hashes. The lock prevents in-flight mutations — if the hash changes, the skill was modified and must pass the Gate again before use.
+
+Skill retrieval uses embedding similarity + context relevance + graph centrality across the CASS semantic graph. A skill promoted last week is available to every agent today.
+
+### Layer 5 — Heartbeat State (scheduled task persistence)
+
+`memory/heartbeat_state.json` — persists the last-run timestamp and status of every periodic check. On restart, the system immediately knows which heartbeats are overdue without scanning logs.
+
+### Context Recovery — No Session State Required
+
+The single biggest memory design decision: **context lives in Postgres, not in agent memory.**
+
+When an agent loses its context window — crash, restart, or simple flush — it re-enters by calling:
+
+```
+GET /api/company/companies/:id/ops/overview
+```
+
+This returns the full operational picture: recent task trail, open governance events, heartbeat state, task counts by phase, current spend vs. budget. The agent reconstructs context **deterministically** from durable storage. Nothing is assumed to survive between runs.
+
+This is how HSM-II handles the problem every long-running agent hits: context decay. The answer isn't a bigger context window. It's durable storage queried on demand.
+
+### Memory Scoping
+
+| Scope | Who sees it | Written by |
+|-------|-------------|-----------|
+| `local` | Agent or task only | Worker during execution |
+| `shared` | All agents in the company | Promoted from local on task close |
+| `restricted` | Governance-audited access | Escalation events, approvals |
+| `federated` | Cross-company (if federation enabled) | Belief propagation engine |
+
+---
+
+## Council Deliberation
+
+When decisions matter, agents form a Council:
+
+| Mode | When it activates | How it works |
+|------|-------------------|--------------|
+| **Simple** | Low complexity, high urgency | Single agent with coherence check |
+| **Orchestrate** | Medium complexity | Lead agent coordinates specialists |
+| **Debate** | High stakes, contested approach | Full deliberation with evidence contracts and voting |
+
+Every Frame phase runs through a Council before any code is written.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Rust** — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **PostgreSQL** — for Company OS (the personal agent runs without it)
+- An LLM: **Ollama** (local/free), **Anthropic Claude**, or **OpenAI GPT-4**
+
+### Option A: Local with Ollama (no API key needed)
+
 ```bash
-# Start Ollama and pull a model (pick any — it auto-detects)
 ollama pull llama3.2
 
-# Clone, bootstrap, and start the bot
 git clone https://github.com/PermutationResearch/HSM-II.git
 cd HSM-II
 cargo run --bin personal_agent -- bootstrap
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
+cargo run --bin personal_agent -- start
 ```
 
-> 💡 **Note:** Ollama usually starts automatically after install. If you get a connection error, run `ollama serve` first.
-
----
-
-#### Option B: Claude (Anthropic API)
-
-Get your API key from [console.anthropic.com](https://console.anthropic.com/)
+### Option B: Claude
 
 ```bash
 git clone https://github.com/PermutationResearch/HSM-II.git
 cd HSM-II
 cargo run --bin personal_agent -- bootstrap
-
-export ANTHROPIC_API_KEY="sk-ant-PASTE_YOUR_KEY_HERE"
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
+export ANTHROPIC_API_KEY="sk-ant-..."
+cargo run --bin personal_agent -- start
 ```
 
----
-
-#### Option C: GPT-4 (OpenAI API) or Any OpenAI-Compatible API
-
-Get your API key from [platform.openai.com](https://platform.openai.com/)
+### Option C: GPT-4 / OpenAI-compatible
 
 ```bash
 git clone https://github.com/PermutationResearch/HSM-II.git
 cd HSM-II
 cargo run --bin personal_agent -- bootstrap
-
-export OPENAI_API_KEY="sk-PASTE_YOUR_KEY_HERE"
-TELEGRAM_TOKEN="PASTE_YOUR_TOKEN_HERE" cargo run --bin personal_agent -- start --telegram --daemon
+export OPENAI_API_KEY="sk-..."
+cargo run --bin personal_agent -- start
 ```
 
-**Using Groq, Together, Mistral, or another OpenAI-compatible provider?** Just add the base URL:
-```bash
-export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
-```
+The agent listens on **port 3000** (REST API) and **port 3847** (Company OS console API) by default.
 
 ---
 
-### Step 4: Talk to Your Bot
+## Company OS Console
 
-Open Telegram, find your bot, and send it a message. That's it.
+The console API is embedded in `personal_agent`. Set `NEXT_PUBLIC_API_BASE=http://127.0.0.1:3847` to connect the web console.
 
-**Useful commands inside the chat:**
+**Core endpoints:**
 
-| Command | What it does |
-|---------|-------------|
-| `/model list` | Show available LLM models |
-| `/model claude` | Switch to Claude |
-| `/model gpt-4` | Switch to GPT-4 |
+| Endpoint | What it returns |
+|----------|----------------|
+| `GET /api/company/companies` | All companies with status |
+| `GET /api/company/companies/:id/ops/overview` | Full ops snapshot: goals, tasks, budgets, heartbeats, spend, audit, governance |
+| `POST /api/company/companies/:id/import-pack` | Load a company pack (triggers auto-fetch from upstream) |
+| `GET /api/company/companies/:id/tasks` | Task list with lifecycle state |
+| `POST /api/company/companies/:id/tasks/:tid/checkout` | Assign DRI and lock task for execution |
+
+The `/ops/overview` endpoint is also the **context recovery surface** — when an agent loses session state, it re-enters by calling this endpoint before doing anything else. Context lives in Postgres, not in agent memory.
+
+---
+
+## Using Telegram (optional)
+
+Telegram is one way to send signals into the loop — not the main interface.
+
+1. Get a bot token from [@BotFather](https://t.me/BotFather)
+2. Start the agent with the token:
+
+```bash
+TELEGRAM_TOKEN="your-token" cargo run --bin personal_agent -- start --telegram --daemon
+```
+
+Useful bot commands once running:
+
+| Command | Effect |
+|---------|--------|
 | `/ralph <task>` | Code generation with worker-reviewer loop |
 | `/rlm <text>` | Process large documents |
-| `/tool list` | Show available tools (60+) |
-| `/tool <name> <args>` | Run a specific tool |
+| `/model list` | Show available LLM models |
+| `/tool list` | List all 60+ available tools |
 
 ---
 
-### Environment Variables Reference
+## LLM Providers & Failover
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TELEGRAM_TOKEN` | *(required)* | Your Telegram bot token from BotFather |
-| `OLLAMA_HOST` | `http://localhost` | Ollama server address |
-| `OLLAMA_PORT` | `11434` | Ollama server port |
-| `OLLAMA_MODEL` | `auto` (detects installed) | Force a specific Ollama model |
-| `OPENROUTER_API_KEY` | *(optional)* | For `qwencoder:480b-cloud` – routes to OpenRouter (Qwen3 Coder free tier) |
-| `ANTHROPIC_API_KEY` | *(optional)* | Anthropic API key for Claude |
-| `OPENAI_API_KEY` | *(optional)* | OpenAI API key for GPT-4 |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom OpenAI-compatible endpoint |
+| Provider | Models | Key variable |
+|----------|--------|-------------|
+| **Ollama** | Any local model (Llama, Mistral, Qwen…) | `OLLAMA_HOST`, `OLLAMA_PORT` |
+| **Anthropic** | Claude 3.5 Sonnet, Claude 3 Opus | `ANTHROPIC_API_KEY` |
+| **OpenAI** | GPT-4o, GPT-4o-mini | `OPENAI_API_KEY` |
+| **OpenRouter** | Qwen3 Coder (free tier) | `OPENROUTER_API_KEY` |
+| **Any compatible** | Groq, Together, Mistral… | `OPENAI_BASE_URL` |
 
-### Troubleshooting
+If one provider fails, the system automatically tries the next. No single point of failure.
 
-| Problem | Fix |
-|---------|-----|
-| `cargo: command not found` | Run `source ~/.cargo/env` or restart your terminal |
-| `Cannot reach Ollama` | Run `ollama serve` to start it manually |
-| `No models found in Ollama` | Run `ollama pull llama3.2` (or any model) |
-| Bot doesn't respond | Check the terminal for errors; make sure `TELEGRAM_TOKEN` is correct |
-| Want to start fresh | `rm -f world_state.ladybug*.bincode ~/.hsmii/config.json` then `cargo run --bin personal_agent -- bootstrap` |
+---
 
-### Other Ways to Run
+## YC-Bench Results
 
-#### With Visualization Dashboard
-```bash
-cargo run --bin personal_agent -- start --telegram &
-cargo run --bin hypergraphd
-```
+[YC-Bench](https://collinear-ai.github.io/yc-bench/) is a long-horizon deterministic benchmark for LLM agents. The agent operates a simulated AI startup for one simulated year, interacting exclusively through a CLI against a discrete-event simulation. It is designed to be hard — not a chatbot test, but a sustained decision-making challenge.
 
-#### Full Research Stack
-```bash
-cargo run --release &
-cargo run --bin personal_agent -- start --telegram &
-cargo run --bin hypergraphd
-```
+### What the simulation tests
 
-#### Company console API (embedded in `personal_agent`)
-`personal_agent start` listens on **`HSM_API_PORT`** (default **3000**) for the world/Honcho/Paperclip demo REST API and, unless **`HSM_EMBED_CONSOLE_API=0`**, also on **`HSM_CONSOLE_PORT`** (default **3847**) for the same **`/api/company/*`** and **`/api/console/*`** routes as **`hsm_console`**, using one shared in-process Paperclip layer and optional **`HSM_COMPANY_OS_DATABASE_URL`**. Repo-root **`.env`** is loaded on startup (like `hsm_console`). For **`web/company-console`**, set **`NEXT_PUBLIC_API_BASE=http://127.0.0.1:3847`** (or your port). Use **`HSM_EMBED_CONSOLE_API=0`** if you run **`hsm_console`** as a separate process.
+The agent starts with **$200,000** and manages a company with 8 employees across the full year. It must:
 
-#### In-repo eval and meta-harness (`hsm-eval`, `hsm_meta_harness`, `hsm_outer_loop`)
+- Accept and prioritize tasks from a client marketplace (4 domains: training, inference, research, data engineering)
+- Assign the right employees to the right tasks — employee salaries grow with every assignment, so poor allocation compounds into cash flow problems
+- Build client trust over time (reduces future work requirements, unlocks higher-reward tasks)
+- Detect and avoid **adversarial "RAT" clients** — hidden bad actors who inflate work after acceptance and make deadlines nearly impossible, but offer high rewards to lure greedy agents
+- Manage runway across hundreds of turns, with context truncated to 20 turns — the only memory persistence is a scratchpad injected into the system prompt
 
-Use **`hsm-eval`** for a single comparative run (HSM-II vs baseline on benchmark tasks), **`hsm_meta_harness`** to search over harness configuration candidates, and **`hsm_outer_loop`** to index/query archived runs and to drive **external** benchmark batches (see below). **Where artifacts go**, **when to use which tool**, and the **contract** for promoted harness JSON (eval-side today; not auto-loaded by `personal_agent`) are documented in **[`docs/EVAL_AND_META_HARNESS.md`](docs/EVAL_AND_META_HARNESS.md)**.
+**Why it's hard:** payroll grows monotonically, context truncates after 20 turns, and adversarial clients are invisible until you've already failed them. Most agents either burn payroll on inactivity, get trapped by RAT clients, or run out of context and lose state.
 
-Smoke (requires the same LLM env as the rest of the repo, e.g. Ollama or API keys):
+### Our runs
 
-```bash
-cargo run --bin hsm-eval -- --suite memory --limit 2 --verbose
-```
+We ran all 18 HSM-II company packs against the medium preset (1-year horizon, seeds 1–10) using **Qwen3.6-plus:free** via OpenRouter — the free tier, zero cost per run. 186 total runs.
 
-#### External Rust Harnesses
-`hsm_outer_loop` can now build and run external Rust harnesses from JSON specs, including checked-out side projects such as `claw-code`.
+| Rank | Company pack | Runs | Avg final funds | Peak run | Completed full year |
+|------|-------------|------|-----------------|----------|---------------------|
+| 1 | agency-agents | 13 | $969,389 | $1,189,275 | 3 / 13 |
+| 2 | aeon-intelligence | 13 | $780,582 | $1,059,497 | 3 / 13 |
+| 3 | kdense-science-lab | 10 | $702,146 | $702,146 | 0 / 10 |
+| 4 | agentsys-engineering | 10 | $694,972 | $1,043,654 | 3 / 10 |
+| 5 | apex-systems | 10 | $675,028 | $1,011,137 | 4 / 10 |
+| 6 | clawteam-capital | 10 | $602,584 | $1,075,768 | 1 / 10 |
+| 7 | fullstack-forge | 10 | $497,415 | $503,578 | 0 / 10 |
+| 8 | trail-of-bits-security | 10 | $419,801 | $430,911 | 0 / 10 |
+| 9 | compound-engineering-co | 10 | $380,082 | $383,570 | 0 / 10 |
+| 10 | redoak-review | 10 | $362,659 | $397,328 | 0 / 10 |
+| 11 | gstack | 10 | $319,912 | $324,500 | 0 / 10 |
+| 12 | clawteam-engineering | 10 | $318,626 | $360,086 | 0 / 10 |
+| 13 | minimax-studio | 10 | $303,145 | $313,101 | 0 / 10 |
+| 14 | clawteam-research-lab | 10 | $264,819 | $264,819 | 0 / 10 |
 
-```bash
-cargo run --bin hsm_outer_loop -- external-batch --spec config/external_claw_code.example.json
-```
+Starting capital: $200,000. Average profit across all 186 runs: **+$249,509** (+125% ROI).  
+Best single run: agency-agents seed 1 — **$1,189,275** (5.9× starting capital, 976 turns).
 
-The external spec supports:
-- `labels`: structured metadata for later comparison (`company_pack`, `preset`, `seed`, `benchmark`)
-- `setup_commands`: run build steps before the benchmark command
-- `cwd`: run inside the external repo workspace
-- `env`: inject per-harness environment variables
+### What drives the differences
 
-Example: point [`external_claw_code.example.json`](/Users/cno/hyper-stigmergic-morphogenesisII/config/external_claw_code.example.json) at your local `claw-code/rust` checkout, then let `hsm_outer_loop` build `claw-cli` and smoke-test the release binary inside the harness pipeline.
+Each company pack includes a system prompt built from that company's `VISION.md`, agent briefings, and skill descriptions. The benchmark is measuring whether a company's documented operating philosophy, skill set, and context actually translates into better decision-making under adversarial conditions.
 
-For long-horizon startup stress tests, [`external_yc_bench.example.json`](/Users/cno/hyper-stigmergic-morphogenesisII/config/external_yc_bench.example.json) shows how to run `yc-bench` and tag the result with `company_pack`, `preset`, and `seed` so you can compare marketplace companies using the same scenario.
+Packs that perform well tend to have explicit guidance on: client vetting, task prioritization, employee efficiency, and cash flow management. Packs with generic or thin context tend to get trapped by RAT clients or go idle waiting for tasks.
 
-Full marketplace grids (18 Paperclip-class packs, `hsm_market_*`, medium preset) live in `config/external_yc_bench_seed7.json` … `seed10.json`. Edit each file’s `command` (path to `uv`), `cwd` (your local `yc-bench` checkout), and export `OPENROUTER_API_KEY` in the shell (`env` in those specs is empty so the child inherits your environment). Then run, for example:
+The "Completed full year" column is the hardest bar. Most runs end with `terminal_reason: error` — the model gets stuck in a loop after repeated tool failures. Only 14 out of 186 runs reached the horizon end. Agency-agents, apex-systems, agentsys-engineering, aeon-intelligence, and clawteam-capital are the packs whose context helped the agent sustain coherent decision-making for the full simulation.
+
+### Running the benchmark yourself
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
-cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed9.json
-cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed10.json
+
+# Single seed across all 18 packs
+cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed7.json
+
+# Full grid (seeds 7-10)
+for seed in 7 8 9 10; do
+  cargo run --bin hsm_outer_loop -- external-batch --spec config/external_yc_bench_seed${seed}.json
+done
 ```
 
-Results are written under `runs/external_batch_<timestamp>.json` and picked up by the company console `GET /api/companies-sh/yc-bench` aggregator.
-
-**Self-improving harness (NeoSigma auto-harness × YC-bench, e.g. apex-systems):** pre-wired fork in [`external_integrations/auto-harness-hsm/README_HSM.md`](external_integrations/auto-harness-hsm/README_HSM.md) (`benchmark_backend: yc_hsm`); bridge scripts and normalizer in [`external_integrations/auto-harness-yc-bench/README.md`](external_integrations/auto-harness-yc-bench/README.md). See [NeoSigma’s post on self-improving agentic systems](https://www.neosigma.ai/blog/self-improving-agentic-systems).
+Results write to `runs/external_batch_<timestamp>.json` and aggregate via `GET /api/companies-sh/yc-bench`.
 
 ---
 
-## 🧠 What HSM-II Does
+## Built-In Tool Suite (60+ tools)
 
-### Shared Memory Through Hypergraphs
-
-HSM-II stores knowledge as a **hypergraph** — a web where edges can connect multiple nodes at once. Agents read and write to this shared structure:
-
-- **Beliefs** — What agents think about the world
-- **Hyperedges** — Connections between multiple beliefs (emergent insights)
-- **Ontological Tags** — Categories for organizing knowledge
-- **Visibility Scopes** — Local, Shared, or Restricted access levels
-
-```
-Agent A ──believes──► "Neural networks are effective"
-                           │
-                           │ (hyperedge)
-                           ▼
-Agent B ──believes──► "For image classification" ◄───believes─── Agent C
-                           │
-                           │ (hyperedge)
-                           ▼
-                    "But require lots of data"
-```
-
-### Stigmergic Coordination
-
-Like ants leaving pheromone trails, agents leave "trails" in the hypergraph:
-
-1. **Agent solves a problem** → Creates/updates beliefs
-2. **Other agents detect changes** → Read the updated structure
-3. **Collective learning emerges** → No direct communication needed
-
-### Multi-Agent Council Deliberation
-
-When decisions matter, agents form **Councils**:
-
-| Mode | Use Case | How It Works |
-|------|----------|--------------|
-| **Simple** | Low complexity, high urgency | Single agent decides with coherence check |
-| **Orchestrate** | Medium complexity | Leader agent coordinates specialists |
-| **Debate** | High complexity, high stakes | Full deliberation with evidence and voting |
-
-Councils use **evidence contracts** — agents must provide proof for their positions.
-
----
-
-## 🎓 Continuous Learning & Skill Improvement
-
-### CASS: Continuous Automated Skill Synthesis
-
-HSM-II doesn't just execute tasks — it **learns from them**:
-
-1. **Harvest** — Successful agent trajectories are captured
-2. **Distill** — Common patterns become reusable skills
-3. **Promote** — Skills pass through consensus jury validation
-4. **Version** — Skills evolve with semantic versioning
-
-### DKS: Distributed Knowledge System
-
-Knowledge spreads through the agent population like genetic evolution:
-
-- **Selection Pressure** — Better-performing knowledge survives
-- **Replication** — Successful patterns spread to other agents
-- **Mutation** — Variations are tested and rewarded
-- **Flux** — Knowledge flows between local and shared scopes
-
----
-
-## 🌐 Federation & Multi-Node Coordination
-
-Multiple HSM-II instances can connect and form a **federation**:
-
-- **Trust Dynamics** — Bayesian trust scoring between nodes
-- **Conflict Resolution** — When beliefs diverge, councils negotiate
-- **Knowledge Sync** — Selective merging of hypergraph structures
-- **Anti-fragile** — The system improves under stress
-
-```
-┌─────────────┐      Trust Edges      ┌─────────────┐
-│  HSM-II     │◄─────────────────────►│  HSM-II     │
-│  Node A     │    (confidence: 0.85) │  Node B     │
-│  (Toronto)  │                       │  (London)   │
-└─────────────┘                       └─────────────┘
-       │                                     │
-       │         ┌─────────────┐             │
-       └────────►│  HSM-II     │◄────────────┘
-                 │  Node C     │
-                 │  (Tokyo)    │
-                 └─────────────┘
-```
-
----
-
-## 🛠️ Built-In Tool Suite (62+ Tools)
-
-Agents come with real-world capabilities out of the box:
-
-| Category | What Agents Can Do |
-|----------|-------------------|
-| **Web & Browser** | Search, scrape, automate browsers, read PDFs |
+| Category | Capabilities |
+|----------|-------------|
+| **Web & Browser** | Search, scrape, automate, read PDFs |
 | **File Operations** | Read, write, search, analyze any file type |
 | **Shell & System** | Execute commands, gather system info |
-| **Git Operations** | Clone, commit, diff, blame, search repositories |
-| **APIs & Data** | HTTP requests, JSON parsing, encoding/decoding |
-| **Calculations** | Math, statistics, unit conversions |
-| **Text Processing** | Regex, parsing, formatting, diffing |
+| **Git** | Clone, commit, diff, blame, search |
+| **APIs & Data** | HTTP requests, JSON, encoding |
+| **Text Processing** | Regex, parse, format, diff |
 
-Tools are **real implementations**, not mocks. Agents can actually modify files, browse websites, and run commands.
-
----
-
-## 🤖 LLM Integration & Provider Failover
-
-HSM-II works with multiple LLM providers with automatic failover:
-
-- **OpenAI** — GPT-4o, GPT-4o-mini
-- **Anthropic** — Claude 3.5 Sonnet, Claude 3 Opus
-- **Ollama** — Local models (Llama, Mistral, etc.)
-
-If one provider fails, the system automatically switches to another. No single point of failure.
+All tools are real implementations — agents can actually modify files, browse the web, and run commands.
 
 ---
 
-## 🔐 Security & Access Control
+## Architecture
 
-- **API Key Management** — Argon2-hashed, revocable keys
+Five living layers over one shared world model:
+
+```
+┌─────────────────────────────────────┐
+│  Federation layer (trust, sync)     │
+├─────────────────────────────────────┤
+│  Intelligence layer (Paperclip IL)  │
+├─────────────────────────────────────┤
+│  Execution layer (workers, tools)   │
+├─────────────────────────────────────┤
+│  Reasoning layer (council, CASS)    │
+├─────────────────────────────────────┤
+│  World model (hypergraph, Postgres) │
+└─────────────────────────────────────┘
+```
+
+Machine-readable blueprint: [`architecture/hsm-ii-blueprint.ron`](architecture/hsm-ii-blueprint.ron)  
+Generated reference: [`ARCHITECTURE.generated.md`](ARCHITECTURE.generated.md) (verified by `cargo test --lib`)
+
+---
+
+## Security
+
+- **API Key Management** — Argon2-hashed, revocable
 - **JWT Authentication** — 24-hour expiring tokens
-- **Rate Limiting** — Per-key quota enforcement
-- **Permission Levels** — Read, Write, Admin access control
+- **Rate Limiting** — per-key quota enforcement
+- **Permission Levels** — Read / Write / Admin
+- **Spend Hard-Stops** — budget limits enforced at task checkout; agent cannot proceed past limit
 
 ---
 
-## 🏗️ System Architecture
+## Documentation
 
-HSM-II is documented as **one world model** with **five living layers** (world, reasoning, execution, intelligence, federation). The machine-readable blueprint lives in [`architecture/hsm-ii-blueprint.ron`](architecture/hsm-ii-blueprint.ron); curated notes and commands are in [**ARCHITECTURE.md**](ARCHITECTURE.md). The **exact** Markdown emitted by `blueprint_markdown()` is checked in as [`ARCHITECTURE.generated.md`](ARCHITECTURE.generated.md) and verified by `cargo test --lib`—regenerate with `./scripts/generate-architecture-md.sh` after RON edits. **GET** `/api/architecture` returns that blueprint plus optional runtime counts when the API has a mounted world. The thin dashboard at `web/` includes **`/architecture`** (server fetch to `HSM_API_URL`). Generate a report locally with `cargo run -q --bin hsm_archviz` (from the repo root).
-
----
-
-## 📚 Documentation
-
-| Document | What You'll Learn |
-|----------|-------------------|
+| Doc | What it covers |
+|-----|----------------|
+| [Operating Loop](./docs/company-os/operating-loop.md) | Phase definitions, entry conditions, exit artifacts |
+| [Task Lifecycle SOP](./company-files/sop/task_lifecycle_sop.md) | API-level walkthrough of every phase |
+| [Ops Overview API](./docs/company-os/ops-overview-api.md) | The unified ops endpoint and context recovery |
 | [EASY_START.md](documentation/guides/EASY_START.md) | Get running in 5 minutes |
-| [DEPLOYMENT.md](documentation/guides/DEPLOYMENT.md) | Production deployment guide |
-| [COMMANDS_GUIDE.md](documentation/guides/COMMANDS_GUIDE.md) | CLI reference |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Curated blueprint notes (Mermaid + API links) |
-| [ARCHITECTURE.generated.md](ARCHITECTURE.generated.md) | Generated from RON; must match `cargo test --lib` |
-| [ANTIFRAGILE_ARCHITECTURE.md](documentation/architecture/ANTIFRAGILE_ARCHITECTURE.md) | System design deep-dive |
-| [PERSONAL_AGENT_README.md](documentation/guides/PERSONAL_AGENT_README.md) | Your AI companion |
-| [HERMES_INTEGRATION.md](documentation/integrations/HERMES_INTEGRATION.md) | Connect to Hermes Agent |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Curated blueprint notes |
+| [EVAL_AND_META_HARNESS.md](docs/EVAL_AND_META_HARNESS.md) | Benchmarking and harness tooling |
 
 ---
 
-## 🐳 Docker Deployment
+## License
 
-```bash
-# Full stack with monitoring
-docker-compose up -d
-
-# Check health
-curl http://localhost:8080/health
-
-# View metrics
-curl http://localhost:9000/metrics
-```
-
-Services:
-- **HSM-II**: Main application (port 8080)
-- **Ollama**: Local LLM inference (port 11434)
-- **Prometheus**: Metrics (port 9090)
-- **Grafana**: Dashboards (port 3000)
+MIT — see [LICENSE](LICENSE)
 
 ---
 
-## 📊 Observability & Metrics
-
-HSM-II exposes Prometheus metrics for monitoring:
-
-| Metric | What It Tracks |
-|--------|---------------|
-| `hsm_coherence_growth` | Agent synchronization over time |
-| `hsm_llm_requests_total` | LLM API call volume |
-| `hsm_council_decisions_total` | Council voting patterns |
-| `hsm_skills_harvested` | Skills learned from experience |
-| `hsm_promises_kept_total` / `hsm_promises_broken_total` | Social memory integrity |
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run library tests only
-cargo test --lib
-
-# Run with logging
-RUST_LOG=debug cargo test
-```
-
----
-
-## 📁 Project Structure
-
-```
-HSM-II/
-├── src/                    Core Rust implementation
-│   ├── agent_core/         Agent runtime & lifecycle
-│   ├── council/            Deliberation & voting
-│   ├── tools/              62+ tool implementations
-│   ├── llm/                LLM clients & failover
-│   ├── dks/                Distributed knowledge
-│   ├── cass/               Skill learning
-│   ├── federation/         Multi-node coordination
-│   └── gateways/           Discord, web, etc.
-├── documentation/          Guides, architecture, reports
-├── external_integrations/  Third-party connections (Hermes)
-├── infrastructure/         Prometheus, Grafana, CI/CD
-├── agent_tools/            Scripts & visual-explainer
-├── web_interface/          Web UI & visualization
-└── test_suite/             Integration tests
-```
-
----
-
-## 🤝 Hermes Agent Integration
-
-HSM-II bridges to [Hermes Agent](https://github.com/NousResearch/hermes-agent) (by [NousResearch](https://github.com/NousResearch)) for extended capabilities:
-
-```rust
-use hermes_bridge::HermesClientBuilder;
-
-let client = HermesClientBuilder::new()
-    .endpoint("http://localhost:8000")
-    .build()?;
-
-let result = client.web_search("AI agents").await?;
-```
-
----
-
-## 🛣️ Roadmap
-
-- [x] Core hypergraph memory engine
-- [x] Multi-agent council system
-- [x] 62+ real tools
-- [x] Multi-provider LLM with failover
-- [x] Docker deployment
-- [x] Hermes Agent integration
-- [x] Telegram bot
-- [x] Job queue/scheduler
-- [ ] Vector database integration
-- [ ] Advanced web dashboard
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE)
-
----
-
-## 🙏 Acknowledgments
-
-- Inspired by biological morphogenesis and stigmergic coordination in social insects
-- Built with [Rust](https://rust-lang.org) and [Tokio](https://tokio.rs)
-- Uses [Ollama](https://ollama.ai) for local inference
-
----
-
-**Built by Permutation Research** 🔄
+**Built by Permutation Research**

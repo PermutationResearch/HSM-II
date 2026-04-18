@@ -1,0 +1,21 @@
+{
+  "framework": "unknown",
+  "language": "javascript",
+  "styling": {
+    "tailwind": false,
+    "cssModules": false,
+    "styledComponents": false
+  },
+  "shadcn": {
+    "installed": false,
+    "components": []
+  },
+  "designTokens": {
+    "source": "none",
+    "tokenCount": 0
+  },
+  "paths": {
+    "components": "src/components"
+  },
+  "detectedAt": "2026-04-18T04:42:54.594Z"
+}

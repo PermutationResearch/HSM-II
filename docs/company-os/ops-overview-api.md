@@ -39,6 +39,46 @@ meant to close the gap between the existing low-level pieces:
   Simple booleans summarizing which orchestration features are configured or
   already implemented.
 
+## Context resilience
+
+The overview endpoint is also the primary **context recovery surface**. When an agent
+loses session state — crash, restart, context window flush — it re-enters the system
+by calling this endpoint before doing anything else.
+
+`GET .../ops/overview` returns:
+
+- `audit.task_trail` — recent task-level execution history so a re-entering agent can
+  reconstruct what was done and what was not
+- `governance_recent` — open flags and unresolved approvals the agent must be aware of
+- `heartbeats` — current heartbeat state so the agent knows whether scheduled work is
+  overdue
+- `overview.tasks` — counts by status so the agent can triage before acting
+
+Context is **not** stored in agent memory or session. It lives in Postgres. Every agent
+entry should start with this call, not with assumptions about what was previously loaded.
+This is the answer to context decay: durable storage queried on demand, not fragile
+in-process state.
+
+## Repair visibility
+
+Repair events — failures at any loop phase — appear in two places in the overview
+response:
+
+- `audit.failures` — task trail entries with `outcome: failure` or `event_type: phase_failure`
+- `governance_recent` — governance events of type `phase_failure` or `escalation`
+
+Repair events are not filtered out of the overview. An operator or agent reading the
+overview always sees the current failure state. Suppressing failures is not an option
+the API offers.
+
+When `audit.failures` is non-empty, the standard repair path is:
+
+1. Read the failure entry to identify which phase failed and why
+2. Re-hydrate task context: `GET .../tasks/{task_id}/llm-context`
+3. Re-enter the failed phase with `repair: true` on the task
+4. If two consecutive cycles fail, the task auto-escalates to `approvals` with
+   `escalation_reason` set; this appears in `governance_recent`
+
 ## Current limitations
 
 - Hard-stop budgets are now enforced on task checkout.

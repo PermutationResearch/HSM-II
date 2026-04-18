@@ -204,6 +204,31 @@ pub async fn import_paperclip_pack(pool: &PgPool, company_id: Uuid) -> Result<se
         ));
     }
 
+    // Auto-fetch latest files from upstream before reading the pack (non-fatal).
+    if let Some(slug) = home_path.file_name().map(|n| n.to_string_lossy().to_string()) {
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join("update_company_packs.py");
+        if script.is_file() {
+            tracing::info!(slug = %slug, "auto-fetch: refreshing company pack from upstream");
+            match std::process::Command::new("python3")
+                .arg(&script)
+                .arg("--fetch")
+                .arg(&slug)
+                .output()
+            {
+                Ok(out) => {
+                    let detail = String::from_utf8_lossy(&out.stderr);
+                    let detail = detail.trim();
+                    if !detail.is_empty() {
+                        tracing::info!(slug = %slug, "auto-fetch: {}", detail);
+                    }
+                }
+                Err(e) => tracing::warn!(slug = %slug, "auto-fetch skipped: {}", e),
+            }
+        }
+    }
+
     let pack_root = resolve_pack_root(&home_path)?;
     let agents_dir = pack_root.join("agents");
 
