@@ -362,6 +362,9 @@ pub struct EnhancedPersonalAgent {
     pub hermes_enabled: bool,
     /// Optional Hermes extension server client (for when the Hermes Agent daemon is running).
     pub hermes_client: Option<HermesClient>,
+    /// SFT capture handle — set by Company OS dispatch before `handle_message`; `None` in
+    /// interactive sessions. When set, every Hermes turn is recorded to `sft_traces.jsonl`.
+    pub sft_capture: Option<crate::sft::SftCapture>,
 
     // ── Honcho cross-session user inference ───────────────────────────────────
     /// Shared HybridMemory used exclusively by the Honcho inference worker.
@@ -642,6 +645,7 @@ impl EnhancedPersonalAgent {
             prompt_router,
             hermes_enabled,
             hermes_client,
+            sft_capture: None,
             honcho_memory,
             honcho_turn_count: 0,
             honcho_peer_repr: None,
@@ -2129,6 +2133,12 @@ impl EnhancedPersonalAgent {
              - Be concise. Do not explain what you will do — just do it."
         );
 
+        // ── SFT capture: record system prompt + initial user query ────────────
+        if let Some(ref cap) = self.sft_capture {
+            cap.push_system(&system_prompt).await;
+            cap.push_user(task).await;
+        }
+
         let mut conversation: Vec<(String, String)> = Vec::new();
         let mut current_query = task.to_string();
         let mut final_content = String::new();
@@ -2148,6 +2158,11 @@ impl EnhancedPersonalAgent {
             }
 
             let response_text = Self::clean_response(&llm_result.text);
+
+            // ── SFT capture: record every assistant turn ───────────────────
+            if let Some(ref cap) = self.sft_capture {
+                cap.push_assistant(&response_text).await;
+            }
 
             // Try to parse a tool call from the response
             let json_candidate = Self::extract_tool_call_json(&response_text);
@@ -2216,6 +2231,15 @@ impl EnhancedPersonalAgent {
                                     .unwrap_or("Tool execution failed")
                             )
                         };
+
+                        // ── SFT capture: record tool result ────────────────
+                        if let Some(ref cap) = self.sft_capture {
+                            cap.push_tool_result(
+                                tool_name,
+                                &tool_output,
+                                result.output.success,
+                            ).await;
+                        }
 
                         // Feed tool result back as next user message
                         conversation.push(("assistant".to_string(), response_text.clone()));

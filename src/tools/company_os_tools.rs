@@ -1194,3 +1194,541 @@ impl Tool for CompanyPromoteFeedbackToTaskTool {
         }
     }
 }
+
+// ── company_create_task ───────────────────────────────────────────────────────
+
+const TOOL_CREATE_TASK: &str = "company_create_task";
+
+/// Create a new Company OS task, optionally pre-assigning it to another agent.
+///
+/// This is the primary inter-agent dispatch primitive: a CEO/orchestrator agent
+/// can break work down and spawn subtasks for specialist agents by setting
+/// `checked_out_by` to the target agent's persona slug.
+pub struct CompanyCreateTaskTool {
+    client: Client,
+}
+
+impl CompanyCreateTaskTool {
+    pub fn new() -> Self {
+        Self { client: company_client() }
+    }
+}
+
+impl Default for CompanyCreateTaskTool {
+    fn default() -> Self { Self::new() }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyCreateTaskTool {
+    fn name(&self) -> &str { TOOL_CREATE_TASK }
+
+    fn description(&self) -> &str {
+        "Create a new Company OS task. Use this to delegate work to another agent or queue \
+         work for the next automation cycle. Set `checked_out_by` to a specific agent persona \
+         slug (e.g. 'cto-agent', 'marketing-agent') to pre-assign it — the server validates \
+         the slug against the team roster. Leave empty for auto-dispatch. Set `parent_task_id` \
+         to link as a subtask. Set `due_at` (ISO 8601) for deadline tracking. Set \
+         `blocked_by_task_id` to declare a dependency on another task. \
+         Calls POST /api/company/companies/{company_id}/tasks."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "company_id": {
+                    "type": "string",
+                    "description": "Company UUID (or set HSM_COMPANY_ID env var)."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short task title (required)."
+                },
+                "specification": {
+                    "type": "string",
+                    "description": "Full task specification — what the assigned agent should do."
+                },
+                "checked_out_by": {
+                    "type": "string",
+                    "description": "Agent persona slug to pre-assign this task to (e.g. 'cto-agent'). Validated against team roster. Leave empty for auto-dispatch."
+                },
+                "owner_persona": {
+                    "type": "string",
+                    "description": "DRI persona for the task (defaults to checked_out_by when omitted)."
+                },
+                "primary_goal_id": {
+                    "type": "string",
+                    "description": "Goal UUID to attach this task to. Link tasks to goals for coverage tracking."
+                },
+                "parent_task_id": {
+                    "type": "string",
+                    "description": "Parent task UUID when creating a subtask."
+                },
+                "blocked_by_task_id": {
+                    "type": "string",
+                    "description": "Task UUID that must complete before this task can start. Sets a hard dependency."
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": "Deadline as ISO 8601 timestamp (e.g. '2026-04-25T18:00:00Z'). Used for SLA tracking and dashboard alerts."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Task priority 0–100 (default 50)."
+                },
+                "capability_refs": {
+                    "type": "array",
+                    "description": "Array of {kind, ref} objects linking skills/SOPs/tools to this task. Used for skill-based agent routing.",
+                    "items": { "type": "object" }
+                },
+                "actor": {
+                    "type": "string",
+                    "description": "Creating agent name for audit (else HSM_COMPANY_TASK_ACTOR / 'agent')."
+                }
+            },
+            "required": ["title"]
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(company_id) = resolve_company_id_param(&params) else {
+            return ToolOutput::error(
+                "company_create_task: company_id required (param or HSM_COMPANY_ID)",
+            );
+        };
+
+        let title = match params
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(t) => t.to_string(),
+            None => return ToolOutput::error("company_create_task: title is required"),
+        };
+
+        let actor = resolve_actor(&params);
+
+        let mut body = json!({
+            "title": title,
+            "actor": actor,
+        });
+
+        if let Some(s) = params.get("specification").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["specification"] = json!(s);
+        }
+        if let Some(s) = params.get("checked_out_by").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["checked_out_by"] = json!(s);
+            // Default owner_persona to checked_out_by if not explicitly set
+            if params.get("owner_persona").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).is_none() {
+                body["owner_persona"] = json!(s);
+            }
+        }
+        if let Some(s) = params.get("owner_persona").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["owner_persona"] = json!(s);
+        }
+        if let Some(s) = params.get("primary_goal_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["primary_goal_id"] = json!(s);
+        }
+        if let Some(s) = params.get("parent_task_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["parent_task_id"] = json!(s);
+        }
+        if let Some(s) = params.get("blocked_by_task_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["blocked_by_task_id"] = json!(s);
+        }
+        if let Some(s) = params.get("due_at").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            body["due_at"] = json!(s);
+        }
+        if let Some(p) = params.get("priority").and_then(|v| v.as_i64()) {
+            body["priority"] = json!(p.clamp(0, 100));
+        }
+        if let Some(refs) = params.get("capability_refs").and_then(|v| v.as_array()) {
+            body["capability_refs"] = json!(refs);
+        }
+
+        let base = company_api_base();
+        let url = format!("{base}/api/company/companies/{company_id}/tasks");
+        let req = apply_company_bearer(
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body),
+        );
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    // Extract new task id for confirmation message
+                    let task_id = serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    ToolOutput::success(format!("task created: {task_id}"))
+                        .with_metadata(json!({ "task_id": task_id, "url": url, "response": text }))
+                } else {
+                    ToolOutput::error(format!(
+                        "company_create_task HTTP {}: {}",
+                        status.as_u16(),
+                        text.chars().take(600).collect::<String>()
+                    ))
+                }
+            }
+            Err(e) => ToolOutput::error(format!("company_create_task request failed: {e}")),
+        }
+    }
+}
+
+// ── company_update_task ───────────────────────────────────────────────────────
+
+const TOOL_UPDATE_TASK: &str = "company_update_task";
+
+/// Update a task's state and/or append a stigmergic context note from within a run.
+///
+/// Agents use this to mark subtasks done, blocked, or cancelled, and to leave
+/// structured handoff notes for the next agent in the chain.
+pub struct CompanyUpdateTaskTool {
+    client: Client,
+}
+
+impl CompanyUpdateTaskTool {
+    pub fn new() -> Self {
+        Self { client: company_client() }
+    }
+}
+
+impl Default for CompanyUpdateTaskTool {
+    fn default() -> Self { Self::new() }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyUpdateTaskTool {
+    fn name(&self) -> &str { TOOL_UPDATE_TASK }
+
+    fn description(&self) -> &str {
+        "Update a Company OS task: change state, reassign to another agent, set a deadline, \
+         declare a dependency, or append a stigmergic note. \
+         Use `state=done` to mark work complete. Use `note` to leave handoff context for \
+         the next agent. Use `assign_to` to hand the task off (validated against team roster). \
+         Use `due_at` (ISO 8601) to set or update a deadline. Use `blocked_by_task_id` to \
+         declare a blocker dependency. \
+         Calls PATCH /api/company/tasks/{task_id} and/or \
+         POST /api/company/tasks/{task_id}/stigmergic-note."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task UUID (or set HSM_COMPANY_TASK_ID)."
+                },
+                "state": {
+                    "type": "string",
+                    "description": "New task state: open | in_progress | done | cancelled | blocked."
+                },
+                "assign_to": {
+                    "type": "string",
+                    "description": "Agent persona slug to reassign this task to (e.g. 'cto-agent'). Validated against team roster."
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": "Deadline as ISO 8601 timestamp (e.g. '2026-04-25T18:00:00Z')."
+                },
+                "blocked_by_task_id": {
+                    "type": "string",
+                    "description": "Task UUID that blocks this task. Sets a dependency."
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Stigmergic context note to append (shown to future agents in llm-context)."
+                },
+                "actor": {
+                    "type": "string",
+                    "description": "Agent name for audit (else HSM_COMPANY_TASK_ACTOR / 'agent')."
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(task_id) = resolve_task_id(&params) else {
+            return ToolOutput::error(
+                "company_update_task: task_id required (param or HSM_COMPANY_TASK_ID)",
+            );
+        };
+
+        let actor = resolve_actor(&params);
+        let base = company_api_base();
+        let mut results: Vec<String> = Vec::new();
+        let mut had_error = false;
+
+        // 1. Update state if provided
+        if let Some(state) = params
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let valid_states = ["open", "in_progress", "done", "cancelled", "blocked", "closed"];
+            if !valid_states.contains(&state) {
+                return ToolOutput::error(format!(
+                    "company_update_task: invalid state '{}'; must be one of: {}",
+                    state, valid_states.join(", ")
+                ));
+            }
+
+            let url = format!("{base}/api/company/tasks/{task_id}");
+            let mut state_body = json!({ "state": state, "actor": actor });
+            // Include assignment and deadline in the same PATCH if provided
+            if let Some(s) = params.get("assign_to").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                state_body["checked_out_by"] = json!(s);
+            }
+            if let Some(s) = params.get("due_at").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                state_body["due_at"] = json!(s);
+            }
+            if let Some(s) = params.get("blocked_by_task_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                state_body["blocked_by_task_id"] = json!(s);
+            }
+            let body = state_body;
+            let req = apply_company_bearer(
+                self.client
+                    .patch(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body),
+            );
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        results.push(format!("state → {state}"));
+                    } else {
+                        had_error = true;
+                        results.push(format!("state update failed HTTP {}: {}", status.as_u16(),
+                            text.chars().take(300).collect::<String>()));
+                    }
+                }
+                Err(e) => {
+                    had_error = true;
+                    results.push(format!("state update request failed: {e}"));
+                }
+            }
+        }
+
+        // 1b. If no state change but assignment/deadline/blocker fields were provided, PATCH them
+        let has_meta_update = params.get("state").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).is_none()
+            && (params.get("assign_to").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).is_some()
+                || params.get("due_at").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).is_some()
+                || params.get("blocked_by_task_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).is_some());
+
+        if has_meta_update {
+            let url = format!("{base}/api/company/tasks/{task_id}");
+            let mut meta_body = json!({ "actor": actor });
+            if let Some(s) = params.get("assign_to").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                meta_body["checked_out_by"] = json!(s);
+            }
+            if let Some(s) = params.get("due_at").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                meta_body["due_at"] = json!(s);
+            }
+            if let Some(s) = params.get("blocked_by_task_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                meta_body["blocked_by_task_id"] = json!(s);
+            }
+            let req = apply_company_bearer(
+                self.client
+                    .patch(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&meta_body),
+            );
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        results.push("metadata updated (assignment/deadline/blocker)".to_string());
+                    } else {
+                        had_error = true;
+                        results.push(format!("metadata update failed HTTP {}: {}",
+                            status.as_u16(), text.chars().take(300).collect::<String>()));
+                    }
+                }
+                Err(e) => {
+                    had_error = true;
+                    results.push(format!("metadata update request failed: {e}"));
+                }
+            }
+        }
+
+        // 2. Append stigmergic note if provided
+        if let Some(note_text) = params
+            .get("note")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let url = format!("{base}/api/company/tasks/{task_id}/stigmergic-note");
+            let body = json!({ "text": note_text, "actor": actor });
+            let req = apply_company_bearer(
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body),
+            );
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        results.push("note appended".to_string());
+                    } else {
+                        had_error = true;
+                        results.push(format!("note append failed HTTP {}: {}", status.as_u16(),
+                            text.chars().take(300).collect::<String>()));
+                    }
+                }
+                Err(e) => {
+                    had_error = true;
+                    results.push(format!("note append request failed: {e}"));
+                }
+            }
+        }
+
+        if results.is_empty() {
+            return ToolOutput::error(
+                "company_update_task: provide at least one of: state, note, assign_to, due_at, blocked_by_task_id",
+            );
+        }
+
+        let summary = results.join("; ");
+        if had_error {
+            ToolOutput::error(format!("company_update_task partial: {summary}"))
+        } else {
+            ToolOutput::success(format!("company_update_task ok: {summary}"))
+                .with_metadata(json!({ "task_id": task_id }))
+        }
+    }
+}
+
+// ── company_list_tasks ────────────────────────────────────────────────────────
+
+const TOOL_LIST_TASKS: &str = "company_list_tasks";
+
+/// List tasks for situational awareness — what's open, what's in-progress, what's done.
+pub struct CompanyListTasksTool {
+    client: Client,
+}
+
+impl CompanyListTasksTool {
+    pub fn new() -> Self {
+        Self { client: company_client() }
+    }
+}
+
+impl Default for CompanyListTasksTool {
+    fn default() -> Self { Self::new() }
+}
+
+#[async_trait::async_trait]
+impl Tool for CompanyListTasksTool {
+    fn name(&self) -> &str { TOOL_LIST_TASKS }
+
+    fn description(&self) -> &str {
+        "List Company OS tasks for situational awareness. Filter by state and/or agent. \
+         Use to check what work is pending, who owns what, and whether subtasks you \
+         created have been picked up. \
+         Calls GET /api/company/companies/{company_id}/tasks."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "company_id": {
+                    "type": "string",
+                    "description": "Company UUID (or set HSM_COMPANY_ID)."
+                },
+                "state": {
+                    "type": "string",
+                    "description": "Filter by state: open | in_progress | done | cancelled | blocked. Omit for all."
+                },
+                "checked_out_by": {
+                    "type": "string",
+                    "description": "Filter to tasks assigned to a specific agent persona slug."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 20, max 100)."
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn execute(&self, params: Value) -> ToolOutput {
+        let Some(company_id) = resolve_company_id_param(&params) else {
+            return ToolOutput::error(
+                "company_list_tasks: company_id required (param or HSM_COMPANY_ID)",
+            );
+        };
+
+        let base = company_api_base();
+        let url = format!("{base}/api/company/companies/{company_id}/tasks");
+
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = params.get("state").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            query.push(("state", s.to_string()));
+        }
+        if let Some(s) = params.get("checked_out_by").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            query.push(("checked_out_by", s.to_string()));
+        }
+        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).clamp(1, 100);
+        query.push(("limit", limit.to_string()));
+
+        let mut rb = apply_company_bearer(self.client.get(&url));
+        for (k, v) in &query {
+            rb = rb.query(&[(k, v.as_str())]);
+        }
+
+        match rb.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    // Summarise compactly so we don't blow the context window
+                    let summary = match serde_json::from_str::<Value>(&text) {
+                        Ok(Value::Array(arr)) => {
+                            let lines: Vec<String> = arr.iter().filter_map(|t| {
+                                let id = t.get("id")?.as_str()?;
+                                let title = t.get("title")?.as_str().unwrap_or("(no title)");
+                                let state = t.get("state")?.as_str().unwrap_or("?");
+                                let agent = t.get("checked_out_by")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("unassigned");
+                                Some(format!("[{state}] {title} | agent={agent} | id={id}"))
+                            }).collect();
+                            if lines.is_empty() {
+                                "(no tasks match filter)".to_string()
+                            } else {
+                                lines.join("\n")
+                            }
+                        }
+                        _ => text.chars().take(2000).collect::<String>(),
+                    };
+                    ToolOutput::success(summary)
+                        .with_metadata(json!({ "company_id": company_id }))
+                } else {
+                    ToolOutput::error(format!(
+                        "company_list_tasks HTTP {}: {}",
+                        status.as_u16(),
+                        text.chars().take(600).collect::<String>()
+                    ))
+                }
+            }
+            Err(e) => ToolOutput::error(format!("company_list_tasks request failed: {e}")),
+        }
+    }
+}

@@ -35,6 +35,7 @@ pub mod rlm;
 pub mod rlm_v2;
 pub mod skill;
 pub mod skill_markdown;
+pub mod sft;
 pub mod trace2skill;
 pub mod transaction_layer;
 pub mod workflow;

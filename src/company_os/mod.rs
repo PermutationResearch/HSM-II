@@ -31,7 +31,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -315,6 +315,26 @@ pub fn router() -> Router<ConsoleState> {
             "/api/company/tasks/:task_id/stigmergic-note",
             post(post_task_stigmergic_note),
         )
+        // ── Agent chat: natural-language Company OS interface ──────────────────
+        // POST /api/company/companies/{company_id}/agent-chat
+        // Dashboard — running/stuck/overdue tasks, goal coverage, active agents
+        .route(
+            "/api/company/companies/:company_id/dashboard",
+            get(get_company_dashboard),
+        )
+        // Task event log — full audit trail per task
+        .route("/api/company/tasks/:task_id/events", get(get_task_events))
+        .route(
+            "/api/company/tasks/:task_id/events/stream",
+            get(stream_task_events),
+        )
+        // Takes { message, actor, thread_id? } → runs through EnhancedPersonalAgent with full
+        // company context + tool loop. The agent can list tasks, create tasks,
+        // dispatch to other agents, search memory, etc. — all from one chat message.
+        .route(
+            "/api/company/companies/:company_id/agent-chat",
+            post(post_agent_chat),
+        )
         .layer(axum::middleware::from_fn(require_company_api_auth))
 }
 
@@ -381,11 +401,11 @@ async fn register_idempotency(
     payload: &Value,
 ) -> Result<bool, sqlx::Error> {
     let request_hash = hash_idem_payload(payload);
-    let inserted = sqlx::query_scalar::<_, i64>(
+    let inserted = sqlx::query_scalar::<_, bool>(
         r#"INSERT INTO request_idempotency (company_id, scope, idempotency_key, request_hash)
            VALUES ($1,$2,$3,$4)
            ON CONFLICT (company_id, scope, idempotency_key) DO NOTHING
-           RETURNING 1"#,
+           RETURNING true"#,
     )
     .bind(company_id)
     .bind(scope)
@@ -396,10 +416,10 @@ async fn register_idempotency(
     Ok(inserted.is_some())
 }
 
-pub fn start_automation_worker(pool: PgPool) {
+pub fn start_automation_worker(pool: PgPool, home: std::path::PathBuf) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = automation_tick(&pool).await {
+            if let Err(e) = automation_tick(&pool, &home).await {
                 tracing::warn!(target: "hsm_company_automation", "automation tick failed: {e}");
             }
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
@@ -407,12 +427,502 @@ pub fn start_automation_worker(pool: PgPool) {
     });
 }
 
-async fn automation_tick(pool: &PgPool) -> Result<(), sqlx::Error> {
+/// Fire-and-forget task event log. Call on every state change, tool call, or note.
+async fn emit_task_event(
+    pool: &PgPool,
+    task_id: Uuid,
+    company_id: Uuid,
+    event_type: &str,
+    actor: &str,
+    payload: Value,
+) {
+    let _ = sqlx::query(
+        r#"INSERT INTO task_events (task_id, company_id, event_type, actor, payload)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(task_id)
+    .bind(company_id)
+    .bind(event_type)
+    .bind(actor)
+    .bind(SqlxJson(payload))
+    .execute(pool)
+    .await;
+}
+
+/// Compute and store goal-coverage KPI for all companies (run hourly, time-gated in tick).
+async fn compute_goal_coverage(pool: &PgPool) {
+    let companies: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM companies")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    for cid in companies {
+        let result: Option<(i64, i64)> = sqlx::query_as::<_, (i64, i64)>(
+            r#"SELECT COUNT(*)::bigint,
+                      COUNT(*) FILTER (WHERE primary_goal_id IS NOT NULL)::bigint
+               FROM tasks WHERE company_id=$1
+                 AND created_at > now() - interval '7 days'"#,
+        )
+        .bind(cid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let (total, with_goal) = result.unwrap_or((0, 0));
+        let pct = if total > 0 { with_goal as f64 / total as f64 * 100.0 } else { 0.0 };
+
+        tracing::info!(
+            target: "hsm_company_kpi",
+            company_id = %cid,
+            coverage_pct = pct,
+            total_tasks = total,
+            tasks_with_goal = with_goal,
+            "goal_coverage"
+        );
+
+        let _ = sqlx::query(
+            r#"INSERT INTO goal_coverage_stats
+               (company_id, total_tasks, tasks_with_goal, coverage_pct)
+               VALUES ($1, $2, $3, $4)"#,
+        )
+        .bind(cid)
+        .bind(total as i32)
+        .bind(with_goal as i32)
+        .bind(pct)
+        .execute(pool)
+        .await;
+    }
+}
+
+async fn automation_tick(pool: &PgPool, home: &std::path::Path) -> Result<(), sqlx::Error> {
     enqueue_sla_escalation_jobs(pool).await?;
     process_due_automation_jobs(pool).await?;
     run_auto_revert_checks(pool).await?;
+    recover_stale_in_progress_tasks(pool).await;
+    auto_dispatch_eligible_tasks(pool, home).await;
+    auto_complete_finished_goals(pool).await;
     let _ = self_improvement::maybe_run_weekly_nudges(pool).await;
+    // Goal coverage KPI — run hourly, time-gated to avoid redundant writes
+    let run_coverage: bool = sqlx::query_scalar::<_, bool>(
+        r#"SELECT NOT EXISTS(
+               SELECT 1 FROM goal_coverage_stats
+               WHERE computed_at > now() - interval '50 minutes'
+           )"#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(true);
+    if run_coverage {
+        compute_goal_coverage(pool).await;
+    }
     Ok(())
+}
+
+/// Reset tasks that are stuck in `in_progress` with no active agent run — e.g. after a
+/// server restart mid-dispatch. Without this, those tasks are permanently blocked by the
+/// `NOT EXISTS(running agent_run)` guard in the eligibility query and never re-dispatched.
+/// A 30-minute window avoids racing long-running legitimate agent executions.
+async fn recover_stale_in_progress_tasks(pool: &PgPool) {
+    let recovered = sqlx::query(
+        r#"WITH stale AS (
+               SELECT t.id
+               FROM tasks t
+               WHERE t.state = 'in_progress'
+                 AND t.updated_at < now() - interval '30 minutes'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM agent_runs ar
+                     WHERE ar.task_id = t.id AND ar.status = 'running'
+                 )
+               LIMIT 20
+           )
+           UPDATE tasks SET state = 'open', updated_at = now()
+           WHERE id IN (SELECT id FROM stale)"#,
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+
+    if recovered > 0 {
+        tracing::info!(
+            target: "hsm_company_automation",
+            count = recovered,
+            "recovered stale in_progress tasks → open"
+        );
+    }
+}
+
+/// Mark goals as `done` when every non-cancelled task under them is in a terminal state
+/// (`done` or `closed`). Requires at least one task to exist — goals with no tasks at all
+/// are not auto-completed. Emits a governance event on each transition.
+async fn auto_complete_finished_goals(pool: &PgPool) {
+    #[derive(sqlx::FromRow)]
+    struct CompletedGoal {
+        id: Uuid,
+        company_id: Uuid,
+    }
+    let completed = sqlx::query_as::<_, CompletedGoal>(
+        r#"WITH eligible AS (
+               SELECT g.id, g.company_id
+               FROM goals g
+               WHERE g.status = 'active'
+                 -- at least one task exists under this goal
+                 AND EXISTS (
+                     SELECT 1 FROM tasks t WHERE t.primary_goal_id = g.id
+                 )
+                 -- no task is still in a non-terminal state
+                 AND NOT EXISTS (
+                     SELECT 1 FROM tasks t
+                     WHERE t.primary_goal_id = g.id
+                       AND t.state NOT IN ('done', 'closed', 'cancelled')
+                 )
+                 -- at least one task is done/closed (not all cancelled)
+                 AND EXISTS (
+                     SELECT 1 FROM tasks t
+                     WHERE t.primary_goal_id = g.id
+                       AND t.state IN ('done', 'closed')
+                 )
+           )
+           UPDATE goals SET status = 'done', updated_at = now()
+           WHERE id IN (SELECT id FROM eligible)
+           RETURNING id, company_id"#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for row in &completed {
+        let goal_id = row.id;
+        let company_id = row.company_id;
+        tracing::info!(
+            target: "hsm_company_automation",
+            %goal_id,
+            %company_id,
+            "goal auto-completed: all tasks terminal"
+        );
+        let _ = sqlx::query(
+            r#"INSERT INTO governance_events
+               (company_id, actor, action, subject_type, subject_id, payload, severity)
+               VALUES ($1, 'automation_worker', 'goal_auto_completed', 'goal', $2, $3, 'info')"#,
+        )
+        .bind(company_id)
+        .bind(goal_id.to_string())
+        .bind(serde_json::json!({ "source": "auto_complete_finished_goals" }))
+        .execute(pool)
+        .await;
+    }
+}
+
+/// Auto-dispatch tasks that have an assigned agent (checked_out_by set) but are still
+/// in state='open' and have not been picked up by a recent agent run.
+/// Limits to 3 tasks per tick across all companies to avoid thundering herd.
+async fn auto_dispatch_eligible_tasks(pool: &PgPool, home: &std::path::Path) {
+    #[derive(sqlx::FromRow)]
+    struct EligibleTask {
+        id: Uuid,
+        company_id: Uuid,
+        title: String,
+        checked_out_by: String,
+        /// True when the task declares required skills via capability_refs.
+        has_capability_refs: bool,
+    }
+    let eligible = sqlx::query_as::<_, EligibleTask>(
+        r#"SELECT t.id, t.company_id, t.title,
+                  COALESCE(t.checked_out_by, t.owner_persona) AS checked_out_by,
+                  (t.capability_refs IS NOT NULL
+                   AND jsonb_typeof(t.capability_refs) = 'array'
+                   AND jsonb_array_length(t.capability_refs) > 0) AS has_capability_refs
+           FROM tasks t
+           WHERE t.state = 'open'
+             -- eligible if assigned via checked_out_by or owner_persona
+             AND (t.checked_out_by IS NOT NULL OR t.owner_persona IS NOT NULL)
+             AND COALESCE(t.checked_out_by, t.owner_persona) <> ''
+             -- must be at least 10 seconds old to avoid racing manual dispatch
+             AND t.updated_at < now() - interval '10 seconds'
+             -- no running agent_run already in-flight for this task
+             AND NOT EXISTS (
+                 SELECT 1 FROM agent_runs ar
+                 WHERE ar.task_id = t.id AND ar.status = 'running'
+             )
+             -- skip tasks flagged for human approval
+             AND t.requires_human = false
+           ORDER BY t.priority DESC, t.updated_at ASC
+           LIMIT 3"#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for task_meta in eligible {
+        let task_id = task_meta.id;
+        let actor = task_meta.checked_out_by.clone();
+
+        // Atomically claim: only proceed if still open
+        // Note: RETURNING true (BOOLEAN) avoids integer type-width mismatch with sqlx.
+        let claimed: Option<bool> = sqlx::query_scalar(
+            "UPDATE tasks SET state = 'in_progress', updated_at = now()
+             WHERE id = $1 AND state = 'open' RETURNING true",
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        if claimed != Some(true) {
+            continue; // already picked up by someone else
+        }
+
+        tracing::info!(
+            target: "hsm_company_automation",
+            task_id = %task_id,
+            actor = %actor,
+            title = %task_meta.title,
+            "auto-dispatching eligible task"
+        );
+
+        // Skill-based routing: if the task declares required skills, warn when the
+        // assigned agent has no matching entries in company_skills. We don't block
+        // dispatch (to avoid starving tasks) but the log makes mismatches visible.
+        if task_meta.has_capability_refs {
+            let match_count: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*)::bigint
+                   FROM company_skills cs
+                   WHERE cs.company_id = $1
+                     AND cs.slug IS NOT NULL
+                     AND EXISTS (
+                         SELECT 1 FROM tasks t
+                         WHERE t.id = $2
+                           AND t.capability_refs @> jsonb_build_array(
+                                 jsonb_build_object('kind','skill','ref',cs.slug)
+                               )
+                     )"#,
+            )
+            .bind(task_meta.company_id)
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+            if match_count == 0 {
+                tracing::warn!(
+                    target: "hsm_company_dispatch",
+                    task_id = %task_id,
+                    actor = %actor,
+                    "task has capability_refs but assigned agent has no matching skills"
+                );
+            } else {
+                tracing::debug!(
+                    target: "hsm_company_dispatch",
+                    task_id = %task_id,
+                    actor = %actor,
+                    matching_skills = match_count,
+                    "skill match verified for task dispatch"
+                );
+            }
+        }
+
+        // Create agent_runs record — no external_run_id to avoid unique-constraint
+        // conflicts on retries; each dispatch gets a fresh UUID.
+        let run_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO agent_runs (company_id, task_id, external_system, status)
+               VALUES ($1, $2, 'hsm_auto', 'running')
+               RETURNING id"#,
+        )
+        .bind(task_meta.company_id)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "hsm_company_automation",
+                "auto-dispatch task {task_id}: agent_runs insert failed: {e}");
+            Uuid::new_v4()
+        });
+
+        // Build full task row for context prefix
+        let task_row = sqlx::query_as::<_, ExecuteTaskRow>(
+            r#"SELECT title, specification, checked_out_by,
+                      company_id, goal_ancestry, context_notes, capability_refs,
+                      primary_goal_id, parent_task_id
+               FROM tasks WHERE id = $1"#,
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let Some(task_row) = task_row else { continue };
+
+        let context_prefix = build_worker_context_prefix(pool, &task_row, &actor).await;
+        let base_task = format!(
+            "Execute this task with real tools and return what was done.\n\nTitle: {}\n\nSpecification:\n{}",
+            task_row.title,
+            task_row.specification.as_deref().unwrap_or("(no specification)")
+        );
+        let exec_identity = format!(
+            "## Your execution identity\n\n\
+             - **Actor (you)**: {actor}\n\
+             - **company_id**: {company_id}\n\
+             - **task_id**: {task_id}\n\
+             - **run_id**: {run_id}\n\n\
+             When calling company OS tools always pass `company_id`, `task_id`, and `run_id` \
+             explicitly using the values above.\n\n\
+             ## Available company OS tools\n\
+             - `company_list_tasks` — see open/in-progress work across the company\n\
+             - `company_create_task` — spawn a subtask and optionally assign it to another agent via `checked_out_by`\n\
+             - `company_update_task` — change task state (done/blocked/open) or append a stigmergic note\n\
+             - `company_memory_search` / `company_memory_append` — shared + private memory pool\n\
+             - `company_task_requires_human` — escalate to human inbox when blocked\n\
+             - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\n",
+            actor = actor,
+            company_id = task_meta.company_id,
+            task_id = task_id,
+            run_id = run_id,
+        );
+        let prompt = if context_prefix.is_empty() {
+            format!("/hermes {exec_identity}\n---\n\n## Your task\n\n{base_task}")
+        } else {
+            format!("/hermes {context_prefix}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
+        };
+
+        let pool_bg = pool.clone();
+        let home_bg = home.to_path_buf();
+        let actor_bg = actor.clone();
+        let company_id_bg = task_meta.company_id;
+
+        tokio::spawn(async move {
+            // ── SFT capture setup ─────────────────────────────────────────────
+            let sft_capture = if crate::sft::capture_enabled() {
+                let cap = crate::sft::SftCapture::new(&actor_bg);
+                cap.0.lock().await.task_id = Some(task_id.to_string());
+                cap.0.lock().await.run_id = Some(run_id.to_string());
+                cap.0.lock().await.company_id = Some(company_id_bg.to_string());
+                Some(cap)
+            } else {
+                None
+            };
+
+            let (run_status, agent_reply) =
+                match EnhancedPersonalAgent::initialize(&home_bg).await {
+                    Ok(mut agent) => {
+                        // Attach capture handle before execution
+                        agent.sft_capture = sft_capture.clone();
+
+                        let msg = Message {
+                            id: format!("auto-{task_id}"),
+                            platform: Platform::Web,
+                            channel_id: "company-os-auto".to_string(),
+                            channel_name: Some("company-os-auto".to_string()),
+                            user_id: actor_bg.clone(),
+                            user_name: actor_bg.clone(),
+                            content: prompt,
+                            timestamp: Utc::now(),
+                            attachments: Vec::new(),
+                            reply_to: None,
+                        };
+                        match agent.handle_message(msg).await {
+                            Ok(reply) => ("success".to_string(), Some(reply)),
+                            Err(e) => {
+                                tracing::warn!(target: "hsm_company_automation",
+                                    "auto-dispatch task {task_id} agent error: {e}");
+                                ("error".to_string(), None)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "hsm_company_automation",
+                            "auto-dispatch task {task_id} agent init failed: {e}");
+                        ("error".to_string(), None)
+                    }
+                };
+
+            // ── SFT capture teardown — write trace before DB updates ──────────
+            if let Some(cap) = sft_capture {
+                let trace = cap.finish(&run_status).await;
+                let trace_path = home_bg.join("memory/sft_traces.jsonl");
+                if let Err(e) = crate::sft::write_trace(&trace_path, &trace).await {
+                    tracing::warn!(target: "hsm_sft", "failed to write sft trace: {e}");
+                } else {
+                    tracing::debug!(target: "hsm_sft",
+                        trace_id = %trace.id,
+                        tool_calls = trace.tool_calls_count,
+                        outcome = %trace.outcome,
+                        "sft trace written");
+                }
+            }
+
+            let ar_status = if run_status == "success" { "success" } else { "error" };
+            let _ = sqlx::query(
+                "UPDATE agent_runs SET status = $1, finished_at = now() WHERE id = $2",
+            )
+            .bind(ar_status)
+            .bind(run_id)
+            .execute(&pool_bg)
+            .await;
+
+            if run_status == "success" {
+                let _ = sqlx::query(
+                    "UPDATE tasks SET state = 'done', updated_at = now() WHERE id = $1",
+                )
+                .bind(task_id)
+                .execute(&pool_bg)
+                .await;
+
+                if let Some(reply) = agent_reply {
+                    let summary = truncate_worker_log(&reply, 600);
+                    let note = serde_json::json!({
+                        "text": summary,
+                        "actor": actor_bg,
+                        "at": Utc::now().to_rfc3339(),
+                        "auto": true,
+                    });
+                    let _ = sqlx::query(
+                        "UPDATE tasks SET context_notes = context_notes || $1::jsonb, updated_at = now() WHERE id = $2",
+                    )
+                    .bind(serde_json::json!([note]))
+                    .bind(task_id)
+                    .execute(&pool_bg)
+                    .await;
+                }
+
+                let _ = sqlx::query(
+                    r#"INSERT INTO governance_events
+                       (company_id, actor, action, subject_type, subject_id, payload, severity)
+                       VALUES ($1, $2, 'task_completed', 'task', $3, $4, 'info')"#,
+                )
+                .bind(company_id_bg)
+                .bind(&actor_bg)
+                .bind(task_id.to_string())
+                .bind(serde_json::json!({ "source": "auto_dispatch" }))
+                .execute(&pool_bg)
+                .await;
+            } else {
+                // Revert to open so it can be retried; leave a stigmergic note so the
+                // next agent knows what was attempted and why it failed.
+                let _ = sqlx::query(
+                    "UPDATE tasks SET state = 'open', updated_at = now() WHERE id = $1",
+                )
+                .bind(task_id)
+                .execute(&pool_bg)
+                .await;
+
+                let failure_note = serde_json::json!({
+                    "text": "Agent run failed — no output produced. Will retry on next dispatch cycle.",
+                    "actor": actor_bg,
+                    "at": Utc::now().to_rfc3339(),
+                    "auto": true,
+                    "error": true,
+                });
+                let _ = sqlx::query(
+                    "UPDATE tasks SET context_notes = context_notes || $1::jsonb, updated_at = now() WHERE id = $2",
+                )
+                .bind(serde_json::json!([failure_note]))
+                .bind(task_id)
+                .execute(&pool_bg)
+                .await;
+            }
+        });
+    }
 }
 
 async fn enqueue_sla_escalation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -456,13 +966,13 @@ async fn process_due_automation_jobs(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
 
     for (job_id, company_id, kind, payload, attempts, max_attempts) in jobs {
-        let claimed: Option<i64> = sqlx::query_scalar(
-            "UPDATE automation_jobs SET status = 'running', updated_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING 1",
+        let claimed: Option<bool> = sqlx::query_scalar(
+            "UPDATE automation_jobs SET status = 'running', updated_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING true",
         )
         .bind(job_id)
         .fetch_optional(pool)
         .await?;
-        if claimed != Some(1) {
+        if claimed != Some(true) {
             continue;
         }
 
@@ -674,7 +1184,7 @@ async fn list_companies(
     };
     let rows = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies ORDER BY display_name"#,
     )
     .fetch_all(pool)
@@ -697,7 +1207,7 @@ async fn get_company(
     };
     let row = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies WHERE id = $1"#,
     )
     .bind(company_id)
@@ -739,7 +1249,7 @@ async fn patch_company(
     };
     let current = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies WHERE id = $1"#,
     )
     .bind(company_id)
@@ -796,7 +1306,7 @@ async fn patch_company(
                updated_at = now()
            WHERE id = $1
            RETURNING id, slug, display_name, hsmii_home, issue_key_prefix,
-                     context_markdown, created_at::text"#,
+                     context_markdown, webhook_url, created_at::text"#,
     )
     .bind(company_id)
     .bind(&c.display_name)
@@ -1785,7 +2295,7 @@ async fn load_yc_bench_profile_inputs(
 ) -> Result<Option<(CompanyRow, Vec<agents::CompanyAgentRow>, Vec<CompanySkillRow>)>, sqlx::Error> {
     let company = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies
            WHERE id = $1"#,
     )
@@ -2088,7 +2598,7 @@ async fn company_api_catalog(
     };
     let row = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies WHERE id = $1"#,
     )
     .bind(company_id)
@@ -2191,6 +2701,7 @@ struct CompanyRow {
     hsmii_home: Option<String>,
     issue_key_prefix: String,
     context_markdown: Option<String>,
+    webhook_url: Option<String>,
     created_at: String,
 }
 
@@ -2222,7 +2733,7 @@ async fn create_company(
         r#"INSERT INTO companies (slug, display_name, hsmii_home, issue_key_prefix)
            VALUES ($1, $2, $3, $4)
            RETURNING id, slug, display_name, hsmii_home, issue_key_prefix,
-                     context_markdown, created_at::text"#,
+                     context_markdown, webhook_url, created_at::text"#,
     )
     .bind(&slug)
     .bind(&display_name)
@@ -2585,6 +3096,8 @@ pub(super) struct TaskRow {
     priority: i32,
     display_number: i32,
     requires_human: bool,
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    blocked_by_task_id: Option<Uuid>,
     created_at: String,
 }
 
@@ -2697,12 +3210,14 @@ struct ExecuteTaskRow {
     goal_ancestry: serde_json::Value,
     context_notes: serde_json::Value,
     capability_refs: serde_json::Value,
-    owner_persona: Option<String>,
+    primary_goal_id: Option<Uuid>,
+    parent_task_id: Option<Uuid>,
 }
 
 /// Assemble the rich company context prefix injected into every execute-worker prompt.
-/// Fetches goals, team roster, skills catalog, active assignments, and stigmergic notes.
-async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> String {
+/// Fetches goals, team roster, skills catalog, active assignments, agent memories,
+/// sibling task stigmergic notes, and this task's own handoff notes.
+async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow, actor: &str) -> String {
     let cid = task.company_id;
     let mut out = String::with_capacity(4096);
 
@@ -2728,12 +3243,12 @@ async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> St
 
     // ── Active goals ──────────────────────────────────────────────────────────
     #[derive(sqlx::FromRow)]
-    struct GoalRow {
+    struct GoalBriefRow {
         title: String,
         status: String,
         parent_goal_id: Option<Uuid>,
     }
-    if let Ok(goals) = sqlx::query_as::<_, GoalRow>(
+    if let Ok(goals) = sqlx::query_as::<_, GoalBriefRow>(
         "SELECT title, status, parent_goal_id FROM goals WHERE company_id = $1
          ORDER BY sort_order, created_at LIMIT 20",
     )
@@ -2853,11 +3368,10 @@ async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> St
     #[derive(sqlx::FromRow)]
     struct SkillRow {
         slug: String,
-        name: String,
         description: String,
     }
     if let Ok(skills) = sqlx::query_as::<_, SkillRow>(
-        "SELECT slug, name, LEFT(description, 120) as description FROM company_skills
+        "SELECT slug, LEFT(description, 120) as description FROM company_skills
          WHERE company_id = $1 ORDER BY slug LIMIT 30",
     )
     .bind(cid)
@@ -2878,6 +3392,22 @@ async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> St
         }
     }
 
+    // ── Linked capability refs for this task ──────────────────────────────────
+    let caps = task.capability_refs.as_array().cloned().unwrap_or_default();
+    if !caps.is_empty() {
+        out.push_str("## Linked resources\n\n");
+        for cap in &caps {
+            if let Some(obj) = cap.as_object() {
+                let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("resource");
+                let r = obj.get("ref").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!("- [{kind}] `{r}`\n"));
+            } else if let Some(s) = cap.as_str() {
+                out.push_str(&format!("- `{s}`\n"));
+            }
+        }
+        out.push('\n');
+    }
+
     // ── Stigmergic handoff notes on this task ─────────────────────────────────
     let notes = task.context_notes.as_array().cloned().unwrap_or_default();
     if !notes.is_empty() {
@@ -2885,10 +3415,115 @@ async fn build_worker_context_prefix(pool: &PgPool, task: &ExecuteTaskRow) -> St
         // Show up to 10 most recent notes (array is ordered oldest-first)
         let start = notes.len().saturating_sub(10);
         for note in &notes[start..] {
-            let actor = note.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
+            let note_actor = note.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
             let text = note.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let at = note.get("at").and_then(|v| v.as_str()).unwrap_or("");
-            out.push_str(&format!("**{}** ({}):\n{}\n\n", actor, at, text));
+            out.push_str(&format!("**{}** ({}):\n{}\n\n", note_actor, at, text));
+        }
+    }
+
+    // ── Sibling / goal-scoped stigmergic notes (predecessor tasks) ────────────
+    // Surface completion notes from other tasks under the same goal or parent task
+    // so the agent understands what collaborators have already accomplished.
+    if let Some(goal_id) = task.primary_goal_id.or(task.parent_task_id) {
+        #[derive(sqlx::FromRow)]
+        struct SiblingNotesRow {
+            title: String,
+            context_notes: serde_json::Value,
+        }
+        if let Ok(siblings) = sqlx::query_as::<_, SiblingNotesRow>(
+            "SELECT title, context_notes FROM tasks
+             WHERE company_id = $1
+               AND primary_goal_id = $2
+               AND context_notes != '[]'::jsonb
+               AND context_notes != 'null'::jsonb
+             ORDER BY updated_at DESC LIMIT 5",
+        )
+        .bind(cid)
+        .bind(goal_id)
+        .fetch_all(pool)
+        .await
+        {
+            // Only show siblings that actually have notes
+            let siblings_with_notes: Vec<_> = siblings
+                .iter()
+                .filter(|s| s.context_notes.as_array().map_or(false, |a| !a.is_empty()))
+                .collect();
+            if !siblings_with_notes.is_empty() {
+                out.push_str("## Related task completions (same goal)\n\n");
+                for sib in siblings_with_notes {
+                    let sib_notes = sib.context_notes.as_array().cloned().unwrap_or_default();
+                    // Only show the most recent note from each sibling
+                    if let Some(last_note) = sib_notes.last() {
+                        let sib_actor = last_note.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
+                        let text = last_note.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let at = last_note.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                        out.push_str(&format!(
+                            "**{}** by {} ({}):\n{}\n\n",
+                            sib.title, sib_actor, at, text
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Agent memory (this agent's persisted knowledge + shared company memory) ─
+    if !actor.trim().is_empty() {
+        // Look up the company_agent_id for this actor by name
+        let agent_uuid: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM company_agents WHERE company_id = $1 AND name = $2 LIMIT 1",
+        )
+        .bind(cid)
+        .bind(actor)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        #[derive(sqlx::FromRow)]
+        struct MemRow {
+            title: String,
+            body: String,
+            scope: String,
+            tags: Vec<String>,
+        }
+        let memories: Vec<MemRow> = if let Some(aid) = agent_uuid {
+            sqlx::query_as::<_, MemRow>(
+                "SELECT title, LEFT(body, 400) as body, scope, tags
+                 FROM company_memory_entries
+                 WHERE company_id = $1 AND (company_agent_id = $2 OR scope = 'shared')
+                 ORDER BY updated_at DESC LIMIT 12",
+            )
+            .bind(cid)
+            .bind(aid)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            // No matching agent — only show shared memory
+            sqlx::query_as::<_, MemRow>(
+                "SELECT title, LEFT(body, 400) as body, scope, tags
+                 FROM company_memory_entries
+                 WHERE company_id = $1 AND scope = 'shared'
+                 ORDER BY updated_at DESC LIMIT 8",
+            )
+            .bind(cid)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        };
+
+        if !memories.is_empty() {
+            out.push_str("## Agent memory\n\n");
+            for m in &memories {
+                let scope_badge = if m.scope == "shared" { " *(shared)*" } else { "" };
+                let tags_str = if m.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", m.tags.join(", "))
+                };
+                out.push_str(&format!("### {}{}{}\n{}\n\n", m.title, scope_badge, tags_str, m.body.trim()));
+            }
         }
     }
 
@@ -2918,7 +3553,8 @@ async fn post_execute_task_worker(
     };
     let task = sqlx::query_as::<_, ExecuteTaskRow>(
         r#"SELECT title, specification, checked_out_by,
-                  company_id, goal_ancestry, context_notes, capability_refs, owner_persona
+                  company_id, goal_ancestry, context_notes, capability_refs,
+                  primary_goal_id, parent_task_id
            FROM tasks WHERE id = $1"#,
     )
     .bind(task_id)
@@ -2952,8 +3588,22 @@ async fn post_execute_task_worker(
         })
         .unwrap_or_else(|| "worker-agent-loop".to_string());
 
-    // Build rich company context prefix (goals, team, skills, handoff notes)
-    let context_prefix = build_worker_context_prefix(pool, &task).await;
+    // Create an agent_runs record so tools can reference the run_id and
+    // the governance layer has a canonical execution record.
+    // No external_run_id to avoid unique-constraint conflicts on re-dispatch.
+    let run_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO agent_runs (company_id, task_id, external_system, status)
+           VALUES ($1, $2, 'hsm', 'running')
+           RETURNING id"#,
+    )
+    .bind(task.company_id)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|_| Uuid::new_v4());
+
+    // Build rich company context prefix (goals, team, skills, memories, handoff notes)
+    let context_prefix = build_worker_context_prefix(pool, &task, &actor).await;
 
     // Assemble the base task instruction
     let base_task = body
@@ -2970,12 +3620,35 @@ async fn post_execute_task_worker(
             )
         });
 
+    // Build the execution identity block so tools can reference company_id / task_id / run_id
+    // without relying on environment variables (which are not available inside tokio tasks).
+    let exec_identity = format!(
+        "## Your execution identity\n\n\
+         - **Actor (you)**: {actor}\n\
+         - **company_id**: {company_id}\n\
+         - **task_id**: {task_id}\n\
+         - **run_id**: {run_id}\n\n\
+         When calling company OS tools always pass `company_id`, `task_id`, and `run_id` \
+         explicitly using the values above.\n\n\
+         ## Available company OS tools\n\
+         - `company_list_tasks` — see open/in-progress work across the company\n\
+         - `company_create_task` — spawn a subtask and optionally assign it to another agent via `checked_out_by`\n\
+         - `company_update_task` — change task state (done/blocked/open) or append a stigmergic note\n\
+         - `company_memory_search` / `company_memory_append` — shared + private memory pool\n\
+         - `company_task_requires_human` — escalate to human inbox when blocked\n\
+         - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\n",
+        actor = actor,
+        company_id = task.company_id,
+        task_id = task_id,
+        run_id = run_id,
+    );
+
     // Prefix with /hermes to always route through the agentic tool loop,
     // then inject company context so the agent has full situational awareness.
     let prompt = if context_prefix.is_empty() {
-        format!("/hermes {base_task}")
+        format!("/hermes {exec_identity}\n---\n\n## Your task\n\n{base_task}")
     } else {
-        format!("/hermes {context_prefix}\n---\n\n## Your task\n\n{base_task}")
+        format!("/hermes {context_prefix}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
     };
 
     let skill_slug = body
@@ -2988,6 +3661,7 @@ async fn post_execute_task_worker(
 
     let actor_for_response = actor.clone();
     let skill_slug_for_response = skill_slug.clone();
+    let run_id_for_response = run_id;
     let st_bg = st.clone();
     let pool_bg = pool.clone();
     let task_company_id = task.company_id;
@@ -3017,11 +3691,24 @@ async fn post_execute_task_worker(
         )
         .await;
 
+        // ── SFT capture setup (manual execute path) ───────────────────────────
+        let sft_cap_manual = if crate::sft::capture_enabled() {
+            let cap = crate::sft::SftCapture::new(&actor);
+            cap.0.lock().await.task_id = Some(task_id.to_string());
+            cap.0.lock().await.run_id = Some(run_id.to_string());
+            cap.0.lock().await.company_id = Some(task_company_id.to_string());
+            Some(cap)
+        } else {
+            None
+        };
+
         let start_ms = Utc::now().timestamp_millis();
         let mut rx = crate::runtime_control::subscribe_completions();
         let (run_status, mut tool_calls, log_append, agent_reply) =
             match EnhancedPersonalAgent::initialize(&st_bg.home).await {
                 Ok(mut agent) => {
+                    agent.sft_capture = sft_cap_manual.clone();
+
                     let msg = Message {
                         id: format!("task-{task_id}"),
                         platform: Platform::Web,
@@ -3088,6 +3775,25 @@ async fn post_execute_task_worker(
         )
         .await;
 
+        // ── SFT capture teardown (manual execute path) ────────────────────────
+        if let Some(cap) = sft_cap_manual {
+            let trace = cap.finish(&run_status).await;
+            let trace_path = st_bg.home.join("memory/sft_traces.jsonl");
+            if let Err(e) = crate::sft::write_trace(&trace_path, &trace).await {
+                tracing::warn!(target: "hsm_sft", "manual path: failed to write sft trace: {e}");
+            }
+        }
+
+        // ── Update agent_runs record with terminal status ──────────────────────
+        let ar_status = if run_status == "success" { "success" } else { "error" };
+        let _ = sqlx::query(
+            "UPDATE agent_runs SET status = $1, finished_at = now() WHERE id = $2",
+        )
+        .bind(ar_status)
+        .bind(run_id)
+        .execute(&pool_bg)
+        .await;
+
         // ── On success: mark task done + append stigmergic completion note ─────
         if run_status == "success" {
             let _ = sqlx::query(
@@ -3141,6 +3847,7 @@ async fn post_execute_task_worker(
     Ok(Json(json!({
         "started": true,
         "task_id": task_id,
+        "run_id": run_id_for_response,
         "actor": actor_for_response,
         "skill_slug": skill_slug_for_response,
     })))
@@ -3358,6 +4065,18 @@ async fn post_task_stigmergic_note(
             )
         })?;
 
+    // Emit task event for the note — need company_id
+    if let Ok(Some(cid)) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT company_id FROM tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    {
+        emit_task_event(pool, task_id, cid, "stigmergic_note", &actor,
+            json!({ "note": text })).await;
+    }
+
     Ok(Json(json!({ "ok": true, "context_notes": new_notes })))
 }
 
@@ -3370,7 +4089,7 @@ async fn list_tasks(
     };
     let rows = sqlx::query_as::<_, TaskRow>(
         r#"SELECT id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text
+                  owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text
            FROM tasks WHERE company_id = $1 ORDER BY priority DESC, created_at"#,
     )
     .bind(company_id)
@@ -3470,10 +4189,19 @@ struct CreateTaskBody {
     project_id: Option<Uuid>,
     #[serde(default)]
     owner_persona: Option<String>,
+    /// Pre-assign to a specific agent persona slug. Validated against company_agents roster.
+    #[serde(default)]
+    checked_out_by: Option<String>,
     #[serde(default)]
     parent_task_id: Option<Uuid>,
     #[serde(default)]
     spawned_by_rule_id: Option<Uuid>,
+    /// Declared dependency: this task cannot start until the referenced task completes.
+    #[serde(default)]
+    blocked_by_task_id: Option<Uuid>,
+    /// Optional deadline (ISO 8601). Surfaced in dashboard overdue alerts and SLA tracking.
+    #[serde(default)]
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Task queue ordering (higher runs first in `ORDER BY priority DESC`). Omitted or reviewer-deferred uses 0.
     #[serde(default)]
     priority: Option<i32>,
@@ -3716,11 +4444,44 @@ async fn create_task(
     let caps_json = normalize_capability_refs(body.capability_refs.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
     let priority_val = body.priority.unwrap_or(0).clamp(-1000, 1000);
+
+    // Validate checked_out_by against the agent roster
+    let checked_out_by_val = if let Some(ref slug) = body.checked_out_by {
+        let slug = slug.trim();
+        if !slug.is_empty() {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM company_agents WHERE company_id=$1 AND name=$2 AND status='active')",
+            )
+            .bind(company_id)
+            .bind(slug)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false);
+            if !exists {
+                // Warn but don't block — the agent may be added later
+                tracing::warn!(
+                    target: "hsm_company_tasks",
+                    company_id = %company_id,
+                    checked_out_by = %slug,
+                    "creating task assigned to unrecognized agent persona"
+                );
+            }
+            Some(slug.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, owner_persona, parent_task_id, spawned_by_rule_id, display_number, priority)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        r#"INSERT INTO tasks (company_id, primary_goal_id, project_id, goal_ancestry, title,
+                              specification, workspace_attachment_paths, capability_refs,
+                              owner_persona, checked_out_by, parent_task_id, spawned_by_rule_id,
+                              blocked_by_task_id, due_at, display_number, priority)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(company_id)
     .bind(&body.primary_goal_id)
@@ -3731,8 +4492,11 @@ async fn create_task(
     .bind(SqlxJson(ws_json))
     .bind(SqlxJson(caps_json))
     .bind(&body.owner_persona)
+    .bind(&checked_out_by_val)
     .bind(&body.parent_task_id)
     .bind(&body.spawned_by_rule_id)
+    .bind(&body.blocked_by_task_id)
+    .bind(&body.due_at)
     .bind(display_n)
     .bind(priority_val)
     .fetch_one(&mut *tx)
@@ -3773,6 +4537,15 @@ async fn create_task(
     })))
     .execute(pool)
     .await;
+
+    emit_task_event(
+        pool,
+        row.id,
+        company_id,
+        "created",
+        actor,
+        json!({ "title": row.title, "owner_persona": row.owner_persona }),
+    ).await;
 
     Ok((StatusCode::CREATED, Json(json!({ "task": row }))))
 }
@@ -4224,7 +4997,7 @@ async fn patch_task_context(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(task_id)
     .bind(body.specification.as_deref())
@@ -4442,7 +5215,7 @@ async fn post_task_decision(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(task_id)
     .bind(next_state)
@@ -4548,7 +5321,7 @@ async fn post_task_requires_human(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(task_id)
     .bind(body.requires_human)
@@ -4585,6 +5358,45 @@ async fn post_task_requires_human(
     })))
     .execute(pool)
     .await;
+
+    // Emit task event
+    emit_task_event(
+        pool,
+        task_id,
+        task.company_id,
+        "requires_human",
+        actor,
+        json!({ "requires_human": body.requires_human, "reason": reason }),
+    ).await;
+
+    // Fire webhook if company has one configured — non-blocking
+    if body.requires_human {
+        if let Ok(Some(wh_url)) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT webhook_url FROM companies WHERE id = $1",
+        )
+        .bind(task.company_id)
+        .fetch_one(pool)
+        .await
+        {
+            if !wh_url.is_empty() {
+                let wh_payload = json!({
+                    "event": "task_requires_human",
+                    "task_id": task_id,
+                    "company_id": task.company_id,
+                    "title": task.title,
+                    "reason": reason,
+                    "actor": actor,
+                });
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                        .unwrap_or_default();
+                    let _ = client.post(&wh_url).json(&wh_payload).send().await;
+                });
+            }
+        }
+    }
 
     Ok(Json(json!({ "task": task })))
 }
@@ -4645,7 +5457,7 @@ async fn checkout_task(
                OR lower(trim(checked_out_by)) = lower($1)
              )
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(&agent)
     .bind(body.ttl_sec)
@@ -4762,6 +5574,8 @@ async fn delete_task(
 #[derive(serde::Deserialize)]
 struct PatchTaskStateBody {
     state: String,
+    #[serde(default)]
+    actor: String,
 }
 
 /// `PATCH /api/company/tasks/:task_id/state`
@@ -4787,7 +5601,7 @@ async fn patch_task_state(
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification,
                      workspace_attachment_paths, capability_refs, state, owner_persona, parent_task_id,
                      spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number,
-                     requires_human, created_at::text"#,
+                     requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(task_id)
     .bind(&state)
@@ -4805,6 +5619,10 @@ async fn patch_task_state(
             Json(json!({ "error": "task not found" })),
         ));
     };
+    let actor_str = body.actor.trim();
+    let actor_str = if actor_str.is_empty() { "operator" } else { actor_str };
+    emit_task_event(pool, task_id, t.company_id, "state_change", actor_str,
+        json!({ "to": state })).await;
     Ok(Json(json!({ "task": t })))
 }
 
@@ -4823,7 +5641,7 @@ async fn release_task(
             updated_at = NOW()
            WHERE id = $1
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(task_id)
     .fetch_optional(pool)
@@ -4992,7 +5810,7 @@ async fn spawn_subagent_tasks(
     };
     let parent = sqlx::query_as::<_, TaskRow>(
         r#"SELECT id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona,
-                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text
+                  parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text
            FROM tasks WHERE id = $1 AND company_id = $2"#,
     )
     .bind(task_id)
@@ -5109,7 +5927,7 @@ async fn spawn_subagent_tasks(
                    (company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona, parent_task_id, spawned_by_rule_id, priority, display_number)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10,$11,$12,$13)
                    RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state, owner_persona,
-                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                             parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
             )
             .bind(company_id)
             .bind(parent.primary_goal_id)
@@ -5467,11 +6285,11 @@ async fn verify_handoff_action_token(
     if !constant_time_eq(body.signature.trim(), &expected) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"error":"invalid action signature"}))));
     }
-    let claimed: Option<i64> = sqlx::query_scalar(
+    let claimed: Option<bool> = sqlx::query_scalar(
         r#"INSERT INTO handoff_action_nonces (nonce, handoff_id, company_id, used_at)
            VALUES ($1, $2, $3, NOW())
            ON CONFLICT (nonce) DO NOTHING
-           RETURNING 1"#,
+           RETURNING true"#,
     )
     .bind(body.payload.nonce.trim())
     .bind(body.payload.handoff_id)
@@ -5549,6 +6367,246 @@ async fn get_runtime_activity() -> Json<Value> {
         "activity": snap,
         "idle_for_ms": crate::runtime_control::idle_for_ms(),
     }))
+}
+
+// ── Company dashboard ─────────────────────────────────────────────────────────
+
+async fn get_company_dashboard(
+    Path(company_id): Path<Uuid>,
+    State(st): State<ConsoleState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+
+    let running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM tasks WHERE company_id=$1 AND state='in_progress'",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let stuck: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM tasks t
+           WHERE t.company_id=$1 AND t.state='in_progress'
+             AND t.updated_at < now() - interval '2 hours'
+             AND NOT EXISTS (
+                 SELECT 1 FROM agent_runs ar
+                 WHERE ar.task_id = t.id AND ar.status = 'running'
+             )"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let completed_24h: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM tasks
+           WHERE company_id=$1 AND state IN ('done','closed')
+             AND updated_at > now() - interval '24 hours'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let needs_human: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM tasks
+           WHERE company_id=$1 AND requires_human=true
+             AND state NOT IN ('done','closed','cancelled')"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Latest goal coverage snapshot
+    #[derive(sqlx::FromRow)]
+    struct CoverageRow {
+        total_tasks: i32,
+        tasks_with_goal: i32,
+        coverage_pct: f64,
+    }
+    let coverage = sqlx::query_as::<_, CoverageRow>(
+        r#"SELECT total_tasks, tasks_with_goal, coverage_pct::float8
+           FROM goal_coverage_stats
+           WHERE company_id=$1
+           ORDER BY computed_at DESC LIMIT 1"#,
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let active_agents: Vec<String> = sqlx::query_scalar::<_, String>(
+        r#"SELECT DISTINCT ar.actor FROM agent_runs ar
+           WHERE ar.company_id=$1 AND ar.status='running'"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    #[derive(sqlx::FromRow)]
+    struct RecentTask {
+        id: Uuid,
+        title: String,
+        state: String,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    }
+    let recent = sqlx::query_as::<_, RecentTask>(
+        r#"SELECT id, title, state, updated_at
+           FROM tasks
+           WHERE company_id=$1 AND state IN ('done','closed','cancelled')
+           ORDER BY updated_at DESC LIMIT 5"#,
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // Tasks overdue (due_at in the past and not done)
+    let overdue: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM tasks
+           WHERE company_id=$1
+             AND due_at IS NOT NULL AND due_at < now()
+             AND state NOT IN ('done','closed','cancelled')"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    Ok(Json(json!({
+        "company_id": company_id,
+        "running_tasks": running,
+        "stuck_tasks": stuck,
+        "overdue_tasks": overdue,
+        "needs_human": needs_human,
+        "completed_last_24h": completed_24h,
+        "active_agents": active_agents,
+        "goal_coverage": coverage.as_ref().map(|c| json!({
+            "total_tasks": c.total_tasks,
+            "tasks_with_goal": c.tasks_with_goal,
+            "coverage_pct": c.coverage_pct,
+        })).unwrap_or(json!(null)),
+        "recent_completions": recent.iter().map(|t| json!({
+            "id": t.id,
+            "title": t.title,
+            "state": t.state,
+            "updated_at": t.updated_at,
+        })).collect::<Vec<_>>(),
+        "generated_at": Utc::now(),
+    })))
+}
+
+// ── Task event log ─────────────────────────────────────────────────────────────
+
+async fn get_task_events(
+    Path(task_id): Path<Uuid>,
+    State(st): State<ConsoleState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    #[derive(sqlx::FromRow)]
+    struct TaskEvent {
+        id: Uuid,
+        event_type: String,
+        actor: String,
+        payload: SqlxJson<Value>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+    let events = sqlx::query_as::<_, TaskEvent>(
+        r#"SELECT id, event_type, actor, payload, created_at
+           FROM task_events WHERE task_id=$1
+           ORDER BY created_at ASC LIMIT 500"#,
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))?;
+
+    let items: Vec<Value> = events.into_iter().map(|e| json!({
+        "id": e.id,
+        "event_type": e.event_type,
+        "actor": e.actor,
+        "payload": e.payload.0,
+        "created_at": e.created_at,
+    })).collect();
+    Ok(Json(json!({ "events": items, "task_id": task_id })))
+}
+
+/// SSE stream of task events — polls the DB every 2 s and emits new rows.
+async fn stream_task_events(
+    Path(task_id): Path<Uuid>,
+    State(st): State<ConsoleState>,
+) -> impl IntoResponse {
+    use futures_util::stream;
+    let pool = match st.company_db.clone() {
+        Some(p) => p,
+        None => {
+            return Sse::new(stream::iter(Vec::<Result<Event, std::convert::Infallible>>::new()))
+                .into_response()
+        }
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct EvRow {
+        id: Uuid,
+        event_type: String,
+        actor: String,
+        payload: SqlxJson<Value>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    // Each tick emits one SSE event: a JSON array of new rows (or a keep-alive comment).
+    let out = stream::unfold(
+        (pool, task_id, None::<chrono::DateTime<chrono::Utc>>),
+        |(pool, task_id, since)| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let rows: Vec<EvRow> = if let Some(s) = since {
+                sqlx::query_as::<_, EvRow>(
+                    r#"SELECT id, event_type, actor, payload, created_at
+                       FROM task_events WHERE task_id=$1 AND created_at > $2
+                       ORDER BY created_at ASC LIMIT 100"#,
+                )
+                .bind(task_id)
+                .bind(s)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default()
+            } else {
+                sqlx::query_as::<_, EvRow>(
+                    r#"SELECT id, event_type, actor, payload, created_at
+                       FROM task_events WHERE task_id=$1
+                       ORDER BY created_at ASC LIMIT 100"#,
+                )
+                .bind(task_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default()
+            };
+
+            let new_since = rows.last().map(|r| r.created_at).or(since);
+            let evt: Result<Event, std::convert::Infallible> = if rows.is_empty() {
+                Ok(Event::default().comment("ping"))
+            } else {
+                let batch: Vec<Value> = rows.into_iter().map(|r| json!({
+                    "id": r.id, "event_type": r.event_type,
+                    "actor": r.actor, "payload": r.payload.0,
+                    "created_at": r.created_at,
+                })).collect();
+                let s = serde_json::to_string(&batch).unwrap_or_else(|_| "[]".to_string());
+                Ok(Event::default().data(s))
+            };
+            Some((evt, (pool, task_id, new_since)))
+        },
+    );
+
+    Sse::new(out).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn stream_runtime_events() -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
@@ -7293,7 +8351,7 @@ async fn company_ops_overview(
     };
     let company = sqlx::query_as::<_, CompanyRow>(
         r#"SELECT id, slug, display_name, hsmii_home, issue_key_prefix,
-                  context_markdown, created_at::text
+                  context_markdown, webhook_url, created_at::text
            FROM companies WHERE id = $1"#,
     )
     .bind(company_id)
@@ -8307,4 +9365,327 @@ async fn apply_onboarding_draft(
             "bootstrap": { "imported": bootstrap_imported }
         })),
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent Chat — natural-language Company OS interface
+// POST /api/company/companies/{company_id}/agent-chat
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AgentChatBody {
+    /// The user's natural-language message.
+    message: String,
+    /// Agent or operator identity (used for tool audit + stigmergic notes).
+    #[serde(default)]
+    actor: String,
+    /// Optional thread ID for conversational continuity. If omitted, a new thread is created
+    /// and returned in the response. Pass the returned `thread_id` on subsequent messages
+    /// to maintain conversation history as context.
+    #[serde(default)]
+    thread_id: Option<Uuid>,
+}
+
+/// Build a company-level context prefix for agent-chat (no task_id required).
+/// Mirrors `build_worker_context_prefix` but scoped to the company, not a task.
+async fn build_company_chat_context(pool: &PgPool, company_id: Uuid, actor: &str) -> String {
+    let mut out = String::with_capacity(4096);
+
+    // Company context markdown
+    if let Ok(Some(md)) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context_markdown FROM companies WHERE id = $1",
+    )
+    .bind(company_id)
+    .fetch_optional(pool)
+    .await
+    {
+        if let Some(md) = md.filter(|s| !s.trim().is_empty()) {
+            out.push_str("## Company context\n\n");
+            let truncated: String = md.chars().take(1500).collect();
+            out.push_str(&truncated);
+            if md.chars().count() > 1500 {
+                out.push_str("\n\n*(context continues)*");
+            }
+            out.push_str("\n\n");
+        }
+    }
+
+    // Active goals
+    #[derive(sqlx::FromRow)]
+    struct ChatGoalRow { title: String, status: String, parent_goal_id: Option<Uuid> }
+    if let Ok(goals) = sqlx::query_as::<_, ChatGoalRow>(
+        "SELECT title, status, parent_goal_id FROM goals WHERE company_id = $1
+         ORDER BY sort_order, created_at LIMIT 20",
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    {
+        if !goals.is_empty() {
+            out.push_str("## Company goals\n\n");
+            for g in &goals {
+                let indent = if g.parent_goal_id.is_some() { "  - " } else { "- " };
+                out.push_str(&format!("{indent}[{}] {}\n", g.status, g.title));
+            }
+            out.push('\n');
+        }
+    }
+
+    // Team roster with current task assignments
+    #[derive(sqlx::FromRow)]
+    struct ChatAgentRow { name: String, role: String, title: Option<String> }
+    if let Ok(agents) = sqlx::query_as::<_, ChatAgentRow>(
+        "SELECT name, role, title FROM company_agents
+         WHERE company_id = $1 AND status = 'active'
+         ORDER BY sort_order, name LIMIT 20",
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    {
+        if !agents.is_empty() {
+            out.push_str("## Team roster\n\n");
+            for ag in &agents {
+                let display = ag.title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&ag.role);
+                let current: Option<String> = sqlx::query_scalar(
+                    "SELECT title FROM tasks WHERE company_id = $1 AND checked_out_by = $2
+                     AND state NOT IN ('done','closed','cancelled') LIMIT 1",
+                )
+                .bind(company_id)
+                .bind(&ag.name)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+                if let Some(t) = current {
+                    out.push_str(&format!("- **{}** ({}) — working on: *{}*\n", ag.name, display, t));
+                } else {
+                    out.push_str(&format!("- **{}** ({}) — available\n", ag.name, display));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    // Open / in-progress task snapshot
+    #[derive(sqlx::FromRow)]
+    struct ChatTaskRow { title: String, state: String, checked_out_by: Option<String> }
+    if let Ok(tasks) = sqlx::query_as::<_, ChatTaskRow>(
+        "SELECT title, state, checked_out_by FROM tasks
+         WHERE company_id = $1 AND state IN ('open','in_progress')
+         ORDER BY priority DESC, created_at LIMIT 15",
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    {
+        if !tasks.is_empty() {
+            out.push_str("## Open / in-progress tasks\n\n");
+            for t in &tasks {
+                let agent = t.checked_out_by.as_deref().filter(|s| !s.is_empty()).unwrap_or("unassigned");
+                out.push_str(&format!("- [{}] {} (agent: {})\n", t.state, t.title, agent));
+            }
+            out.push('\n');
+        }
+    }
+
+    // Company skills brief
+    #[derive(sqlx::FromRow)]
+    struct ChatSkillRow { slug: String, description: String }
+    if let Ok(skills) = sqlx::query_as::<_, ChatSkillRow>(
+        "SELECT slug, LEFT(description, 80) as description FROM company_skills
+         WHERE company_id = $1 ORDER BY slug LIMIT 12",
+    )
+    .bind(company_id)
+    .fetch_all(pool)
+    .await
+    {
+        if !skills.is_empty() {
+            out.push_str("## Available skills\n\n");
+            for s in &skills {
+                out.push_str(&format!("- `{}`: {}\n", s.slug, s.description));
+            }
+            out.push('\n');
+        }
+    }
+
+    // Identity + tool directory
+    out.push_str(&format!(
+        "## Your identity\n\n\
+         - **Actor (you)**: {actor}\n\
+         - **company_id**: {company_id}\n\n\
+         When calling any company OS tool always pass `company_id` = `{company_id}` explicitly.\n\n\
+         ## Available company OS tools\n\n\
+         - `company_list_tasks` — list open/in-progress tasks (add state/agent filters)\n\
+         - `company_create_task` — create a task and optionally assign it via `checked_out_by`\n\
+         - `company_update_task` — change task state or append a stigmergic context note\n\
+         - `company_memory_search` — search company shared memory pool\n\
+         - `company_memory_append` — write to shared or private memory\n\
+         - `company_task_requires_human` — escalate a task to the human inbox\n\
+         - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\
+         - Plus 60+ general tools: bash, read_file, write_file, web_search, git_*, http_request, …\n\n",
+    ));
+
+    out
+}
+
+/// POST /api/company/companies/{company_id}/agent-chat
+///
+/// Natural-language Company OS interface. Send any message — the agent has
+/// full tool access and company awareness. Examples:
+///
+/// - "What tasks are open for the marketing agent?"
+/// - "Create a task for the CTO agent to review the API spec"
+/// - "Search company memory for our onboarding policy"
+/// - "Mark task <id> as done and leave a note for the next agent"
+async fn post_agent_chat(
+    Path(company_id): Path<Uuid>,
+    State(st): State<ConsoleState>,
+    Json(body): Json<AgentChatBody>,
+) -> impl IntoResponse {
+    let message = body.message.trim().to_string();
+    if message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "message is required" })),
+        )
+            .into_response();
+    }
+
+    let actor = if body.actor.trim().is_empty() {
+        std::env::var("HSM_COMPANY_TASK_ACTOR")
+            .unwrap_or_else(|_| "operator".to_string())
+    } else {
+        body.actor.trim().to_string()
+    };
+
+    let Some(ref pool) = st.company_db else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "company database not configured (HSM_COMPANY_OS_DATABASE_URL)" })),
+        )
+            .into_response();
+    };
+
+    // ── Thread continuity ────────────────────────────────────────────────────
+    let thread_id = match body.thread_id {
+        Some(tid) => tid,
+        None => {
+            // Create a new thread; fall back to a random UUID if the table doesn't exist yet
+            sqlx::query_scalar::<_, Uuid>(
+                r#"INSERT INTO chat_threads (company_id, actor) VALUES ($1, $2) RETURNING id"#,
+            )
+            .bind(company_id)
+            .bind(&actor)
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|_| uuid::Uuid::new_v4())
+        }
+    };
+
+    // Load prior turns (last 20) as context
+    #[derive(sqlx::FromRow)]
+    struct ThreadMsg { role: String, content: String }
+    let prior = sqlx::query_as::<_, ThreadMsg>(
+        r#"SELECT role, content FROM chat_thread_messages
+           WHERE thread_id=$1 ORDER BY created_at ASC LIMIT 20"#,
+    )
+    .bind(thread_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let thread_history = if prior.is_empty() {
+        String::new()
+    } else {
+        let mut h = String::from("\n## Conversation history\n");
+        for m in &prior {
+            h.push_str(&format!("**{}**: {}\n\n", m.role, m.content));
+        }
+        h
+    };
+
+    // Store user message immediately (before agent runs, so it's always recorded)
+    let _ = sqlx::query(
+        r#"INSERT INTO chat_thread_messages (thread_id, role, content) VALUES ($1, 'user', $2)"#,
+    )
+    .bind(thread_id)
+    .bind(&message)
+    .execute(pool)
+    .await;
+
+    // Build rich company context prefix
+    let context = build_company_chat_context(pool, company_id, &actor).await;
+
+    // Prefix with /hermes so handle_message always fires the agentic tool loop.
+    let prompt = format!(
+        "/hermes {context}{thread_history}\n---\n\n## Message from {actor}\n\n{message}"
+    );
+
+    let home = st.home.clone();
+    let actor_clone = actor.clone();
+    let pool_clone = pool.clone();
+
+    // Run in a blocking-friendly task (EnhancedPersonalAgent::initialize does disk I/O)
+    let result = tokio::spawn(async move {
+        match EnhancedPersonalAgent::initialize(&home).await {
+            Ok(mut agent) => {
+                let msg = crate::personal::gateway::Message {
+                    id: format!("chat-{}", uuid::Uuid::new_v4()),
+                    platform: crate::personal::gateway::Platform::Web,
+                    channel_id: format!("company-os-chat-{company_id}"),
+                    channel_name: Some("company-os-chat".to_string()),
+                    user_id: actor_clone.clone(),
+                    user_name: actor_clone,
+                    content: prompt,
+                    timestamp: Utc::now(),
+                    attachments: Vec::new(),
+                    reply_to: None,
+                };
+                match agent.handle_message(msg).await {
+                    Ok(reply) => Ok(reply),
+                    Err(e) => Err(format!("agent error: {e}")),
+                }
+            }
+            Err(e) => Err(format!("agent init failed: {e}")),
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(reply)) => {
+            // Store assistant reply and update thread timestamp
+            let _ = sqlx::query(
+                r#"INSERT INTO chat_thread_messages (thread_id, role, content)
+                   VALUES ($1, 'assistant', $2)"#,
+            )
+            .bind(thread_id)
+            .bind(&reply)
+            .execute(&pool_clone)
+            .await;
+            let _ = sqlx::query(
+                "UPDATE chat_threads SET updated_at=now() WHERE id=$1",
+            )
+            .bind(thread_id)
+            .execute(&pool_clone)
+            .await;
+
+            Json(json!({
+                "reply": reply,
+                "actor": actor,
+                "company_id": company_id,
+                "thread_id": thread_id,
+            }))
+            .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e, "thread_id": thread_id })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("task panic: {e}"), "thread_id": thread_id })),
+        )
+            .into_response(),
+    }
 }

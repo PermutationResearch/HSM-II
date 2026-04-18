@@ -145,9 +145,10 @@ pub use ops_tools::register_personal_ops_tools;
 /// Company OS human inbox + memory pool HTTP tools.
 pub mod company_os_tools;
 pub use company_os_tools::{
-    CompanyAgentRunFeedbackTool, CompanyMemoryAppendTool, CompanyMemorySearchTool,
-    CompanyPromoteFeedbackToTaskTool, CompanyTaskRequiresHumanTool, CompanyToolCallTool,
-    CompanyToolDescribeTool, CompanyToolDiscoverTool,
+    CompanyAgentRunFeedbackTool, CompanyCreateTaskTool, CompanyListTasksTool,
+    CompanyMemoryAppendTool, CompanyMemorySearchTool, CompanyPromoteFeedbackToTaskTool,
+    CompanyTaskRequiresHumanTool, CompanyToolCallTool, CompanyToolDescribeTool,
+    CompanyToolDiscoverTool, CompanyUpdateTaskTool,
 };
 
 /// On-disk SKILL.md: `skills_list`, `skill_md_read` (shared catalog from personal agent).
@@ -335,6 +336,9 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(CompanyMemoryAppendTool::new()));
     registry.register(Arc::new(CompanyAgentRunFeedbackTool::new()));
     registry.register(Arc::new(CompanyPromoteFeedbackToTaskTool::new()));
+    registry.register(Arc::new(CompanyCreateTaskTool::new()));
+    registry.register(Arc::new(CompanyUpdateTaskTool::new()));
+    registry.register(Arc::new(CompanyListTasksTool::new()));
     registry.register(Arc::new(WebhookSendTool::new()));
     registry.register(Arc::new(JsonParseTool::new()));
     registry.register(Arc::new(JsonValidateTool::new()));

@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let paperclip = Arc::new(Mutex::new(IntelligenceLayer::new()));
     let state = ConsoleState::with_paperclip_layer(home.clone(), company_db, paperclip);
     if let Some(pool) = state.company_db.clone() {
-        hyper_stigmergy::company_os::start_automation_worker(pool);
+        hyper_stigmergy::company_os::start_automation_worker(pool, home.clone());
         tracing::info!("Company OS automation worker started");
     }
     let app = console_router(state);

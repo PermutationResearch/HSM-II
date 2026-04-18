@@ -428,7 +428,7 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
         let console_addr: SocketAddr = format!("127.0.0.1:{console_port}").parse()?;
 
         if let Some(ref pool) = company_db {
-            hyper_stigmergy::company_os::start_automation_worker(pool.clone());
+            hyper_stigmergy::company_os::start_automation_worker(pool.clone(), home.clone());
             info!("Company OS automation worker started (embedded console)");
         }
 

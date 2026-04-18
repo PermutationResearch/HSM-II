@@ -783,12 +783,12 @@ async fn post_promote_feedback_to_task(
     let row = sqlx::query_as::<_, TaskRow>(
         r#"INSERT INTO tasks
            (company_id, primary_goal_id, project_id, goal_ancestry, title, specification,
-            workspace_attachment_paths, capability_refs, owner_persona, parent_task_id,
-            spawned_by_rule_id, display_number, priority,
+            workspace_attachment_paths, capability_refs, owner_persona, checked_out_by,
+            parent_task_id, spawned_by_rule_id, display_number, priority,
             source_run_id, source_feedback_event_id)
-           VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $9, $10, $11)
+           VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $7, NULL, NULL, $8, $9, $10, $11)
            RETURNING id, company_id, primary_goal_id, project_id, goal_ancestry, title, specification, workspace_attachment_paths, capability_refs, state,
-                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, created_at::text"#,
+                     owner_persona, parent_task_id, spawned_by_rule_id, checked_out_by, checked_out_until, priority, display_number, requires_human, due_at, blocked_by_task_id, created_at::text"#,
     )
     .bind(company_id)
     .bind(SqlxJson(json!([])))
@@ -796,7 +796,7 @@ async fn post_promote_feedback_to_task(
     .bind(&body.specification)
     .bind(SqlxJson(ws_json))
     .bind(SqlxJson(caps_json))
-    .bind(&body.owner_persona)
+    .bind(&body.owner_persona)   // $7 — sets both owner_persona and checked_out_by
     .bind(display_n)
     .bind(priority)
     .bind(run_id)
