@@ -60,7 +60,10 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    let mut end = max_bytes;
+    // "…" is 3 UTF-8 bytes — reserve space for it so output fits within max_bytes.
+    const ELLIPSIS: &str = "…";
+    let target = max_bytes.saturating_sub(ELLIPSIS.len());
+    let mut end = target;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }

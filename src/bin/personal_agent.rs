@@ -783,6 +783,7 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
                                 timestamp: chrono::Utc::now(),
                                 attachments: vec![],
                                 reply_to: None,
+                                thread_workspace_root: None,
                             };
 
                             let mut ag = agent.lock().await;
@@ -842,6 +843,7 @@ async fn cmd_chat(home: &PathBuf, message: Option<String>) -> Result<()> {
             timestamp: chrono::Utc::now(),
             attachments: vec![],
             reply_to: None,
+            thread_workspace_root: None,
         };
 
         let response = agent.handle_message(gateway_msg).await?;
@@ -878,6 +880,7 @@ async fn cmd_do(home: &PathBuf, task: &str) -> Result<()> {
         timestamp: chrono::Utc::now(),
         attachments: vec![],
         reply_to: None,
+        thread_workspace_root: None,
     };
 
     let result = agent.handle_message(msg).await;
@@ -1753,6 +1756,7 @@ async fn cmd_start_tui(home: &PathBuf) -> Result<()> {
                                 timestamp: chrono::Utc::now(),
                                 attachments: vec![],
                                 reply_to: None,
+                                thread_workspace_root: None,
                             };
 
                             tokio::spawn(async move {

@@ -819,6 +819,7 @@ async fn auto_dispatch_eligible_tasks(pool: &PgPool, home: &std::path::Path) {
                             timestamp: Utc::now(),
                             attachments: Vec::new(),
                             reply_to: None,
+                            thread_workspace_root: None,
                         };
                         match agent.handle_message(msg).await {
                             Ok(reply) => ("success".to_string(), Some(reply)),
@@ -3720,6 +3721,7 @@ async fn post_execute_task_worker(
                         timestamp: Utc::now(),
                         attachments: Vec::new(),
                         reply_to: None,
+                        thread_workspace_root: None,
                     };
                     match agent.handle_message(msg).await {
                         Ok(reply) => {
@@ -6625,6 +6627,7 @@ async fn stream_runtime_events() -> Sse<impl futures_util::Stream<Item = Result<
                     ts_ms: Utc::now().timestamp_millis(),
                     input: None,
                     stream_event: None,
+                    output_len: None,
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
@@ -9640,6 +9643,7 @@ async fn post_agent_chat(
                     timestamp: Utc::now(),
                     attachments: Vec::new(),
                     reply_to: None,
+                    thread_workspace_root: None,
                 };
                 match agent.handle_message(msg).await {
                     Ok(reply) => Ok(reply),
