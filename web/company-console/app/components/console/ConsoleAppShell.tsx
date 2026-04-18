@@ -52,13 +52,6 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/app/components/ui/command";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/app/components/ui/select";
 import { Separator } from "@/app/components/ui/separator";
 import { cn } from "@/app/lib/utils";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
@@ -70,32 +63,33 @@ type NavItem = { href: string; label: string; icon: LucideIcon; title: string };
 
 const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
   {
-    heading: "Work",
+    heading: "Run your company",
     items: [
-      { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard, title: "Overview and queues" },
-      { href: "/workspace/issues", label: "Issues", icon: FolderKanban, title: "Tasks and filters" },
-      { href: "/workspace/workflows", label: "Workflows", icon: GitBranch, title: "Pipeline workflows" },
-      { href: "/workspace/approvals", label: "Approvals", icon: ShieldCheck, title: "Human and policy gates" },
-      { href: "/workspace/my-work", label: "My work", icon: ClipboardList, title: "Your queue" },
-      { href: "/workspace/council", label: "Council", icon: Users, title: "Socratic agent deliberation" },
+      { href: "/workspace/dashboard", label: "Dashboard", icon: LayoutDashboard, title: "Live view — agents, tasks, spend, health" },
+      { href: "/workspace/issues", label: "Tasks", icon: FolderKanban, title: "All work — create, track, filter" },
+      { href: "/workspace/approvals", label: "Approvals", icon: ShieldCheck, title: "Decisions your agents escalated to you" },
+      { href: "/workspace/my-work", label: "My work", icon: ClipboardList, title: "Tasks assigned to you or waiting on you" },
+      { href: "/workspace/mission-control", label: "Guardrails", icon: CommandIcon, title: "When agents run, spend limits, concurrency" },
+      { href: "/workspace/workflows", label: "Workflows", icon: GitBranch, title: "Multi-step automated pipelines" },
+      { href: "/workspace/council", label: "Deliberations", icon: Users, title: "Hard decisions reasoned through by multiple agents" },
     ],
   },
   {
-    heading: "Team & procedures",
+    heading: "Your team",
     items: [
-      { href: "/workspace/agents", label: "Agents", icon: Bot, title: "Roster, files, memory, skills" },
-      { href: "/workspace/credentials", label: "Credentials", icon: PlugZap, title: "Company API keys and connectors" },
-      { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen, title: "SOPs and templates" },
-      { href: "/workspace/marketplace", label: "Marketplace", icon: Store, title: "Install company packs" },
+      { href: "/workspace/agents", label: "Agents", icon: Bot, title: "Who's on your team, their skills and work history" },
+      { href: "/workspace/playbooks", label: "Playbooks", icon: BookOpen, title: "How your company operates — editable SOPs" },
+      { href: "/workspace/marketplace", label: "Marketplace", icon: Store, title: "Install pre-built company packs" },
+      { href: "/workspace/credentials", label: "Connections", icon: PlugZap, title: "API keys and external service integrations" },
     ],
   },
   {
-    heading: "Insights",
+    heading: "Results & memory",
     items: [
-      { href: "/workspace/intelligence", label: "Intelligence", icon: BrainCircuit, title: "Goals, feed, summary" },
-      { href: "/workspace/costs", label: "Costs", icon: CircleDollarSign, title: "Spend" },
-      { href: "/workspace/graph", label: "Graph", icon: Network, title: "Hypergraph views" },
-      { href: "/workspace/architecture", label: "Architecture", icon: Layers, title: "System blueprint" },
+      { href: "/workspace/intelligence", label: "Activity & Goals", icon: BrainCircuit, title: "What's been accomplished, what's being tracked" },
+      { href: "/workspace/costs", label: "Spend", icon: CircleDollarSign, title: "Cost breakdown by agent and task" },
+      { href: "/workspace/graph", label: "Knowledge Map", icon: Network, title: "How your company's knowledge connects" },
+      { href: "/workspace/architecture", label: "System", icon: Layers, title: "Configuration and architecture overview" },
     ],
   },
 ];
@@ -103,6 +97,7 @@ const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
 type Crumb = { label: string; href: string | null };
 
 const SIDEBAR_OPEN_KEY = "pc-ws-sidebar-open";
+const NO_COMPANY_SELECT_VALUE = "__none__";
 
 const AGENT_TAB_LABELS: Record<string, string> = {
   workspace: "Workspace",
@@ -135,6 +130,7 @@ function breadcrumbsForPath(pathname: string): Crumb[] {
   }
   if (pathname.startsWith("/workspace/agents")) return [root, { label: "Agents", href: null }];
   if (pathname.startsWith("/workspace/credentials")) return [root, { label: "Credentials", href: null }];
+  if (pathname.startsWith("/workspace/mission-control")) return [root, { label: "Mission Control", href: null }];
   if (pathname.startsWith("/workspace/issues")) return [root, { label: "Issues", href: null }];
   if (pathname.startsWith("/workspace/workflows")) return [root, { label: "Workflows", href: null }];
   if (pathname.startsWith("/workspace/approvals")) return [root, { label: "Approvals", href: null }];
@@ -237,6 +233,12 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
     postgresConfigured,
     propertiesSelection,
   } = useWorkspace();
+
+  /** Keep Select controlled for component lifetime using a stable sentinel. */
+  const companySelectValue = useMemo(
+    () => (companyId && companies.some((c) => c.id === companyId) ? companyId : NO_COMPANY_SELECT_VALUE),
+    [companyId, companies],
+  );
 
   const [cmdOpen, setCmdOpen] = useState(false);
   const [propsOpen, setPropsOpen] = useState(true);
@@ -389,6 +391,14 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
             <span className="sr-only">Dashboard</span>
           </Link>
           <Link
+            href="/workspace/mission-control"
+            title="Mission Control"
+            className="mt-1 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
+          >
+            <CommandIcon className="size-5 shrink-0" strokeWidth={1.5} aria-hidden />
+            <span className="sr-only">Mission Control</span>
+          </Link>
+          <Link
             href="/workspace/issues"
             title="Issues"
             className="mt-1 flex size-9 items-center justify-center rounded-md text-[#888888] outline-none ring-offset-black hover:bg-white/[0.06] hover:text-[#e8e8e8] focus-visible:ring-2 focus-visible:ring-[#333333]"
@@ -439,23 +449,28 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
           )}
 
           <div className="flex w-[min(100%,220px)] shrink-0 items-center gap-2">
-            <span className="sr-only">Company</span>
-            <Select
-              value={companyId ?? ""}
-              onValueChange={(v) => setCompanyId(v || null)}
+            <label htmlFor="workspace-company-select" className="sr-only">
+              Company
+            </label>
+            <select
+              id="workspace-company-select"
+              value={companySelectValue}
+              onChange={(e) => {
+                const v = e.target.value;
+                setCompanyId(v === NO_COMPANY_SELECT_VALUE ? null : v);
+              }}
               disabled={companiesLoading || companies.length === 0}
+              className="h-9 w-full rounded-md border border-[#333333] bg-[#111111] px-3 font-mono text-xs text-[#e8e8e8] outline-none ring-offset-black focus-visible:ring-2 focus-visible:ring-[#333333] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <SelectTrigger className="h-9 border-[#333333] bg-[#111111] font-mono text-xs text-[#e8e8e8]">
-                <SelectValue placeholder={companiesLoading ? "[LOADING…]" : "Company…"} />
-              </SelectTrigger>
-              <SelectContent className="border-[#333333] bg-[#111111]">
-                {companies.map((c) => (
-                  <SelectItem key={c.id} value={c.id} className="font-mono text-xs">
-                    {c.display_name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              <option value={NO_COMPANY_SELECT_VALUE}>
+                {companiesLoading ? "[LOADING...]" : "Company..."}
+              </option>
+              {companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.display_name}
+                </option>
+              ))}
+            </select>
           </div>
 
           <Button
@@ -501,6 +516,7 @@ export function ConsoleAppShell({ children }: { children: React.ReactNode }) {
           <CommandEmpty>No results.</CommandEmpty>
           <CommandGroup heading="Work">
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/dashboard"))}>Dashboard</CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/workspace/mission-control"))}>Mission Control</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/issues"))}>Issues</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/approvals"))}>Approvals</CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/workspace/my-work"))}>My work</CommandItem>

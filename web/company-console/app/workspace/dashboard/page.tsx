@@ -65,26 +65,51 @@ export default function WorkspaceDashboardPage() {
     <>
       <WorkspaceQuickStart />
       {opsOverview ? (
-        <div className="mb-3 rounded-lg border border-admin-border bg-card px-4 py-2">
-          <p className="font-mono text-[11px] text-muted-foreground">
-            ROI snapshot · open tasks {opsOverview.overview.tasks_open} · requires human{" "}
-            {opsOverview.overview.tasks_requires_human} · active agents {opsOverview.overview.agents_total} ·
-            monthly spend ${opsOverview.overview.spend_total_usd.toFixed(2)} · avg tool prompt tokens{" "}
-            {Math.round(opsOverview.audit.avg_tool_prompt_tokens ?? 0)}
-            {opsOverview.roi
-              ? ` · cycle ${opsOverview.roi.avg_cycle_time_hours_30d.toFixed(1)}h · retries/task ${opsOverview.roi.retries_per_task_7d.toFixed(2)} · closed/day ${opsOverview.roi.tasks_closed_per_day_14d.toFixed(2)}`
-              : ""}
-            {opsOverview.universality
-              ? ` · profile ${opsOverview.universality.profile_business_model}/${opsOverview.universality.profile_size_tier} · setup ${(opsOverview.universality.setup_completion_rate * 100).toFixed(0)}% · c/resolved $${opsOverview.universality.cost_per_resolved_operation.toFixed(2)}`
-              : ""}
-          </p>
+        <div className="mb-3 rounded-lg border border-admin-border bg-card px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-sm">
+            <span className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-emerald-500/80" />
+              <span className="font-medium text-foreground">{opsOverview.overview.agents_total} agents active</span>
+            </span>
+            <span className="text-muted-foreground">
+              <span className="font-medium text-foreground">{opsOverview.overview.tasks_open}</span> tasks in progress
+            </span>
+            {opsOverview.overview.tasks_requires_human > 0 && (
+              <span className="text-muted-foreground">
+                <span className="font-medium text-amber-400">{opsOverview.overview.tasks_requires_human} need your review</span>
+              </span>
+            )}
+            <span className="text-muted-foreground">
+              <span className="font-medium text-foreground">${opsOverview.overview.spend_total_usd.toFixed(2)}</span> spent this month
+            </span>
+            {opsOverview.roi && (
+              <span className="text-muted-foreground">
+                <span className="font-medium text-foreground">{opsOverview.roi.tasks_closed_per_day_14d.toFixed(1)}</span> tasks completed/day
+              </span>
+            )}
+            {opsOverview.roi && (
+              <span className="text-muted-foreground">
+                avg <span className="font-medium text-foreground">{opsOverview.roi.avg_cycle_time_hours_30d.toFixed(1)}h</span> per task
+              </span>
+            )}
+            {opsOverview.universality?.cost_per_resolved_operation != null && (
+              <span className="text-muted-foreground">
+                <span className="font-medium text-foreground">${opsOverview.universality.cost_per_resolved_operation.toFixed(2)}</span> cost/task
+              </span>
+            )}
+          </div>
         </div>
       ) : null}
       {selfImprove ? (
-        <div className="mb-4 rounded-lg border border-admin-border bg-card px-4 py-2 font-mono text-[11px] text-muted-foreground">
-          Self-improvement 7d: failures {selfImprove.total_failures_7d} · first-pass{" "}
-          {Math.round(selfImprove.first_pass_success_rate_7d * 100)}% · applied fixes{" "}
-          {selfImprove.proposals_applied_7d}
+        <div className="mb-4 rounded-lg border border-admin-border bg-card px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">Learning this week</span>
+            <span><span className="font-medium text-foreground">{Math.round(selfImprove.first_pass_success_rate_7d * 100)}%</span> first-attempt success</span>
+            <span><span className="font-medium text-foreground">{selfImprove.proposals_applied_7d}</span> improvements applied</span>
+            {selfImprove.total_failures_7d > 0 && (
+              <span><span className="font-medium text-amber-400">{selfImprove.total_failures_7d}</span> failures analyzed</span>
+            )}
+          </div>
         </div>
       ) : null}
       <Dashboard

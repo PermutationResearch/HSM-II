@@ -60,7 +60,7 @@ export function WorkspaceQuickStart() {
         <div className="flex min-w-0 items-center gap-2">
           <Sparkles className="size-4 shrink-0 text-[#79b8ff]" aria-hidden />
           <h2 id="ws-quickstart-title" className="text-sm font-medium tracking-tight text-[#e8e8e8]">
-            Manage work in three moves
+            Your AI company is ready — here's how to use it
           </h2>
         </div>
         <div className="flex items-center gap-1">
@@ -77,51 +77,40 @@ export function WorkspaceQuickStart() {
         <li className="flex gap-2 rounded-lg border border-white/5 bg-black/20 p-3">
           <span className="font-mono text-[11px] font-semibold text-[#79b8ff]">1</span>
           <div>
-            <p className="font-medium text-[#e8e8e8]">Pick a company</p>
-            <p className="mt-0.5 text-xs text-[#8B949E]">Use the header selector — everything below is scoped to that workspace.</p>
+            <p className="font-medium text-[#e8e8e8]">Select your company</p>
+            <p className="mt-0.5 text-xs text-[#8B949E]">Use the dropdown at the top — everything on this page reflects that company's agents, tasks, and spend.</p>
           </div>
         </li>
         <li className="flex gap-2 rounded-lg border border-white/5 bg-black/20 p-3">
           <span className="font-mono text-[11px] font-semibold text-[#79b8ff]">2</span>
           <div>
-            <p className="font-medium text-[#e8e8e8]">Triage work</p>
+            <p className="font-medium text-[#e8e8e8]">Give your agents work</p>
             <p className="mt-0.5 text-xs text-[#8B949E]">
-              Open{" "}
+              Go to{" "}
               <Link href="/workspace/issues" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
-                Issues
+                Tasks
               </Link>{" "}
-              for tasks, or{" "}
-              <Link href="/workspace/approvals" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
-                Approvals
-              </Link>{" "}
-              when humans must decide.
+              and create a new task — describe what you need done. Your agents will pick it up and execute it.
             </p>
           </div>
         </li>
         <li className="flex gap-2 rounded-lg border border-white/5 bg-black/20 p-3">
           <span className="font-mono text-[11px] font-semibold text-[#79b8ff]">3</span>
           <div>
-            <p className="font-medium text-[#e8e8e8]">Tune agents &amp; context</p>
+            <p className="font-medium text-[#e8e8e8]">Review decisions that need you</p>
             <p className="mt-0.5 text-xs text-[#8B949E]">
-              <Link href="/workspace/agents" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
-                Agents
+              Check{" "}
+              <Link href="/workspace/approvals" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
+                Approvals
               </Link>{" "}
-              for roster + files;{" "}
-              <Link href="/workspace/playbooks" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
-                Playbooks
-              </Link>{" "}
-              for SOPs. Use{" "}
-              <Link href="/" className="font-medium text-[#79b8ff] underline-offset-2 hover:underline">
-                Legacy console
-              </Link>{" "}
-              for shared company Markdown.
+              — anything your agents escalated is waiting there. One click to approve or redirect.
             </p>
           </div>
         </li>
       </ol>
       <p className="mt-3 flex items-center gap-1 font-mono text-[10px] text-[#666666]">
         <LayoutList className="size-3" aria-hidden />
-        Press <kbd className="rounded border border-[#444444] bg-[#1a1a1a] px-1 py-px">⌘K</kbd> to jump anywhere.
+        Press <kbd className="rounded border border-[#444444] bg-[#1a1a1a] px-1 py-px">⌘K</kbd> to jump anywhere in the console.
       </p>
     </section>
   );
