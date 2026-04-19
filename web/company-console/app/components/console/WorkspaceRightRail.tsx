@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Bot,
+  ChevronDown,
   ChevronRight,
   FilePlus,
   FileText,
@@ -21,6 +22,7 @@ import {
 
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/app/components/ui/collapsible";
 import { Input } from "@/app/components/ui/input";
 import { Textarea } from "@/app/components/ui/textarea";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
@@ -48,18 +50,36 @@ import {
   type RunStatus as ContractRunStatus,
 } from "@/app/lib/runtime-contract";
 import { cn } from "@/app/lib/utils";
-import { extractAnthropicStreamTextEffect } from "@/app/lib/claude-stream-shape";
+import {
+  AnthropicToolUseWireAssembler,
+  extractAnthropicStreamTextEffect,
+} from "@/app/lib/claude-stream-shape";
+import { AgentChatTurnHarness, type HarnessToolEvent, type HarnessTurnItem } from "@/app/lib/agent-chat-harness";
 import { buildIssueSpecFromPlan, buildIssueTitleFromPlan, isDoneTask, isPlanTask } from "@/app/lib/workspace-issue";
+
+/** Routing / dispatch lines in context_notes — not the roster persona's substantive chat reply. */
+function isWorkerDispatchRoutingStubText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  return (
+    t.startsWith("Routed this turn through the worker agent loop") ||
+    t.startsWith("Routed to worker — no conversational") ||
+    t.startsWith("Routed to worker (quick read/edit") ||
+    /^Dispatched skill `/m.test(t) ||
+    (t.startsWith("Running `") && t.includes("worker agent loop runtime"))
+  );
+}
 
 /** Markdown body for file preview and agent transcript (stream + notes) — same styling end-to-end. */
 const WORKSPACE_MARKDOWN_PROSE_CN = cn(
-  "min-w-0 text-[13px] leading-relaxed text-[#c8c8c8]",
+  "min-w-0 font-serif text-[14px] leading-relaxed text-[#c8c8c8]",
   "[&_a]:text-[#7ab8ff] [&_a]:underline-offset-2 hover:[&_a]:underline",
-  "[&_code]:rounded [&_code]:bg-[#1a1a1a] [&_code]:px-1 [&_code]:text-[12px] [&_code]:text-[#e8c96b]",
-  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[#0a0a0a] [&_pre]:p-2 [&_pre]:text-[11px]",
+  "[&_code]:rounded [&_code]:bg-[#1a1a1a] [&_code]:px-1 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-[#e8c96b]",
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[#0a0a0a] [&_pre]:p-2 [&_pre]:font-mono [&_pre]:text-[11px]",
   "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5",
   "[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5",
-  "[&_h1]:mb-2 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-3 [&_h2]:text-[14px] [&_h2]:font-semibold",
+  "[&_h1]:mb-2 [&_h1]:font-sans [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-3 [&_h2]:font-sans [&_h2]:text-[14px] [&_h2]:font-semibold",
+  "[&_h3]:mb-1 [&_h3]:mt-2 [&_h3]:font-sans [&_h3]:text-[13px] [&_h3]:font-semibold",
   "[&_blockquote]:border-l-2 [&_blockquote]:border-[#444444] [&_blockquote]:pl-3 [&_blockquote]:text-[#999999]",
   "[&_p]:my-1 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0",
 );
@@ -158,22 +178,172 @@ type RunTimelineEntry = {
 type ChatTranscriptItem =
   | { kind: "note"; key: string; note: StigNote; typing: boolean }
   | { kind: "tool"; key: string; event: RuntimeToolEvent }
-  | { kind: "status"; key: string; text: string }
-  | { kind: "assistant_partial"; key: string; text: string };
+  | { kind: "status"; key: string; text: string };
 
-/** A single observable step in the agent activity panel. */
-type ActivityItem = {
-  id: string;
-  label: string;
-  detail?: string | null;
-  status: "in_progress" | "done" | "error" | "interrupted";
-};
+function runFailureHint(summary: string | null | undefined): string | null {
+  const s = (summary ?? "").trim();
+  if (!s) return null;
+  if (/llm unavailable for agentic execution/i.test(s)) {
+    return "Worker could not reach an LLM provider. Configure OpenRouter/Ollama for execution.";
+  }
+  if (/no llm providers configured/i.test(s)) {
+    return "No worker LLM provider configured.";
+  }
+  if (/no space left on device|os error 28/i.test(s)) {
+    return "Host disk is full during execution.";
+  }
+  return null;
+}
 
-const CHANNEL_STORAGE_KEY = "pc-ws-agent-channels-v1";
+/** One tool row — shared by legacy transcript merge and Claude Code–style harness card. */
+function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
+  const isErr =
+    event.success === false || /error|fail|blocked|denied/i.test(event.message ?? "");
+  const phase = formatRuntimeEventLabel(event).toUpperCase();
+  const toolName = (event.tool_name ?? "").trim().toLowerCase();
+  const showInputPayload =
+    !isInternalHarnessToolName(event.tool_name) && toolName !== "bash" && toolName !== "shell";
+  const inputJson =
+    event.input !== undefined && showInputPayload
+      ? (() => {
+          try {
+            return JSON.stringify(event.input, null, 0);
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+  const cid = shortCallId(event.call_id);
+  return (
+    <div className="border-t border-[#1a1a1a] py-1.5">
+      <div className="flex min-w-0 items-start gap-2">
+        <span
+          className={cn(
+            "mt-0.5 size-1.5 shrink-0 rounded-full",
+            isErr ? "bg-[#8a3030]" : "bg-[#2d4a33]",
+          )}
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[10px] leading-tight text-[#5a5a5a]">
+            <span className="text-[#666666]">{phase}</span>
+            {event.tool_name ? (
+              <>
+                <span className="mx-1 text-[#333333]">·</span>
+                <span className="text-[#888888]">{event.tool_name}</span>
+              </>
+            ) : null}
+            {cid ? (
+              <>
+                <span className="mx-1 text-[#333333]">·</span>
+                <span className="text-[#555555]" title={event.call_id ?? undefined}>
+                  {cid}
+                </span>
+              </>
+            ) : null}
+          </p>
+          {event.message ? (
+            <p
+              className={cn(
+                "mt-0.5 line-clamp-2 font-mono text-[10px] leading-snug text-[#a8a8a8]",
+                isErr && "text-[#c45a5a]",
+              )}
+              title={event.message}
+            >
+              {event.message}
+            </p>
+          ) : null}
+          {inputJson ? (
+            <details className="mt-1 group/payload">
+              <summary className="cursor-pointer list-none font-mono text-[9px] text-[#4a4a4a] hover:text-[#777777] [&::-webkit-details-marker]:hidden">
+                <span className="inline-flex items-center gap-0.5">
+                  <ChevronRight className="size-2.5 shrink-0 transition-transform group-open/payload:rotate-90" />
+                  input
+                </span>
+              </summary>
+              <pre className="mt-1 max-h-24 overflow-auto rounded border border-[#1f1f1f] bg-black/60 px-1.5 py-1 font-mono text-[9px] leading-snug text-[#6a6a6a]">
+                {inputJson.length > 1200 ? `${inputJson.slice(0, 1200)}…` : inputJson}
+              </pre>
+            </details>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OperatorHarnessTurnCard({
+  items,
+  thinking,
+  chatPersona,
+}: {
+  items: HarnessTurnItem[];
+  thinking: boolean;
+  chatPersona: string;
+}) {
+  return (
+    <div className="rounded-md border border-[#262626] bg-[#080808] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <div className="mb-2 flex items-center gap-2 border-b border-[#1a1a1a] pb-1.5">
+        <Bot className="size-3.5 shrink-0 text-[#5c7a9a]" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-[#8a8a8a]">Assistant</p>
+          <p className="truncate font-mono text-[9px] text-[#555555]">{chatPersona} · tools + reply (Claude Code harness)</p>
+        </div>
+      </div>
+      <div className="space-y-1">
+        {items.length === 0 && thinking ? (
+          <p className="font-mono text-[10px] text-[#555555]">Connecting to agent stream…</p>
+        ) : null}
+        {items.map((it, idx) => {
+          if (it.kind === "tool") {
+            if (shouldSuppressToolEvent(it.event as RuntimeToolEvent)) return null;
+            return <OperatorTranscriptToolRow key={`h-tool-${it.seq}`} event={it.event as RuntimeToolEvent} />;
+          }
+          const isLast = idx === items.length - 1;
+          const streamCaret = thinking && isLast;
+          return (
+            <div key={`h-txt-${it.seq}`} className="text-xs leading-snug">
+              <div className="nd-stream-assistant__body">
+                <div className="min-w-0 flex-1">
+                  <WorkspaceMarkdownStreamBody
+                    text={it.text}
+                    className={cn(
+                      "text-[#e8e8e8]",
+                      "[&_a]:text-[#999999] hover:[&_a]:text-[#e8e8e8]",
+                      "[&_blockquote]:border-[#333333] [&_blockquote]:text-[#999999]",
+                      "[&_code]:text-[#e8e8e8]",
+                    )}
+                  />
+                </div>
+                {streamCaret ? (
+                  <span className="nd-stream-assistant__caret nd-stream-assistant__caret--pulse" aria-hidden />
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const CHANNEL_STORAGE_KEY = "pc-ws-agent-channels-v2";
+
+/** Workforce roster agent id — used to resolve `propertiesSelection.id` → canonical persona name for channel keys. */
+const AGENT_REGISTRY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type StigNote = { at: string; actor: string; text: string };
 
-type ChannelPersist = { taskId: string; notes: StigNote[] };
+/** Stigmergic notes use `actor: "operator"` for the human; show a clearer label in the rail. */
+function noteActorTranscriptLabel(actor: string): string {
+  const a = actor.trim();
+  if (a === "operator") return "You";
+  if (a === "operator_resume") return "You (resume)";
+  return a;
+}
+
+type ChannelPersist = { taskId: string; notes: StigNote[]; toolEvents?: RuntimeToolEvent[] };
 
 function loadChannels(companyId: string): Record<string, ChannelPersist> {
   if (typeof window === "undefined") return {};
@@ -208,9 +378,11 @@ function parseNotesFromResponse(v: unknown): StigNote[] {
     const o = item as Record<string, unknown>;
     const text = typeof o.text === "string" ? o.text : "";
     if (!text) continue;
+    const actor = typeof o.actor === "string" ? o.actor : "operator";
+    if (actor !== "operator" && isWorkerDispatchRoutingStubText(text)) continue;
     out.push({
       at: typeof o.at === "string" ? o.at : "",
-      actor: typeof o.actor === "string" ? o.actor : "operator",
+      actor,
       text,
     });
   }
@@ -269,6 +441,145 @@ function formatRuntimeEventLabel(event: RuntimeToolEvent): string {
   if (event.event_type === "tool_start_delta") return "tool input delta";
   if (event.event_type === "tool_start") return "tool start";
   return isErr ? "tool error" : "tool result";
+}
+
+function toolEventDedupeKey(e: RuntimeToolEvent): string {
+  return `${e.ts_ms ?? 0}:${e.call_id ?? ""}:${e.event_type ?? ""}:${(e.message ?? "").slice(0, 120)}`;
+}
+
+/** Persisted tail + live stream: live wins on key collision (same turn updates). */
+function mergeToolEventLists(persisted: RuntimeToolEvent[], live: RuntimeToolEvent[]): RuntimeToolEvent[] {
+  const map = new Map<string, RuntimeToolEvent>();
+  for (const e of persisted) map.set(toolEventDedupeKey(e), e);
+  for (const e of live) map.set(toolEventDedupeKey(e), e);
+  return [...map.values()];
+}
+
+function shortCallId(id: string | null | undefined): string {
+  const s = (id ?? "").trim();
+  if (!s) return "";
+  if (s.length <= 16) return s;
+  return `${s.slice(0, 6)}…${s.slice(-4)}`;
+}
+
+function isBoilerplateToolMessage(m: string): boolean {
+  const t = m.trim();
+  if (!t) return true;
+  if (/^model emitted tool call$/i.test(t)) return true;
+  if (/^model streaming tool input$/i.test(t)) return true;
+  if (/^tool started args=/i.test(t)) return true;
+  if (/^tool started$/i.test(t)) return true;
+  if (/^worker dispatch started$/i.test(t)) return true;
+  if (/^tool input preview complete$/i.test(t)) return true;
+  return false;
+}
+
+function isInternalHarnessToolName(name: string | null | undefined): boolean {
+  const t = (name ?? "").trim().toLowerCase();
+  if (!t) return false;
+  return t === "worker_dispatch";
+}
+
+function shouldSuppressToolEvent(event: RuntimeToolEvent | HarnessToolEvent): boolean {
+  if (event.success === false) return false;
+  if (isInternalHarnessToolName(event.tool_name)) return true;
+  if ((event.event_type ?? "").trim().toLowerCase() === "tool_start_delta") return true;
+  if (
+    (event.event_type ?? "").trim().toLowerCase() === "tool_start" &&
+    (event.tool_name ?? "").trim().toLowerCase() === "bash"
+  ) {
+    return true;
+  }
+  const msg = (event.message ?? "").trim();
+  if (/^tool \(stream_event tool_use\)$/i.test(msg)) return true;
+  if (isBoilerplateToolMessage(msg)) return true;
+  return false;
+}
+
+function isLikelyCompanionNarration(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  if (t.includes("i’ll begin by inspecting the repository layout")) return true;
+  if (t.includes("i'll begin by inspecting the repository layout")) return true;
+  if (t.includes("let me kick things off with a quick ls")) return true;
+  if (t.includes("i’ll stream the tool events")) return true;
+  if (t.includes("i'll stream the tool events")) return true;
+  return false;
+}
+
+/** One transcript row per tool invocation — collapses noisy start/result spam for the same `call_id`. */
+function toolEventPhaseOrder(e: RuntimeToolEvent): number {
+  if (e.event_type === "tool_start") return 0;
+  if (e.event_type === "tool_start_delta") return 1;
+  return 2;
+}
+
+function mergeRuntimeToolGroup(group: RuntimeToolEvent[]): RuntimeToolEvent {
+  const ordered = [...group].sort((a, b) => {
+    const d = (a.ts_ms ?? 0) - (b.ts_ms ?? 0);
+    if (d !== 0) return d;
+    return toolEventPhaseOrder(a) - toolEventPhaseOrder(b);
+  });
+  const first = ordered[0]!;
+  const last = ordered[ordered.length - 1]!;
+  const tool_name =
+    ordered.map((x) => x.tool_name).find((n) => typeof n === "string" && n.trim().length > 0) ?? first.tool_name;
+  const call_id = first.call_id;
+  const anyErr = ordered.some(
+    (x) => x.success === false || /error|fail|blocked|denied/i.test(x.message ?? ""),
+  );
+  const msgs = [...new Set(ordered.map((x) => x.message?.trim()).filter((m): m is string => !!m))];
+  const substantive = msgs.filter((m) => !isBoilerplateToolMessage(m));
+  const message = substantive.length > 0 ? substantive.join(" · ") : undefined;
+  const firstInput = ordered.find(
+    (x) =>
+      (x.event_type === "tool_start" || x.event_type === "tool_start_delta") &&
+      x.input !== undefined,
+  )?.input;
+  return {
+    event_type: anyErr ? last.event_type : "tool_result",
+    tool_name,
+    call_id,
+    success: !anyErr,
+    message,
+    input: firstInput,
+    ts_ms: first.ts_ms,
+    task_key: first.task_key,
+  };
+}
+
+function mergeRuntimeToolEventsByCallId(events: RuntimeToolEvent[]): RuntimeToolEvent[] {
+  const sorted = [...events].sort((a, b) => {
+    const d = (a.ts_ms ?? 0) - (b.ts_ms ?? 0);
+    if (d !== 0) return d;
+    const po = toolEventPhaseOrder(a) - toolEventPhaseOrder(b);
+    if (po !== 0) return po;
+    return toolEventDedupeKey(a).localeCompare(toolEventDedupeKey(b));
+  });
+
+  const bare: RuntimeToolEvent[] = [];
+  const byCall = new Map<string, RuntimeToolEvent[]>();
+  for (const e of sorted) {
+    const cid = (e.call_id ?? "").trim();
+    if (!cid) {
+      bare.push(e);
+      continue;
+    }
+    const g = byCall.get(cid) ?? [];
+    g.push(e);
+    byCall.set(cid, g);
+  }
+
+  const folded: RuntimeToolEvent[] = [...bare];
+  for (const group of byCall.values()) {
+    folded.push(group.length === 1 ? group[0]! : mergeRuntimeToolGroup(group));
+  }
+  folded.sort((a, b) => {
+    const d = (a.ts_ms ?? 0) - (b.ts_ms ?? 0);
+    if (d !== 0) return d;
+    return toolEventDedupeKey(a).localeCompare(toolEventDedupeKey(b));
+  });
+  return folded;
 }
 
 type WorkspaceListEntry = {
@@ -898,11 +1209,14 @@ export function WorkspaceRightRail() {
   const [thinking, setThinking] = useState(false);
   /** Token / partial assistant text from NDJSON stream (OpenRouter deltas or future worker tokens). */
   const [streamAssistantBuf, setStreamAssistantBuf] = useState("");
-  const [brailleFrame, setBrailleFrame] = useState(0);
   const [typeoutNote, setTypeoutNote] = useState<StigNote | null>(null);
   const [typeoutIdx, setTypeoutIdx] = useState(0);
   const [liveRun, setLiveRun] = useState<LiveRun | null>(null);
   const [liveToolEvents, setLiveToolEvents] = useState<RuntimeToolEvent[]>([]);
+  const liveToolEventsRef = useRef<RuntimeToolEvent[]>([]);
+  /** Last resolved roster persona for this agent session — survives transient `focusedPersona === ""` during query refetch. */
+  const agentChatPersonaRef = useRef("");
+  const prevAgentSessionIdRef = useRef<string>("");
   const [runTimeline, setRunTimeline] = useState<RunTimelineEntry[]>([]);
   const [runNeedsApproval, setRunNeedsApproval] = useState(false);
   const [runActionBusy, setRunActionBusy] = useState(false);
@@ -913,10 +1227,8 @@ export function WorkspaceRightRail() {
     notesCompacted: number;
     notesKept: number;
   } | null>(null);
-  /** Live activity items shown in the observable status panel above the input bar. */
-  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
-  /** Short contextual label shown below the activity list, e.g. "Step 2 — Building context". */
-  const [activityPhaseLabel, setActivityPhaseLabel] = useState<string | null>(null);
+  /** Run summary / timeline / task actions — collapsed by default; transcript carries stream + tools. */
+  const [runHarnessOpen, setRunHarnessOpen] = useState(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -926,11 +1238,21 @@ export function WorkspaceRightRail() {
   const timelineSeqRef = useRef(0);
   const timelineRunRef = useRef<string | null>(null);
   const timelineStatusRef = useRef<RunStatus | null>(null);
-  const brailleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const typeoutTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Coalesce NDJSON token updates to one React commit per animation frame. */
   const streamAppendAccRef = useRef("");
   const streamAppendRafRef = useRef<number | null>(null);
+  /** Claude Code–style single turn: tools + streaming text in arrival order. */
+  const turnHarnessRef = useRef(new AgentChatTurnHarness());
+  const [harnessUiVersion, setHarnessUiVersion] = useState(0);
+  /** Reassembles Anthropic `tool_use` blocks from `stream_event` (synthetic runtime mirror). */
+  const toolWireAssemblerRef = useRef(new AnthropicToolUseWireAssembler());
+  /** Skip duplicate harness rows when both Anthropic wire + `runtime` carry the same tool. */
+  const harnessToolDedupeRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    liveToolEventsRef.current = liveToolEvents;
+  }, [liveToolEvents]);
 
   const resetStreamAppend = useCallback(() => {
     streamAppendAccRef.current = "";
@@ -947,19 +1269,20 @@ export function WorkspaceRightRail() {
       streamAppendRafRef.current = null;
     }
     setStreamAssistantBuf(streamAppendAccRef.current);
+    setHarnessUiVersion((v) => v + 1);
   }, []);
 
   const scheduleStreamAppend = useCallback((chunk: string) => {
     if (!chunk) return;
     streamAppendAccRef.current += chunk;
+    turnHarnessRef.current.appendTextDelta(chunk);
     if (streamAppendRafRef.current != null) return;
     streamAppendRafRef.current = requestAnimationFrame(() => {
       streamAppendRafRef.current = null;
       setStreamAssistantBuf(streamAppendAccRef.current);
+      setHarnessUiVersion((v) => v + 1);
     });
   }, []);
-
-  const BRAILLE = "⣾⣽⣻⢿⡿⣟⣯⣷";
 
   useEffect(() => {
     if (!companyId) {
@@ -972,16 +1295,6 @@ export function WorkspaceRightRail() {
   useEffect(() => {
     if (!companyId) setRailTab("agents");
   }, [companyId]);
-
-  // Braille spinner animation while agent is thinking
-  useEffect(() => {
-    if (!thinking) {
-      if (brailleTimerRef.current) clearInterval(brailleTimerRef.current);
-      return;
-    }
-    brailleTimerRef.current = setInterval(() => setBrailleFrame((f) => (f + 1) % 8), 80);
-    return () => { if (brailleTimerRef.current) clearInterval(brailleTimerRef.current); };
-  }, [thinking]);
 
   // Typeout animation — live-streams agent reply character by character
   useEffect(() => {
@@ -1027,14 +1340,39 @@ export function WorkspaceRightRail() {
     return [...m.values()].sort((a, b) => a.persona.localeCompare(b.persona));
   }, [agents, tasks]);
 
+  /** Canonical roster name — must match `rows[].persona` / `saveChannel` keys (UUID id alone would orphan session notes). */
   const focusedPersona = useMemo(() => {
-    if (propertiesSelection?.kind === "agent") {
-      return (propertiesSelection.name ?? propertiesSelection.id).trim();
+    if (propertiesSelection?.kind !== "agent") return "";
+    const name = (propertiesSelection.name ?? "").trim();
+    const id = (propertiesSelection.id ?? "").trim();
+    if (name && rows.some((r) => r.persona === name)) return name;
+    if (AGENT_REGISTRY_UUID_RE.test(id)) {
+      const hit = agents.find((a) => a.id === id);
+      const n = hit?.name?.trim();
+      if (n) return n;
     }
-    return "";
-  }, [propertiesSelection]);
+    return (name || id).trim();
+  }, [propertiesSelection, rows, agents]);
 
-  // Stop polling and clear spinner when persona changes
+  /** Stable while the same agent row is selected — do not use `focusedPersona` here (it can go "" during refetch). */
+  const agentSessionKey =
+    propertiesSelection?.kind === "agent" ? (propertiesSelection.id ?? "").trim() : "";
+
+  if (agentSessionKey !== prevAgentSessionIdRef.current) {
+    prevAgentSessionIdRef.current = agentSessionKey;
+    agentChatPersonaRef.current = "";
+  }
+  if (propertiesSelection?.kind !== "agent") {
+    agentChatPersonaRef.current = "";
+  } else if (focusedPersona) {
+    agentChatPersonaRef.current = focusedPersona;
+  }
+  const chatPersona =
+    propertiesSelection?.kind === "agent"
+      ? (focusedPersona || agentChatPersonaRef.current).trim()
+      : "";
+
+  // Stop polling and reset in-flight UI only when the *agent session* changes (id), not when roster data refetches.
   useEffect(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
     if (runPollingRef.current) clearInterval(runPollingRef.current);
@@ -1047,15 +1385,12 @@ export function WorkspaceRightRail() {
     runtimeSeenRef.current.clear();
     setRunActionErr(null);
     resetStreamAppend();
-  }, [focusedPersona, resetStreamAppend]);
-
-  /** Clear live token bubble once the tracked worker run reaches a terminal state. */
-  useEffect(() => {
-    const st = liveRun?.status;
-    if (st === "success" || st === "error" || st === "cancelled") {
-      resetStreamAppend();
-    }
-  }, [liveRun?.status, resetStreamAppend]);
+    turnHarnessRef.current.reset();
+    toolWireAssemblerRef.current.reset();
+    harnessToolDedupeRef.current.clear();
+    setHarnessUiVersion((v) => v + 1);
+    setRunHarnessOpen(false);
+  }, [agentSessionKey, resetStreamAppend]);
 
   const pushRunTimeline = useCallback((entry: Omit<RunTimelineEntry, "seq" | "tsMs"> & { tsMs?: number }) => {
     const seq = ++timelineSeqRef.current;
@@ -1087,6 +1422,13 @@ export function WorkspaceRightRail() {
       });
     }
   }, [liveRun?.runId, liveRun?.status, liveRun?.summary, liveRun?.skill, pushRunTimeline]);
+
+  /** Auto-expand run footer when the operator must act or the run failed. */
+  useEffect(() => {
+    if (runNeedsApproval || liveRun?.status === "error" || Boolean(runActionErr)) {
+      setRunHarnessOpen(true);
+    }
+  }, [runNeedsApproval, liveRun?.status, runActionErr]);
 
   // Poll agent-run status when a skill run is in flight
   useEffect(() => {
@@ -1196,12 +1538,15 @@ export function WorkspaceRightRail() {
 
   useEffect(() => {
     setRunNeedsApproval(false);
-    setLiveToolEvents([]);
-    runtimeSeenRef.current.clear();
+    // Do not clear `liveToolEvents` here: assigning `liveRun.runId` after the NDJSON stream would wipe
+    // tool rows that only existed in React state (stream `runtime` lines). Clear at send-handoff start instead.
   }, [liveRun?.runId]);
 
   // Stream runtime tool events (SSE) into live run strip and persist to run feedback timeline.
   useEffect(() => {
+    // During active operator NDJSON stream, runtime events already arrive via `{ type: "runtime" }`.
+    // Keep a single source of truth to avoid duplicate tool churn and render cascades.
+    if (sending || thinking) return;
     if (!companyId || !liveRun?.runId || liveRun.status !== "running") return;
     if (runtimeEventSourceRef.current) {
       runtimeEventSourceRef.current.close();
@@ -1231,6 +1576,7 @@ export function WorkspaceRightRail() {
           }
         : null;
       if (!parsed) return;
+      if (shouldSuppressToolEvent(parsed)) return;
       const key = `${parsed.ts_ms ?? 0}:${parsed.call_id ?? ""}:${parsed.event_type ?? ""}:${parsed.message ?? ""}`;
       if (runtimeSeenRef.current.has(key)) return;
       runtimeSeenRef.current.add(key);
@@ -1330,11 +1676,11 @@ export function WorkspaceRightRail() {
       es.close();
       if (runtimeEventSourceRef.current === es) runtimeEventSourceRef.current = null;
     };
-  }, [apiBase, companyId, liveRun?.runId, liveRun?.status, liveRun?.taskId, pushRunTimeline]);
+  }, [apiBase, companyId, liveRun?.runId, liveRun?.status, liveRun?.taskId, pushRunTimeline, sending, thinking]);
 
   const selectedRow = useMemo(
-    () => (focusedPersona ? rows.find((r) => r.persona === focusedPersona) : undefined),
-    [rows, focusedPersona],
+    () => (chatPersona ? rows.find((r) => r.persona === chatPersona) : undefined),
+    [rows, chatPersona],
   );
   const selectedTask =
     propertiesSelection?.kind === "task"
@@ -1388,24 +1734,84 @@ export function WorkspaceRightRail() {
     setSendErr(null);
     setDraft("");
     setCompactionBanner(null);
-    setActivityItems([]);
-    setActivityPhaseLabel(null);
+    setRunHarnessOpen(false);
     if (propertiesSelection?.kind === "agent") {
       setPropertiesSelection(null);
     }
   }, [propertiesSelection, setPropertiesSelection]);
 
+  const resetAgentSessionCache = useCallback(() => {
+    if (!companyId || !chatPersona) return;
+    setCompactionBanner(null);
+    setSendErr(null);
+    setTypeoutNote(null);
+    setThinking(false);
+    setSending(false);
+    setLiveToolEvents([]);
+    liveToolEventsRef.current = [];
+    resetStreamAppend();
+    turnHarnessRef.current.reset();
+    toolWireAssemblerRef.current.reset();
+    harnessToolDedupeRef.current.clear();
+    setHarnessUiVersion((v) => v + 1);
+    setChannels((prev) => {
+      const next = { ...prev };
+      delete next[chatPersona];
+      try {
+        const raw = sessionStorage.getItem(CHANNEL_STORAGE_KEY);
+        const all = (raw ? JSON.parse(raw) : {}) as Record<string, Record<string, ChannelPersist>>;
+        if (all[companyId]) {
+          delete all[companyId][chatPersona];
+          sessionStorage.setItem(CHANNEL_STORAGE_KEY, JSON.stringify(all));
+        }
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, [chatPersona, companyId, resetStreamAppend]);
+
   const persistNotes = useCallback(
-    (persona: string, taskId: string, notes: StigNote[]) => {
+    (
+      persona: string,
+      taskId: string,
+      notes: StigNote[],
+      toolEventsArg?: RuntimeToolEvent[] | null,
+    ) => {
       if (!companyId) return;
-      saveChannel(companyId, persona, { taskId, notes });
-      setChannels((prev) => ({ ...prev, [persona]: { taskId, notes } }));
+      const cleanedNotes = notes.filter(
+        (n) => !(n.actor !== "operator" && isWorkerDispatchRoutingStubText(n.text)),
+      );
+      setChannels((prev) => {
+        const prevEntry = prev[persona];
+        let nextTools: RuntimeToolEvent[] | undefined;
+        if (toolEventsArg === null) {
+          nextTools = undefined;
+        } else if (toolEventsArg === undefined) {
+          nextTools = prevEntry?.toolEvents;
+        } else {
+          nextTools = toolEventsArg.length > 0 ? toolEventsArg : undefined;
+        }
+        const payload: ChannelPersist = {
+          taskId,
+          notes: cleanedNotes,
+          ...(nextTools && nextTools.length > 0 ? { toolEvents: nextTools } : {}),
+        };
+        saveChannel(companyId, persona, payload);
+        return { ...prev, [persona]: payload };
+      });
     },
     [companyId],
   );
 
   const startPollingForReply = useCallback(
-    (taskId: string, registryId: string | null, knownKeys: Set<string>, persona: string) => {
+    (
+      taskId: string,
+      registryId: string | null,
+      knownKeys: Set<string>,
+      persona: string,
+      companionFingerprint: string | null,
+    ) => {
       if (pollingRef.current) clearInterval(pollingRef.current);
       let elapsed = 0;
       const MAX_MS = 120_000;
@@ -1415,44 +1821,68 @@ export function WorkspaceRightRail() {
         elapsed += INTERVAL;
         if (elapsed >= MAX_MS) {
           clearInterval(pollingRef.current!);
+          pollingRef.current = null;
           setThinking(false);
           return;
         }
-        if (!registryId || !companyId) return;
+        if (!companyId) return;
         try {
-          const r = await fetch(
-            `${apiBase}/api/company/companies/${companyId}/agents/${registryId}/operator-thread`,
-          );
-          if (!r.ok) return;
-          const raw = await r.json().catch(() => ({}));
-          const j = asObject(raw);
-          const flat = asArray(j?.notes_flat).map((entry) => {
-            const o = asObject(entry);
-            const note = asObject(o?.note);
-            return {
-              task_id: typeof o?.task_id === "string" ? o.task_id : "",
-              note: {
-                at: typeof note?.at === "string" ? note.at : "",
-                actor: typeof note?.actor === "string" ? note.actor : "operator",
-                text: typeof note?.text === "string" ? note.text : "",
-              } as StigNote,
-            };
-          });
-          const taskNotes = flat
-            .filter((n) => n.task_id === taskId)
-            .map((n) => n.note)
-            .filter((n) => n?.text);
+          let taskNotes: StigNote[] = [];
 
-          const newAgentNotes = taskNotes.filter(
-            (n) => n.actor !== "operator" && !knownKeys.has(`${n.at}::${n.text.slice(0, 40)}`),
-          );
+          if (registryId) {
+            const r = await fetch(
+              `${apiBase}/api/company/companies/${companyId}/agents/${registryId}/operator-thread`,
+            );
+            if (!r.ok) return;
+            const raw = await r.json().catch(() => ({}));
+            const j = asObject(raw);
+            const flat = asArray(j?.notes_flat).map((entry) => {
+              const o = asObject(entry);
+              const note = asObject(o?.note);
+              return {
+                task_id: typeof o?.task_id === "string" ? o.task_id : "",
+                note: {
+                  at: typeof note?.at === "string" ? note.at : "",
+                  actor: typeof note?.actor === "string" ? note.actor : "operator",
+                  text: typeof note?.text === "string" ? note.text : "",
+                } as StigNote,
+              };
+            });
+            taskNotes = flat
+              .filter((n) => n.task_id === taskId)
+              .map((n) => n.note)
+              .filter((n) => n?.text);
+          } else {
+            // Persona-only row (no workforce registry id): operator-thread is unavailable — poll task notes.
+            const r = await fetch(`${apiBase}/api/company/tasks/${taskId}/llm-context`);
+            if (!r.ok) return;
+            const j = asObject(await r.json().catch(() => ({})));
+            const arr = asArray(j?.context_notes);
+            taskNotes = arr
+              .map((entry) => {
+                const o = asObject(entry);
+                return {
+                  at: typeof o?.at === "string" ? o.at : "",
+                  actor: typeof o?.actor === "string" ? o.actor : "operator",
+                  text: typeof o?.text === "string" ? o.text : "",
+                } as StigNote;
+              })
+              .filter((n) => n.text.length > 0);
+          }
+
+          const newAgentNotes = taskNotes.filter((n) => {
+            if (n.actor !== persona) return false;
+            if (companionFingerprint && n.text === companionFingerprint) return false;
+            if (isWorkerDispatchRoutingStubText(n.text)) return false;
+            return !knownKeys.has(`${n.at}::${n.text.slice(0, 40)}`);
+          });
 
           if (newAgentNotes.length > 0) {
             clearInterval(pollingRef.current!);
+            pollingRef.current = null;
             setThinking(false);
-            // Clear activity panel — reply arrived
-            setActivityItems([]);
-            setActivityPhaseLabel(null);
+            // Drop the live NDJSON bubble so we do not duplicate the same text while typeout runs.
+            resetStreamAppend();
             // Persist full updated notes list
             persistNotes(persona, taskId, taskNotes);
             // Kick off typeout for the last agent reply
@@ -1464,11 +1894,12 @@ export function WorkspaceRightRail() {
         }
       }, INTERVAL);
     },
-    [apiBase, companyId, persistNotes],
+    [apiBase, companyId, persistNotes, resetStreamAppend],
   );
 
   const sendHandoff = useCallback(async () => {
-    if (!companyId || !focusedPersona) return;
+    const persona = (focusedPersona || agentChatPersonaRef.current).trim();
+    if (!companyId || !persona) return;
     const text = draft.trim();
     if (!text) {
       setSendErr("Message required.");
@@ -1479,24 +1910,17 @@ export function WorkspaceRightRail() {
     if (pollingRef.current) clearInterval(pollingRef.current);
     setThinking(false);
     setTypeoutNote(null);
+    setLiveToolEvents([]);
+    liveToolEventsRef.current = [];
+    runtimeSeenRef.current.clear();
+    turnHarnessRef.current.reset();
+    toolWireAssemblerRef.current.reset();
+    harnessToolDedupeRef.current.clear();
+    setHarnessUiVersion((v) => v + 1);
 
-    // Reset activity panel and seed the first step
-    let actStep = 0;
-    const markPrevDone = (items: ActivityItem[]) =>
-      items.map((p) => (p.status === "in_progress" ? { ...p, status: "done" as const } : p));
-    const pushAct = (id: string, label: string, detail?: string | null) => {
-      actStep += 1;
-      setActivityItems((prev) => [
-        ...markPrevDone(prev),
-        { id, label, detail: detail ?? null, status: "in_progress" as const },
-      ]);
-      setActivityPhaseLabel(`Step ${actStep} — ${label}`);
-    };
-    setActivityItems([{ id: "prepare", label: "Preparing request", detail: null, status: "in_progress" }]);
-    setActivityPhaseLabel("Step 1 — Preparing request");
     try {
       let taskId: string | null =
-        channels[focusedPersona]?.taskId ?? findBestTaskForPersona(tasks, focusedPersona) ?? null;
+        channels[persona]?.taskId ?? findBestTaskForPersona(tasks, persona) ?? null;
 
       // Step 1: Save the operator note (or create task).
       // If the cached taskId no longer exists (e.g. was deleted, DB wiped), evict it and
@@ -1506,17 +1930,17 @@ export function WorkspaceRightRail() {
         try {
           const j = await postTaskStigmergicNote(apiBase, taskId, { text, actor: "operator" });
           notesAfterSend = parseNotesFromResponse(j.context_notes);
-          persistNotes(focusedPersona, taskId, notesAfterSend);
+          persistNotes(persona, taskId, notesAfterSend, null);
         } catch (noteErr) {
           const msg = (noteErr instanceof Error ? noteErr.message : String(noteErr)).toLowerCase();
           if (/not found|404|no rows|task/i.test(msg)) {
             // Stale task ID — evict channel cache and fall through to creating a fresh task
             taskId = null;
             if (companyId) {
-              saveChannel(companyId, focusedPersona, { taskId: "", notes: [] });
+              saveChannel(companyId, persona, { taskId: "", notes: [] });
               setChannels((prev) => {
                 const next = { ...prev };
-                delete next[focusedPersona];
+                delete next[persona];
                 return next;
               });
             }
@@ -1527,16 +1951,16 @@ export function WorkspaceRightRail() {
       }
       if (!taskId) {
         const j = await createCompanyTask(apiBase, companyId, {
-          title: `Operator · ${focusedPersona}`,
+          title: `Operator · ${persona}`,
           specification: text,
-          owner_persona: focusedPersona,
+          owner_persona: persona,
         });
         const newId = j.taskId;
         if (!newId) throw new Error("Created task missing id");
         taskId = newId;
         const now = new Date().toISOString();
         notesAfterSend = [{ at: now, actor: "operator", text }];
-        persistNotes(focusedPersona, newId, notesAfterSend);
+        persistNotes(persona, newId, notesAfterSend, null);
       }
 
       setDraft("");
@@ -1545,8 +1969,7 @@ export function WorkspaceRightRail() {
       setThinking(true);
       setSending(false);
       resetStreamAppend();
-      let hadStreamedTokens = false;
-      pushAct("route", "Routing to agent runtime");
+      let hadStreamedText = false;
 
       const streamUrl = getAgentChatReplyStreamUrl();
 
@@ -1565,10 +1988,19 @@ export function WorkspaceRightRail() {
             }
           : null;
         if (!parsed) return;
+        if (shouldSuppressToolEvent(parsed)) return;
         const key = `${parsed.ts_ms ?? 0}:${parsed.call_id ?? ""}:${parsed.event_type ?? ""}:${parsed.message ?? ""}`;
         if (runtimeSeenRef.current.has(key)) return;
         runtimeSeenRef.current.add(key);
         setLiveToolEvents((prev) => [parsed, ...prev].slice(0, 24));
+        if (typeof parsed.tool_name === "string" && parsed.tool_name.trim().length > 0) {
+          const hk = `${(parsed.call_id ?? "").trim()}::${parsed.tool_name.trim()}`;
+          if (!harnessToolDedupeRef.current.has(hk)) {
+            harnessToolDedupeRef.current.add(hk);
+            turnHarnessRef.current.appendTool(parsed);
+            setHarnessUiVersion((v) => v + 1);
+          }
+        }
         const rid = liveRun?.runId;
         if (rid) {
           const eventPhase: RunTimelinePhase =
@@ -1593,7 +2025,7 @@ export function WorkspaceRightRail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           taskId,
-          persona: focusedPersona,
+          persona,
           companyId,
           title: selectedRow?.title,
           role: selectedRow?.role,
@@ -1620,6 +2052,12 @@ export function WorkspaceRightRail() {
         const errText = await replyRes.text().catch(() => replyRes.statusText);
         setThinking(false);
         setSendErr(errText || `Chat stream failed (${replyRes.status})`);
+        turnHarnessRef.current.reset();
+        toolWireAssemblerRef.current.reset();
+        harnessToolDedupeRef.current.clear();
+        setLiveToolEvents([]);
+        liveToolEventsRef.current = [];
+        setHarnessUiVersion((v) => v + 1);
         await refreshWorkspace();
         return;
       }
@@ -1646,80 +2084,46 @@ export function WorkspaceRightRail() {
           const t = typeof ev.type === "string" ? ev.type : "";
           if (t === "runtime" && ev.payload) {
             ingestRuntimeFromPayload(ev.payload);
-            // Mirror tool events into the activity panel
-            const p = asObject(ev.payload);
-            if (p) {
-              const toolName = typeof p.tool_name === "string" ? p.tool_name : null;
-              const callId = typeof p.call_id === "string" ? p.call_id : null;
-              const evType = typeof p.event_type === "string" ? p.event_type : "";
-              const success = typeof p.success === "boolean" ? p.success : true;
-              if ((evType === "tool_start" || evType === "tool_start_delta") && toolName) {
-                pushAct(`tool:${callId ?? toolName}`, toolName, callId ?? null);
-              } else if (evType !== "tool_start" && evType !== "tool_start_delta" && toolName) {
-                setActivityItems((prev) =>
-                  prev.map((a) =>
-                    a.id === `tool:${callId ?? toolName}` || a.status === "in_progress"
-                      ? { ...a, status: success ? ("done" as const) : ("error" as const) }
-                      : a,
-                  ),
-                );
+          } else if (t === "stream_event") {
+            const inner = ev.event;
+            const completed = toolWireAssemblerRef.current.consume(inner);
+            if (completed) {
+              let input: unknown;
+              try {
+                input = completed.input_json.trim().length > 0 ? JSON.parse(completed.input_json) : {};
+              } catch {
+                input = { _raw_json: completed.input_json };
+              }
+              const hk = `${completed.tool_use_id.trim()}::${completed.name.trim()}`;
+              if (!harnessToolDedupeRef.current.has(hk)) {
+                harnessToolDedupeRef.current.add(hk);
+                const toolEv: RuntimeToolEvent = {
+                  event_type: "tool_start",
+                  tool_name: completed.name,
+                  call_id: completed.tool_use_id,
+                  success: true,
+                  message: "tool (stream_event tool_use)",
+                  input,
+                  ts_ms: Date.now(),
+                };
+                if (shouldSuppressToolEvent(toolEv)) {
+                  continue;
+                }
+                turnHarnessRef.current.appendTool(toolEv);
+                setHarnessUiVersion((v) => v + 1);
               }
             }
-          } else if (t === "tool_start" || t === "tool_start_delta") {
-            const toolName = typeof ev.tool_name === "string" ? ev.tool_name : null;
-            const callId = typeof ev.call_id === "string" ? ev.call_id : null;
-            const input = Object.prototype.hasOwnProperty.call(ev, "input") ? ev.input : undefined;
-            const tsMs = Date.now();
-            const parsed: RuntimeToolEvent = {
-              event_type: t,
-              tool_name: toolName,
-              call_id: callId,
-              success: true,
-              message: t === "tool_start_delta" ? "model streaming tool input" : "model emitted tool call",
-              input,
-              ts_ms: tsMs,
-            };
-            const key = `${parsed.ts_ms ?? 0}:${parsed.call_id ?? ""}:${parsed.event_type ?? ""}:${parsed.message ?? ""}`;
-            if (!runtimeSeenRef.current.has(key)) {
-              runtimeSeenRef.current.add(key);
-              setLiveToolEvents((prev) => [parsed, ...prev].slice(0, 24));
-            }
-            if (toolName) {
-              setActivityItems((prev) => {
-                const id = `tool:${callId ?? toolName}`;
-                const alreadyActive = prev.some((a) => a.id === id && a.status !== "error");
-                if (alreadyActive) return prev;
-                return [
-                  ...prev.map((p) =>
-                    p.status === "in_progress" ? { ...p, status: "done" as const } : p,
-                  ),
-                  {
-                    id,
-                    label: toolName,
-                    detail: callId ?? null,
-                    status: "in_progress" as const,
-                  },
-                ];
-              });
-            }
-          } else if (t === "stream_event") {
-            const eff = extractAnthropicStreamTextEffect(ev.event);
+            const eff = extractAnthropicStreamTextEffect(inner);
             if (eff === "reset") {
-              if (!hadStreamedTokens) pushAct("generate", "Generating response");
-              hadStreamedTokens = true;
+              hadStreamedText = true;
+              turnHarnessRef.current.beginFreshTextSegment();
               resetStreamAppend();
             } else if (eff && "append" in eff && eff.append.length > 0) {
-              if (!hadStreamedTokens) pushAct("generate", "Generating response");
-              hadStreamedTokens = true;
+              hadStreamedText = true;
               scheduleStreamAppend(eff.append);
             }
-          } else if (t === "delta" && typeof ev.text === "string") {
-            if (!hadStreamedTokens) pushAct("generate", "Generating response");
-            hadStreamedTokens = true;
-            scheduleStreamAppend(ev.text);
           } else if (t === "phase" && ev.phase === "context_compaction") {
-            // Server compacted old messages into the system prompt — show banner + activity step.
-            pushAct("compact", "Compacting conversation context");
+            // Server compacted old messages into the system prompt — show banner.
             setCompactionBanner({
               notesCompacted: typeof ev.notes_compacted === "number" ? ev.notes_compacted : 0,
               notesKept: typeof ev.notes_kept === "number" ? ev.notes_kept : 0,
@@ -1744,32 +2148,67 @@ export function WorkspaceRightRail() {
               execution_verified: ev.execution_verified === true,
               finalized: ev.finalized === true,
             };
-            // Mark all in-progress activities done
-            setActivityItems((prev) =>
-              prev.map((a) => (a.status === "in_progress" ? { ...a, status: "done" as const } : a)),
-            );
-            if (replyJ.skill) {
-              setActivityPhaseLabel(`Dispatched · ${replyJ.skill}`);
-            } else {
-              setActivityPhaseLabel(null);
-            }
           }
         }
       }
 
       flushStreamAppendNow();
 
+      let handoffBaselineNotes = notesAfterSend;
+      let mergedCompanionIntoNotes = false;
+      let companionFingerprintForPoll: string | null = null;
+      const streamedFinal = streamAppendAccRef.current.trim();
+      const suppressCompanionNarration = isLikelyCompanionNarration(streamedFinal);
+      const allowCompanionPersist =
+        replyJ.worker_evidence === true || replyJ.execution_verified === true;
+      if (
+        streamedFinal &&
+        replyJ.run_id &&
+        !replyJ.reply &&
+        replyJ.ok === true &&
+        !replyJ.error &&
+        allowCompanionPersist &&
+        !suppressCompanionNarration &&
+        companyId
+      ) {
+        const at = replyJ.at ?? new Date().toISOString();
+        const agentStreamNote: StigNote = {
+          at,
+          actor: persona,
+          text: streamedFinal,
+        };
+        handoffBaselineNotes = [...notesAfterSend, agentStreamNote];
+        mergedCompanionIntoNotes = true;
+        companionFingerprintForPoll = streamedFinal;
+        const toolSnap = [...liveToolEventsRef.current].filter((event) => !shouldSuppressToolEvent(event));
+        persistNotes(persona, taskId, handoffBaselineNotes, toolSnap.length > 0 ? toolSnap : null);
+        void postTaskStigmergicNote(apiBase, taskId, {
+          text: streamedFinal,
+          actor: persona,
+        }).catch(() => {});
+        setTypeoutNote(null);
+        resetStreamAppend();
+      }
+
       if (replyJ.run_id && companyId) {
-        // Keep panel alive while the worker runs — show a polling indicator
-        pushAct("poll", `Waiting for agent · ${replyJ.skill ?? "worker"}`, replyJ.run_id?.slice(0, 8) ?? null);
+        const rid = replyJ.run_id;
+        const streamStatus =
+          typeof replyJ.status === "string" && replyJ.status.length > 0
+            ? parseRunStatus(replyJ.status)
+            : parseRunStatus("running");
+        const streamTerminal =
+          streamStatus === "success" || streamStatus === "error" || streamStatus === "cancelled";
+        /** Server finished the worker turn in-band — do not poll for a “second” persona note (often never arrives → stuck UI). */
+        const skipWaitForNotePoll = replyJ.finalized === true || streamTerminal;
+
         setLiveRun({
-          runId: replyJ.run_id,
+          runId: rid,
           skill: replyJ.skill ?? "worker-dispatch",
-          status: "running",
+          status: streamTerminal ? streamStatus : "running",
           summary: null,
           executionVerified: replyJ.execution_verified === true,
+          executionMode: replyJ.execution_mode ? parseExecutionMode(replyJ.execution_mode) : undefined,
         });
-        const rid = replyJ.run_id;
         void (async () => {
           try {
             const data = await getAgentRun(apiBase, companyId, rid);
@@ -1790,29 +2229,50 @@ export function WorkspaceRightRail() {
             /* ignore */
           }
         })();
-        const knownKeys = new Set(notesAfterSend.map((n) => `${n.at}::${n.text.slice(0, 40)}`));
-        startPollingForReply(taskId, selectedRow?.registryId ?? null, knownKeys, focusedPersona);
+
+        if (!skipWaitForNotePoll) {
+          const knownKeys = new Set(handoffBaselineNotes.map((n) => `${n.at}::${n.text.slice(0, 40)}`));
+          startPollingForReply(
+            taskId,
+            selectedRow?.registryId ?? null,
+            knownKeys,
+            persona,
+            companionFingerprintForPoll,
+          );
+        }
       } else {
         setThinking(false);
       }
 
-      const keepStreamBubble = hadStreamedTokens && Boolean(replyJ.run_id);
+      const keepStreamBubble =
+        hadStreamedText &&
+        streamedFinal.length > 0 &&
+        Boolean(replyJ.run_id) &&
+        !mergedCompanionIntoNotes &&
+        !suppressCompanionNarration;
       if (!keepStreamBubble) {
         resetStreamAppend();
       }
+      const effectiveReply =
+        typeof replyJ.reply === "string" && isWorkerDispatchRoutingStubText(replyJ.reply)
+          ? ""
+          : replyJ.reply;
+
       if (!replyJ.ok || replyJ.error) {
         setThinking(false);
         setSendErr(replyJ.error ?? "Agent did not reply");
-      } else if (replyJ.reply) {
+      } else if (effectiveReply) {
         const agentNote: StigNote = {
           at: replyJ.at ?? new Date().toISOString(),
-          actor: focusedPersona,
-          text: replyJ.reply,
+          actor: persona,
+          text: effectiveReply,
         };
         const fullNotes = parseNotesFromResponse(replyJ.context_notes);
         const notesToPersist = fullNotes.length > 0 ? fullNotes : [...notesAfterSend, agentNote];
-        persistNotes(focusedPersona, taskId, notesToPersist);
-        if (hadStreamedTokens) {
+        const toolSnapRaw = liveToolEventsRef.current.length > 0 ? [...liveToolEventsRef.current] : undefined;
+        const toolSnap = toolSnapRaw?.filter((event) => !shouldSuppressToolEvent(event));
+        persistNotes(persona, taskId, notesToPersist, toolSnap);
+        if (hadStreamedText) {
           setTypeoutNote(null);
         } else {
           setTypeoutNote(agentNote);
@@ -1824,6 +2284,12 @@ export function WorkspaceRightRail() {
       }
 
       await refreshWorkspace();
+      turnHarnessRef.current.reset();
+      toolWireAssemblerRef.current.reset();
+      harnessToolDedupeRef.current.clear();
+      setLiveToolEvents([]);
+      liveToolEventsRef.current = [];
+      setHarnessUiVersion((v) => v + 1);
       if (propertiesSelection?.kind === "agent" && companyId) {
         void qc.invalidateQueries({
           queryKey: ["hsm", "operator-thread", apiBase, companyId, propertiesSelection.id],
@@ -1831,6 +2297,12 @@ export function WorkspaceRightRail() {
       }
     } catch (e) {
       setThinking(false);
+      turnHarnessRef.current.reset();
+      toolWireAssemblerRef.current.reset();
+      harnessToolDedupeRef.current.clear();
+      setLiveToolEvents([]);
+      liveToolEventsRef.current = [];
+      setHarnessUiVersion((v) => v + 1);
       const msg = e instanceof Error ? e.message : String(e);
       const low = msg.toLowerCase();
       setSendErr(
@@ -1847,6 +2319,7 @@ export function WorkspaceRightRail() {
     companyId,
     draft,
     flushStreamAppendNow,
+    chatPersona,
     focusedPersona,
     persistNotes,
     propertiesSelection,
@@ -1907,7 +2380,7 @@ export function WorkspaceRightRail() {
         {
           title: `Follow-up · ${liveRun.skill}`,
           specification: liveRun.summary ?? `Review run ${liveRun.runId} and complete any remaining work.`,
-          owner_persona: focusedPersona || undefined,
+          owner_persona: chatPersona || undefined,
         },
       );
       await refreshWorkspace();
@@ -1925,18 +2398,10 @@ export function WorkspaceRightRail() {
     } finally {
       setRunActionBusy(false);
     }
-  }, [
-    apiBase,
-    companyId,
-    focusedPersona,
-    liveRun,
-    qc,
-    refreshWorkspace,
-    setPropertiesSelection,
-  ]);
+  }, [apiBase, companyId, chatPersona, liveRun, qc, refreshWorkspace, setPropertiesSelection]);
 
   const resumeBlockedRun = useCallback(async () => {
-    if (!companyId || !liveRun?.runId || !liveRun.taskId || !focusedPersona) return;
+    if (!companyId || !liveRun?.runId || !liveRun.taskId || !chatPersona) return;
     setRunActionBusy(true);
     setRunActionErr(null);
     try {
@@ -1944,7 +2409,7 @@ export function WorkspaceRightRail() {
         companyId,
         runId: liveRun.runId,
         taskId: liveRun.taskId,
-        persona: focusedPersona,
+        persona: chatPersona,
       });
       if (j.run_id) {
         pushRunTimeline({
@@ -1974,13 +2439,26 @@ export function WorkspaceRightRail() {
     } finally {
       setRunActionBusy(false);
     }
-  }, [apiBase, companyId, focusedPersona, liveRun?.runId, liveRun?.taskId, pushRunTimeline, qc, refreshWorkspace]);
+  }, [apiBase, companyId, chatPersona, liveRun?.runId, liveRun?.taskId, pushRunTimeline, qc, refreshWorkspace]);
 
-  const threadNotes = focusedPersona ? channels[focusedPersona]?.notes ?? [] : [];
+  const threadNotes = chatPersona ? channels[chatPersona]?.notes ?? [] : [];
   const visibleNotes = threadNotes.slice(-24);
-  const showChat = focusedPersona.length > 0;
-  const humanLabel = selectedRow?.title?.trim() || selectedRow?.role?.trim() || focusedPersona;
+  const showChat = chatPersona.length > 0;
+  const humanLabel = selectedRow?.title?.trim() || selectedRow?.role?.trim() || chatPersona;
+  const harnessSnapshot = useMemo(() => turnHarnessRef.current.getItems(), [harnessUiVersion]);
+  const harnessLayoutActive = showChat && (sending || thinking || harnessSnapshot.length > 0);
   const transcriptItems = useMemo((): ChatTranscriptItem[] => {
+    if (harnessLayoutActive) {
+      return visibleNotes.map((note, i) => ({
+        kind: "note" as const,
+        key: `note:${note.at}:${i}`,
+        note,
+        typing: typeoutNote !== null && note.at === typeoutNote.at && note.actor === typeoutNote.actor,
+      }));
+    }
+    const ch = chatPersona ? channels[chatPersona] : undefined;
+    const persistedTools: RuntimeToolEvent[] =
+      ch?.toolEvents && ch.toolEvents.length > 0 ? ch.toolEvents : [];
     const notes = visibleNotes.map((note, i) => ({
       kind: "note" as const,
       key: `note:${note.at}:${i}`,
@@ -1988,7 +2466,10 @@ export function WorkspaceRightRail() {
       typing: typeoutNote !== null && note.at === typeoutNote.at && note.actor === typeoutNote.actor,
       sortTs: isoToMs(note.at),
     }));
-    const tools = [...liveToolEvents]
+    const mergedTools = mergeRuntimeToolEventsByCallId(mergeToolEventLists(persistedTools, liveToolEvents)).filter(
+      (event) => !shouldSuppressToolEvent(event),
+    );
+    const tools = [...mergedTools]
       .reverse()
       .map((event, i) => ({
         kind: "tool" as const,
@@ -1999,29 +2480,25 @@ export function WorkspaceRightRail() {
     const items: Array<ChatTranscriptItem & { sortTs: number }> = [...notes, ...tools];
     items.sort((a, b) => a.sortTs - b.sortTs || a.key.localeCompare(b.key));
     const out: ChatTranscriptItem[] = items.map(({ sortTs: _sortTs, ...item }) => item);
-    if (streamAssistantBuf) {
-      out.push({
-        kind: "assistant_partial",
-        key: "assistant_partial:live",
-        text: streamAssistantBuf,
-      });
-    }
     if (thinking) {
       out.push({
         kind: "status",
         key: `status:${liveRun?.runId ?? "thinking"}`,
         text:
           liveRun?.status === "running"
-            ? `${focusedPersona} is running tools and composing a reply…`
-            : `${focusedPersona} is thinking…`,
+            ? `${chatPersona} is running tools and composing a reply…`
+            : `${chatPersona} is thinking…`,
       });
     }
     return out;
   }, [
-    focusedPersona,
+    channels,
+    chatPersona,
+    harnessLayoutActive,
     liveRun?.runId,
     liveRun?.status,
     liveToolEvents,
+    sending,
     streamAssistantBuf,
     thinking,
     typeoutNote,
@@ -2038,12 +2515,12 @@ export function WorkspaceRightRail() {
   }, [transcriptItems, typeoutIdx]);
 
   useEffect(() => {
-    if (!showChat || !focusedPersona) return;
+    if (!showChat || !chatPersona) return;
     const id = requestAnimationFrame(() => {
       chatInputRef.current?.focus();
     });
     return () => cancelAnimationFrame(id);
-  }, [showChat, focusedPersona]);
+  }, [showChat, chatPersona]);
 
   const headerBar = (
     <div className="flex shrink-0 flex-col gap-2 border-b border-[#222222] px-3 py-2">
@@ -2093,10 +2570,14 @@ export function WorkspaceRightRail() {
     </div>
   );
 
-  const liveRunStrip =
-    liveRun && companyId ? (
-      <div className="shrink-0 border-b border-[#222222] bg-[#0d0d0d] px-3 py-2">
-        <div className="flex items-start gap-2">
+  /** Single collapsible run harness — tools + tokens live in the transcript (NDJSON stream_event + runtime). */
+  const renderRunHarnessFooter = (edge: "top" | "bottom") => {
+    if (!liveRun || !companyId) return null;
+    const borderClass = edge === "top" ? "border-b border-[#222222]" : "border-t border-[#222222]";
+    return (
+      <Collapsible open={runHarnessOpen} onOpenChange={setRunHarnessOpen} className={cn("shrink-0 bg-[#0d0d0d]", borderClass)}>
+        <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left outline-none hover:bg-white/[0.04] [&[data-state=open]>svg:first-child]:rotate-180">
+          <ChevronDown className="size-3.5 shrink-0 text-[#555555] transition-transform" aria-hidden />
           <Badge
             variant="outline"
             className={cn(
@@ -2109,125 +2590,117 @@ export function WorkspaceRightRail() {
           >
             {liveRun.status}
           </Badge>
-          <div className="min-w-0 flex-1">
-            <p className="truncate font-mono text-[11px] text-[#e8e8e8]">Skill · {liveRun.skill}</p>
-            <p className="mt-0.5 font-mono text-[9px] text-[#777777]">
-              mode {liveRun.executionMode ?? "unknown"}
-              {liveRun.executionVerified ? " · verified" : " · unverified"}
-              {liveRun.taskId ? ` · task ${liveRun.taskId.slice(0, 8)}…` : ""}
-            </p>
-            {liveRun.summary ? (
-              <p className="mt-0.5 line-clamp-2 font-mono text-[9px] text-[#777777]">{liveRun.summary}</p>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            title="Dismiss"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
-            onClick={() => setLiveRun(null)}
-          >
-            <X className="size-3.5" strokeWidth={1.5} />
-          </button>
-        </div>
-        {(liveRun.status === "error" || liveRun.status === "cancelled" || liveRun.status === "success") &&
-        liveRun.taskId ? (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="xs"
-              className="border-amber-500/40 bg-transparent font-mono text-[10px] text-amber-200 hover:bg-amber-500/10"
-              disabled={runActionBusy}
-              onClick={() => void escalateRunToHuman()}
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[#a8a8a8]">
+            Run · {liveRun.skill}
+            {liveRun.executionMode ? <span className="text-[#555555]"> · {liveRun.executionMode}</span> : null}
+          </span>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-2 border-t border-[#1a1a1a] px-3 pb-3 pt-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="font-mono text-[9px] text-[#777777]">
+                mode {liveRun.executionMode ?? "unknown"}
+                {liveRun.executionVerified ? " · verified" : " · unverified"}
+                {liveRun.taskId ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <Link
+                      href={`/workspace/issues?focus=${encodeURIComponent(liveRun.taskId)}`}
+                      className="text-[#6b8cae] hover:underline"
+                    >
+                      task {liveRun.taskId.slice(0, 8)}…
+                    </Link>
+                  </>
+                ) : null}
+              </p>
+              {liveRun.summary ? (
+                <p className="line-clamp-4 font-mono text-[9px] text-[#888888]">{liveRun.summary}</p>
+              ) : (
+                <p className="font-mono text-[9px] text-[#555555]">Tool traces stream in the transcript above.</p>
+              )}
+            </div>
+            <button
+              type="button"
+              title="Dismiss run panel"
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+              onClick={() => setLiveRun(null)}
             >
-              {runActionBusy ? "Working…" : "Needs Human"}
-            </Button>
-            <Button
-              variant="outline"
-              size="xs"
-              className="border-[#3b82f6]/40 bg-transparent font-mono text-[10px] text-[#8cc2ff] hover:bg-[#3b82f6]/10"
-              disabled={runActionBusy}
-              onClick={() => void promoteRunFollowupTask()}
-            >
-              {runActionBusy ? "Working…" : "Promote Follow-up"}
-            </Button>
+              <X className="size-3.5" strokeWidth={1.5} />
+            </button>
           </div>
-        ) : null}
-        {runActionErr ? (
-          <p className="mt-2 font-mono text-[10px] uppercase tracking-wide text-[#D4A843]">[ERROR: {runActionErr}]</p>
-        ) : null}
-        {runNeedsApproval ? (
-          <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5">
-            <p className="font-mono text-[10px] text-amber-200">Blocked tool action queued for operator approval.</p>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <Link href="/workspace/approvals" className="font-mono text-[10px] text-amber-100 underline underline-offset-2">
-                Open approvals inbox
-              </Link>
+          {(liveRun.status === "error" || liveRun.status === "cancelled" || liveRun.status === "success") &&
+          liveRun.taskId ? (
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="outline"
                 size="xs"
-                className="border-emerald-500/40 bg-transparent font-mono text-[10px] text-emerald-200 hover:bg-emerald-500/10"
+                className="border-amber-500/40 bg-transparent font-mono text-[10px] text-amber-200 hover:bg-amber-500/10"
                 disabled={runActionBusy}
-                onClick={() => void resumeBlockedRun()}
+                onClick={() => void escalateRunToHuman()}
               >
-                {runActionBusy ? "Working…" : "Resume Run"}
+                {runActionBusy ? "Working…" : "Needs Human"}
+              </Button>
+              <Button
+                variant="outline"
+                size="xs"
+                className="border-[#3b82f6]/40 bg-transparent font-mono text-[10px] text-[#8cc2ff] hover:bg-[#3b82f6]/10"
+                disabled={runActionBusy}
+                onClick={() => void promoteRunFollowupTask()}
+              >
+                {runActionBusy ? "Working…" : "Promote Follow-up"}
               </Button>
             </div>
-          </div>
-        ) : null}
-        {liveToolEvents.length > 0 ? (
-          <div className="mt-2 max-h-32 overflow-y-auto rounded border border-[#222222] bg-black/40 p-1.5">
-            {liveToolEvents.map((e, i) => {
-              const isErr = e.success === false || /error|fail|blocked|denied/i.test(e.message ?? "");
-              const label =
-                e.event_type === "tool_start_delta"
-                  ? "ToolInputDelta"
-                  : e.event_type === "tool_start"
-                    ? "ToolStart"
-                    : isErr
-                      ? "ToolError"
-                      : "ToolComplete";
-              const inputPreview =
-                (e.event_type === "tool_start" || e.event_type === "tool_start_delta") && e.input !== undefined
-                  ? (() => {
-                      try {
-                        const raw = JSON.stringify(e.input);
-                        return raw.length > 180 ? `${raw.slice(0, 180)}…` : raw;
-                      } catch {
-                        return null;
-                      }
-                    })()
-                  : null;
-              return (
-                <p key={`${e.ts_ms ?? 0}-${e.call_id ?? "na"}-${i}`} className={cn("font-mono text-[9px]", isErr ? "text-red-200" : "text-[#9bb4d0]")}>
-                  {label} · {e.tool_name ?? "tool"} {e.call_id ? `(${e.call_id})` : ""} {e.message ? `— ${e.message}` : ""}
-                  {inputPreview ? ` · input=${inputPreview}` : ""}
-                </p>
-              );
-            })}
-          </div>
-        ) : null}
-        {runTimeline.length > 0 ? (
-          <div className="mt-2 rounded border border-[#2b2b2b] bg-black/50 p-1.5">
-            <p className="mb-1 font-mono text-[9px] uppercase tracking-wide text-[#8ea3bd]">Run timeline</p>
-            <div className="max-h-36 space-y-0.5 overflow-y-auto">
-              {runTimeline.map((evt) => {
-                const tone =
-                  evt.phase === "tool_error" || evt.phase === "checkpoint"
-                    ? "text-amber-200"
-                    : evt.phase === "run_status" && /error|cancelled/i.test(evt.message)
-                      ? "text-red-200"
-                      : "text-[#9bb4d0]";
-                return (
-                  <p key={`${evt.runId}-${evt.seq}`} className={cn("font-mono text-[9px]", tone)}>
-                    #{evt.seq} [{evt.phase}] {evt.message}
-                  </p>
-                );
-              })}
+          ) : null}
+          {runActionErr ? (
+            <p className="font-mono text-[10px] uppercase tracking-wide text-[#D4A843]">[ERROR: {runActionErr}]</p>
+          ) : null}
+          {runNeedsApproval ? (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5">
+              <p className="font-mono text-[10px] text-amber-200">Blocked tool action queued for operator approval.</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <Link
+                  href="/workspace/approvals"
+                  className="font-mono text-[10px] text-amber-100 underline underline-offset-2"
+                >
+                  Open approvals inbox
+                </Link>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  className="border-emerald-500/40 bg-transparent font-mono text-[10px] text-emerald-200 hover:bg-emerald-500/10"
+                  disabled={runActionBusy}
+                  onClick={() => void resumeBlockedRun()}
+                >
+                  {runActionBusy ? "Working…" : "Resume Run"}
+                </Button>
+              </div>
             </div>
-          </div>
-        ) : null}
-      </div>
-    ) : null;
+          ) : null}
+          {runTimeline.length > 0 ? (
+            <div className="rounded border border-[#2b2b2b] bg-black/50 p-1.5">
+              <p className="mb-1 font-mono text-[9px] uppercase tracking-wide text-[#8ea3bd]">Run timeline</p>
+              <div className="max-h-36 space-y-0.5 overflow-y-auto">
+                {runTimeline.map((evt) => {
+                  const tone =
+                    evt.phase === "tool_error" || evt.phase === "checkpoint"
+                      ? "text-amber-200"
+                      : evt.phase === "run_status" && /error|cancelled/i.test(evt.message)
+                        ? "text-red-200"
+                        : "text-[#9bb4d0]";
+                  return (
+                    <p key={`${evt.runId}-${evt.seq}`} className={cn("font-mono text-[9px]", tone)}>
+                      #{evt.seq} [{evt.phase}] {evt.message}
+                    </p>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </CollapsibleContent>
+      </Collapsible>
+    );
+  };
 
   if (!companyId) {
     return (
@@ -2241,7 +2714,7 @@ export function WorkspaceRightRail() {
   return (
     <div className="flex h-full max-h-full min-h-0 w-full flex-col overflow-hidden bg-[#111111]">
       {headerBar}
-      {liveRunStrip}
+      {!showChat ? renderRunHarnessFooter("top") : null}
 
       {propertiesSelection?.kind === "task" ? (
         <div className="shrink-0 space-y-2 border-b border-[#222222] px-3 py-3">
@@ -2320,7 +2793,7 @@ export function WorkspaceRightRail() {
             ) : (
               <ul className="space-y-0.5">
                 {rows.map((row) => {
-                  const active = focusedPersona === row.persona;
+                  const active = chatPersona === row.persona;
                   const busy = workingPersonas.has(row.persona);
                   return (
                     <li key={row.persona}>
@@ -2411,18 +2884,26 @@ export function WorkspaceRightRail() {
               <span
                 className={cn(
                   "size-2 shrink-0 rounded-full bg-[#4A9E5C]",
-                  workingPersonas.has(focusedPersona) && "nd-agent-status-dot--busy",
+                  workingPersonas.has(chatPersona) && "nd-agent-status-dot--busy",
                 )}
                 aria-hidden
               />
               <Bot className="size-4 shrink-0 text-[#666666]" strokeWidth={1.5} />
-              <p className="min-w-0 flex-1 truncate font-mono text-sm text-[#e8e8e8]">{focusedPersona}</p>
+              <p className="min-w-0 flex-1 truncate font-mono text-sm text-[#e8e8e8]">{chatPersona}</p>
               <span
                 className="hidden max-w-[9rem] truncate rounded border border-[#333333] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.06em] text-[#e8e8e8] sm:inline-block"
                 title={rolePillText(selectedRow)}
               >
                 {rolePillText(selectedRow)}
               </span>
+              <button
+                type="button"
+                title="Reset agent chat session cache"
+                onClick={resetAgentSessionCache}
+                className="flex size-8 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+              >
+                <RefreshCw className="size-4" strokeWidth={1.5} />
+              </button>
               <button
                 type="button"
                 title="Close"
@@ -2473,9 +2954,9 @@ export function WorkspaceRightRail() {
           ) : null}
 
           <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
-            {transcriptItems.length === 0 ? (
+            {transcriptItems.length === 0 && !harnessLayoutActive ? (
               <p className="px-1 text-center text-sm text-[#666666]">
-                No messages yet. Send one to create a task for {focusedPersona}.
+                No messages yet. Send one to create a task for {chatPersona}.
               </p>
             ) : (
               <div className="space-y-3">
@@ -2485,7 +2966,7 @@ export function WorkspaceRightRail() {
                     return (
                       <div key={item.key} className="text-xs leading-snug">
                         <span className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
-                          {n.actor}
+                          {noteActorTranscriptLabel(n.actor)}
                           {n.at ? ` · ${n.at.slice(0, 19)}` : ""}
                         </span>
                         <div className="mt-1">
@@ -2509,153 +2990,34 @@ export function WorkspaceRightRail() {
                     );
                   }
                   if (item.kind === "tool") {
-                    const event = item.event;
-                    const isErr =
-                      event.success === false || /error|fail|blocked|denied/i.test(event.message ?? "");
-                    return (
-                      <div
-                        key={item.key}
-                        className={cn(
-                          "rounded-md border px-3 py-2",
-                          isErr
-                            ? "border-amber-500/30 bg-amber-500/5"
-                            : "border-[#223040] bg-[#0c1117]",
-                        )}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={cn(
-                              "rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide",
-                              isErr
-                                ? "border-amber-500/40 text-amber-200"
-                                : "border-[#31465f] text-[#8ea3bd]",
-                            )}
-                          >
-                            {formatRuntimeEventLabel(event)}
-                          </span>
-                          <span className="font-mono text-[10px] text-[#9bb4d0]">
-                            {event.tool_name ?? "tool"}
-                            {event.call_id ? ` · ${event.call_id}` : ""}
-                          </span>
-                        </div>
-                        {event.message ? (
-                          <p className={cn("mt-1 whitespace-pre-wrap text-[11px]", isErr ? "text-amber-100" : "text-[#c8d4e3]")}>
-                            {event.message}
-                          </p>
-                        ) : null}
-                      </div>
-                    );
-                  }
-                  if (item.kind === "assistant_partial") {
-                    return (
-                      <div key={item.key} className="text-xs leading-snug">
-                        <span className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
-                          {focusedPersona}
-                        </span>
-                        <div className="nd-stream-assistant__body mt-1">
-                          <div className="min-w-0 flex-1">
-                            <WorkspaceMarkdownStreamBody
-                              text={item.text}
-                              className={cn(
-                                "text-[#e8e8e8]",
-                                "[&_a]:text-[#999999] hover:[&_a]:text-[#e8e8e8]",
-                                "[&_blockquote]:border-[#333333] [&_blockquote]:text-[#999999]",
-                                "[&_code]:text-[#e8e8e8]",
-                              )}
-                            />
-                          </div>
-                          <span
-                            className="nd-stream-assistant__caret nd-stream-assistant__caret--pulse"
-                            aria-hidden
-                          />
-                        </div>
-                      </div>
-                    );
+                    return <OperatorTranscriptToolRow key={item.key} event={item.event} />;
                   }
                   return (
-                    <div key={item.key} className="text-xs leading-snug">
-                      <span className="font-mono text-[10px] uppercase tracking-wide text-[#555555]">
-                        {focusedPersona}
-                      </span>
-                      <p className="mt-1 flex items-center gap-1.5 text-[#666666]">
-                        <span className="font-mono text-sm text-[#4a9eff]">{BRAILLE[brailleFrame]}</span>
-                        <span className="font-mono text-[10px] uppercase tracking-wide">{item.text}</span>
-                      </p>
+                    <div key={item.key} className="border-t border-[#222222] py-2">
+                      <p className="nd-label">RUNTIME</p>
+                      <p className="mt-1 font-mono text-[11px] leading-snug text-[#999999]">{item.text}</p>
                     </div>
                   );
                 })}
+                {harnessLayoutActive ? (
+                  <OperatorHarnessTurnCard
+                    items={harnessSnapshot}
+                    thinking={thinking}
+                    chatPersona={chatPersona}
+                  />
+                ) : null}
               </div>
             )}
           </div>
 
-          {/* ── Observable activity panel — shown while agent is working ── */}
-          {activityItems.length > 0 ? (
-            <div className="shrink-0 border-t border-[#111111] bg-[#040404]">
-              <div className="px-3 pt-2 pb-1 space-y-1 max-h-[7.5rem] overflow-hidden">
-                {activityItems.slice(-7).map((item) => (
-                  <div key={item.id} className="flex items-center gap-2 min-w-0">
-                    {/* Status dot */}
-                    <span className="shrink-0 flex items-center justify-center w-3">
-                      {item.status === "in_progress" ? (
-                        <span className="relative flex size-1.5">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#4a9eff]/60" />
-                          <span className="relative inline-flex size-1.5 rounded-full bg-[#4a9eff]" />
-                        </span>
-                      ) : item.status === "done" ? (
-                        <span className="size-1.5 rounded-full bg-[#1e2e1e]" />
-                      ) : item.status === "error" ? (
-                        <span className="size-1.5 rounded-full bg-[#5a2020]" />
-                      ) : (
-                        <span className="size-1.5 rounded-full bg-[#2a2a2a]" />
-                      )}
-                    </span>
-                    {/* Label + detail */}
-                    <span
-                      className={cn(
-                        "flex-1 min-w-0 font-mono text-[10px] truncate",
-                        item.status === "done"
-                          ? "text-[#2a2a2a]"
-                          : item.status === "error"
-                            ? "text-[#8a4040]"
-                            : item.status === "in_progress"
-                              ? "text-[#606060]"
-                              : "text-[#3a3a3a]",
-                      )}
-                    >
-                      {item.label}
-                      {item.detail ? (
-                        <span className="ml-1 opacity-50">· {item.detail}</span>
-                      ) : null}
-                    </span>
-                    {/* Status label */}
-                    <span
-                      className={cn(
-                        "shrink-0 font-mono text-[9px] uppercase tracking-wide",
-                        item.status === "in_progress"
-                          ? "text-[#444444]"
-                          : item.status === "done"
-                            ? "text-[#222222]"
-                            : item.status === "error"
-                              ? "text-[#7a3030]"
-                              : "text-[#333333]",
-                      )}
-                    >
-                      {item.status === "in_progress"
-                        ? "In progress"
-                        : item.status === "done"
-                          ? "Done"
-                          : item.status === "error"
-                            ? "Error"
-                            : "Interrupted"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {activityPhaseLabel ? (
-                <p className="px-3 pb-1.5 font-mono text-[9px] text-[#252525] truncate">
-                  {activityPhaseLabel}
-                </p>
-              ) : null}
+          {(runNeedsApproval || runActionErr || liveRun?.status === "error" || liveRun?.status === "cancelled")
+            ? renderRunHarnessFooter("bottom")
+            : null}
+          {liveRun?.status === "error" && runFailureHint(liveRun.summary) ? (
+            <div className="shrink-0 border-t border-amber-500/30 bg-amber-500/5 px-3 py-2">
+              <p className="font-mono text-[10px] text-amber-200">
+                {runFailureHint(liveRun.summary)}
+              </p>
             </div>
           ) : null}
 
@@ -2677,7 +3039,7 @@ export function WorkspaceRightRail() {
                   e.preventDefault();
                   void sendHandoff();
                 }}
-                placeholder={`Message ${focusedPersona}… (Enter send · Shift+Enter new line)`}
+                placeholder={`Message ${chatPersona}… (Enter send · Shift+Enter new line)`}
                 rows={2}
                 disabled={sending}
                 className="min-h-[44px] flex-1 resize-none border-[#333333] bg-black font-sans text-sm text-[#e8e8e8] placeholder:text-[#555555] focus-visible:border-[#555555] focus-visible:ring-1 focus-visible:ring-[#444444]"

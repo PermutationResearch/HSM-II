@@ -18,6 +18,7 @@ export default {
       fontFamily: {
         sans: ["var(--font-space-grotesk)", "DM Sans", "system-ui", "sans-serif"],
         mono: ["var(--font-space-mono)", "JetBrains Mono", "ui-monospace", "monospace"],
+        serif: ["var(--font-lora)", "Lora", "Georgia", "ui-serif", "serif"],
       },
       borderRadius: {
         lg: "var(--radius)",
