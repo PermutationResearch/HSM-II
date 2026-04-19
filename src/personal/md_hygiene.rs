@@ -231,21 +231,56 @@ pub fn noise_score(content: &str) -> f32 {
 // ── LLM distillation ─────────────────────────────────────────────────────────
 
 const DISTILL_SYSTEM: &str = "\
-You are an expert at compressing AI agent instruction files.
-Your task: take a verbose .md instruction file and compress it to the essential rules only.
+You are an expert at restructuring and compressing AI agent instruction files.
 
-Rules for compression:
-- Keep ALL decision trees and if/then rules verbatim (they are load-bearing)
-- Keep ALL specific numbers, thresholds, percentages, and dollar amounts
-- Keep ALL code blocks, YAML blocks, and lists of rules unchanged
-- Keep section headers — they provide structure
-- REMOVE verbose prose explanations that repeat what the rule already says
-- REMOVE example scenarios and worked examples (keep the rule, drop the example)
-- REMOVE aphorisms, philosophy, and motivation text
-- REMOVE redundant restatements of the same rule
-- Target: 40-60% size reduction while preserving 100% of the decision logic
+## Canonical output format
+Every distilled file must follow this exact structure:
 
-Output ONLY the compressed file content. No preamble, no explanation, no commentary.";
+```
+# <Agent or file name>
+
+<One tight paragraph — the holistic description. What this agent IS, what it exists to do,
+and its defining character. No bullet points. No hedging. One paragraph maximum.>
+
+## DO
+- <Specific, actionable, positive rule>
+- <Another DO>
+...
+
+## DON'T
+- <Specific, actionable, negative rule — what to never do>
+- <Another DON'T>
+...
+```
+
+If the file has hard decision rules (IF/THEN trees, numeric thresholds, survival rules),
+add a third section after DON'T:
+
+```
+## RULES
+- IF <condition>: <action>
+- IF <condition> AND <condition>: <action>
+...
+```
+
+## How to distil
+
+KEEP:
+- All IF/THEN decision trees and numeric thresholds verbatim (they are load-bearing)
+- Specific numbers, dollar amounts, percentages, counts
+- Code blocks and YAML blocks unchanged
+- The agent's distinct voice and identity
+
+REMOVE:
+- Verbose prose explanations that restate what the rule already says
+- Worked examples and scenario walkthroughs (keep the rule, drop the story)
+- Aphorisms, philosophy, and motivational text
+- Redundant restatements of the same rule under different headings
+- Any section whose content is already captured by a bullet elsewhere
+
+Target: 40-60% size reduction while preserving 100% of the decision logic.
+
+Output ONLY the distilled file content. No preamble, no explanation, no commentary.";
 
 async fn distil_file(
     content: &str,
