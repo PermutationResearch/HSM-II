@@ -354,6 +354,8 @@ pub struct EnhancedPersonalAgent {
     last_heartbeat_tick: Instant,
     /// Last time autoDream consolidation was considered (`HSM_AUTODREAM=1`).
     last_autodream_tick: Instant,
+    /// Last time instruction-file hygiene was considered (`HSM_MD_HYGIENE=1`).
+    last_hygiene_tick: Instant,
     /// Append-only JSONL: turns, `tool_denied`, optional [`Self::record_hyperedge`] (governed by `HSM_TASK_TRAIL`).
     pub task_trail: super::task_trail::TaskTrail,
     /// Keyword → persona / system template (`config/prompt_routes.yaml`).
@@ -641,6 +643,7 @@ impl EnhancedPersonalAgent {
             prompt_template_excerpt,
             last_heartbeat_tick: Instant::now(),
             last_autodream_tick: Instant::now(),
+            last_hygiene_tick: Instant::now(),
             task_trail,
             prompt_router,
             hermes_enabled,
@@ -710,6 +713,29 @@ impl EnhancedPersonalAgent {
         .await
         {
             warn!(target: "hsm_autodream", "consolidation failed: {e}");
+        }
+    }
+
+    /// Scheduled instruction-file hygiene (`memory/.hygiene_log.jsonl`) when `HSM_MD_HYGIENE=1`.
+    /// Distils bloated .md instruction files to reduce context noise.
+    pub async fn maybe_run_hygiene_tick(&mut self) {
+        if let Some(report) = crate::personal::md_hygiene::maybe_run_hygiene(
+            &self.base_path,
+            &mut self.last_hygiene_tick,
+            &self.llm,
+        )
+        .await
+        {
+            if report.files_distilled > 0 {
+                // Refresh skill catalog after distillation so next context assembly sees smaller files
+                self.refresh_skill_md_catalog_blocking();
+                info!(
+                    target: "hsm_md_hygiene",
+                    files = report.files_distilled,
+                    bytes_saved = report.bytes_saved,
+                    "instruction files distilled — skill catalog refreshed"
+                );
+            }
         }
     }
 
@@ -1287,6 +1313,7 @@ impl EnhancedPersonalAgent {
         self.maybe_reload_skill_md_catalog();
         self.maybe_run_heartbeat_tick().await;
         self.maybe_run_autodream_tick().await;
+        self.maybe_run_hygiene_tick().await;
         if std::env::var("HSM_INSTR_HOT_RELOAD")
             .map(|v| {
                 let s = v.trim();

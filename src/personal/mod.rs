@@ -16,9 +16,11 @@ use tokio::sync::{mpsc, oneshot};
 
 pub mod agent_memory_pipeline;
 pub mod autodream;
+pub mod md_hygiene;
 pub mod business_pack;
 pub mod enhanced_agent;
 pub mod gateway;
+pub mod harness_verification_gate;
 pub mod heartbeat;
 pub mod hsm_cron;
 pub mod hypergraph_client;
@@ -263,7 +265,10 @@ impl PersonalAgent {
 
     /// Format available capabilities
     fn format_capabilities(&self) -> String {
-        "## Your Capabilities\n- Web search and research\n- File operations\n- Terminal commands (sandboxed)\n- Task scheduling\n- Multi-agent coordination\n- Memory and context awareness".to_string()
+        format!(
+            "## Your Capabilities\n- Web search and research\n- Task scheduling\n- Multi-agent coordination\n- Memory and context awareness\n\n{}",
+            crate::harness::baseline_coding_agent_contract()
+        )
     }
 
     /// Strip leaked chat template tokens from LLM output
