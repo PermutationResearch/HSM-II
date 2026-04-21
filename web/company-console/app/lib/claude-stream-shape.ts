@@ -76,6 +76,80 @@ export function wrapSdkStreamEvent(
   };
 }
 
+/** A fully-assembled tool_use block from the Anthropic wire protocol. */
+export type CompletedToolUse = {
+  name: string;
+  tool_use_id: string;
+  input_json: string;
+};
+
+/**
+ * Reassembles Anthropic `tool_use` content blocks from a streaming `stream_event` sequence.
+ *
+ * The Anthropic protocol emits tool calls across three event types:
+ *   1. `content_block_start`  — `{ type: "tool_use", id, name, input: {} }` at some block index
+ *   2. `content_block_delta`  — `{ type: "input_json_delta", partial_json: "..." }` (may repeat)
+ *   3. `content_block_stop`   — signals the block at that index is complete
+ *
+ * `consume(event)` returns a `CompletedToolUse` when a tool_use block is finished, else `null`.
+ */
+export class AnthropicToolUseWireAssembler {
+  private slots: Map<
+    number,
+    { name: string; id: string; jsonBuf: string }
+  > = new Map();
+
+  reset(): void {
+    this.slots.clear();
+  }
+
+  consume(event: unknown): CompletedToolUse | null {
+    const e = event as Record<string, unknown> | null;
+    if (!e || typeof e !== "object") return null;
+    const type = typeof e.type === "string" ? e.type : "";
+
+    if (type === "content_block_start") {
+      const idx = typeof e.index === "number" ? e.index : -1;
+      const cb = e.content_block as Record<string, unknown> | undefined;
+      if (cb && cb.type === "tool_use" && idx >= 0) {
+        this.slots.set(idx, {
+          name: typeof cb.name === "string" ? cb.name : "",
+          id: typeof cb.id === "string" ? cb.id : "",
+          jsonBuf: "",
+        });
+      }
+      return null;
+    }
+
+    if (type === "content_block_delta") {
+      const idx = typeof e.index === "number" ? e.index : -1;
+      const delta = e.delta as Record<string, unknown> | undefined;
+      const slot = this.slots.get(idx);
+      if (slot && delta && delta.type === "input_json_delta") {
+        const chunk = typeof delta.partial_json === "string" ? delta.partial_json : "";
+        slot.jsonBuf += chunk;
+      }
+      return null;
+    }
+
+    if (type === "content_block_stop") {
+      const idx = typeof e.index === "number" ? e.index : -1;
+      const slot = this.slots.get(idx);
+      if (slot && slot.name) {
+        this.slots.delete(idx);
+        return {
+          name: slot.name,
+          tool_use_id: slot.id,
+          input_json: slot.jsonBuf,
+        };
+      }
+      return null;
+    }
+
+    return null;
+  }
+}
+
 /** Parse streamed assistant text from an Anthropic stream `event` object. */
 export function extractAnthropicStreamTextEffect(
   event: unknown,

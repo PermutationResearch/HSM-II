@@ -270,6 +270,7 @@ async fn handle_telegram_message(
         timestamp: chrono::Utc::now(),
         attachments: vec![],
         reply_to: msg.reply_to_message().map(|m| m.id.0.to_string()),
+        thread_workspace_root: None,
     };
 
     // Show typing indicator

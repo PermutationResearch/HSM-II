@@ -231,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
         timestamp: Utc::now(),
         attachments: vec![],
         reply_to: None,
+        thread_workspace_root: None,
     };
     let resp = agent.handle_message(msg).await;
     match resp {
@@ -269,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
             timestamp: Utc::now(),
             attachments: vec![],
             reply_to: None,
+            thread_workspace_root: None,
         };
         let mut agent = EnhancedPersonalAgent::initialize(&home).await?;
         let resp = agent.handle_message(msg).await?;

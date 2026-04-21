@@ -330,14 +330,28 @@ fn build_temporal_fact_block(sessions: &[(String, Vec<HistoryTurn>)]) -> String 
     facts.sort_by_key(|f| (f.source_session, f.source_turn));
     let user_facts = facts.iter().filter(|f| f.role == "user").take(28).map(|f| {
         format!(
-            "- [S{}T{} role={} date_hint={} entity={}] event={} | raw={}",
-            f.source_session, f.source_turn, f.role, f.date_hint, f.entity, f.event, f.raw
+            "- [S{}T{} session_date={} role={} date_hint={} entity={}] event={} | raw={}",
+            f.source_session,
+            f.source_turn,
+            f.session_date,
+            f.role,
+            f.date_hint,
+            f.entity,
+            f.event,
+            f.raw
         )
     });
     let assistant_facts = facts.iter().filter(|f| f.role != "user").take(12).map(|f| {
         format!(
-            "- [S{}T{} role={} date_hint={} entity={}] event={} | raw={}",
-            f.source_session, f.source_turn, f.role, f.date_hint, f.entity, f.event, f.raw
+            "- [S{}T{} session_date={} role={} date_hint={} entity={}] event={} | raw={}",
+            f.source_session,
+            f.source_turn,
+            f.session_date,
+            f.role,
+            f.date_hint,
+            f.entity,
+            f.event,
+            f.raw
         )
     });
     user_facts
