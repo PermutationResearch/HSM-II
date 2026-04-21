@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{OnceLock, RwLock};
 use tokio::sync::broadcast;
@@ -30,7 +30,7 @@ impl Default for RuntimeActivityState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompletionEvent {
     pub event_type: String,
     pub task_key: Option<String>,
@@ -47,6 +47,10 @@ pub struct CompletionEvent {
     /// NDJSON mirrors these as top-level `{ "type": "stream_event", "event": … }`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_event: Option<Value>,
+    /// Byte length of the tool's output result. Only set on `tool_complete` events.
+    /// Used by post-run validation to distinguish meaningful tool output from empty results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_len: Option<usize>,
 }
 
 impl CompletionEvent {
@@ -61,6 +65,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: None,
             stream_event: None,
+            output_len: None,
         }
     }
 
@@ -80,6 +85,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: Some(input),
             stream_event: None,
+            output_len: None,
         }
     }
 
@@ -95,6 +101,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: Some(input),
             stream_event: None,
+            output_len: None,
         }
     }
 
@@ -109,6 +116,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: None,
             stream_event: None,
+            output_len: None,
         }
     }
 
@@ -123,6 +131,30 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: None,
             stream_event: None,
+            output_len: None,
+        }
+    }
+
+    /// Like `tool_completion` but carries the byte length of the tool's output result.
+    /// Preferred when the output is available so post-run validation can require meaningful content.
+    pub fn tool_completion_with_output(
+        tool_name: &str,
+        call_id: &str,
+        success: bool,
+        message: String,
+        output_len: usize,
+    ) -> Self {
+        Self {
+            event_type: "tool_complete".to_string(),
+            task_key: None,
+            tool_name: Some(tool_name.to_string()),
+            call_id: Some(call_id.to_string()),
+            success,
+            message,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            input: None,
+            stream_event: None,
+            output_len: Some(output_len),
         }
     }
 
@@ -137,6 +169,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: None,
             stream_event: None,
+            output_len: None,
         }
     }
 
@@ -152,6 +185,7 @@ impl CompletionEvent {
             ts_ms: chrono::Utc::now().timestamp_millis(),
             input: None,
             stream_event: Some(event),
+            output_len: None,
         }
     }
 }

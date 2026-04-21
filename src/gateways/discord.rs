@@ -206,6 +206,7 @@ impl EventHandler for DiscordEventHandler {
                 })
                 .collect(),
             reply_to: msg.referenced_message.as_ref().map(|m| m.id.to_string()),
+            thread_workspace_root: None,
         };
 
         debug!(user = %msg.author.name, message_id = %msg.id, "Discord message");

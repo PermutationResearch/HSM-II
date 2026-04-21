@@ -295,6 +295,7 @@ impl RealMatrixBot {
                 timestamp: chrono::Utc::now(),
                 attachments: vec![],
                 reply_to: Some(ev.event_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }
@@ -315,6 +316,7 @@ impl RealMatrixBot {
                 timestamp: chrono::Utc::now(),
                 attachments: vec![],
                 reply_to: Some(ev.event_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }
@@ -354,6 +356,7 @@ impl RealMatrixBot {
                     })
                     .collect(),
                 reply_to: Some(ev.event_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }

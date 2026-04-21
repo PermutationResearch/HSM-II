@@ -2,6 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "web-interface",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "--directory", "/Users/cno/hyper-stigmergic-morphogenesisII/web_interface", "4242"],
+      "cwd": ".",
+      "port": 4242
+    },
+    {
       "name": "company-console",
       "runtimeExecutable": "bash",
       "runtimeArgs": ["scripts/run-next-with-path.sh", "dev", "-p", "3050"],

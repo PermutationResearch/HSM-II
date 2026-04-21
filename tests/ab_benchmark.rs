@@ -1111,6 +1111,13 @@ async fn ab_benchmark_plain_vs_enriched() {
     }
 
     // ── Aggregate ──
+    if entries.is_empty() {
+        eprintln!(
+            "\n  ⚠️  A/B Benchmark: all LLM calls failed (model not available or no models \
+             installed). Skipping score assertion.\n"
+        );
+        return;
+    }
     let total = entries.len() as f64;
     let baseline_avg = entries
         .iter()

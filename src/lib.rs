@@ -531,3 +531,8 @@ pub use metrics::{
 pub use batch_runner::{BatchConfig, BatchRunner};
 
 pub use metrics_dks_ext::{DKSMetrics, TrustGraphMetrics};
+
+// Credential security stack: vault → broker → verifier
+pub mod credential_vault;
+pub mod credential_broker;
+pub mod credential_verifier;

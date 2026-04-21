@@ -132,6 +132,7 @@ impl RealSignalBot {
                 timestamp: chrono::Utc::now(),
                 attachments: vec![],
                 reply_to: Some(ev.message_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }
@@ -154,6 +155,7 @@ impl RealSignalBot {
                 timestamp: chrono::Utc::now(),
                 attachments: vec![],
                 reply_to: Some(ev.message_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }
@@ -187,6 +189,7 @@ impl RealSignalBot {
                     })
                     .collect(),
                 reply_to: Some(ev.message_id),
+                thread_workspace_root: None,
             };
             return h.handle(msg).await;
         }
