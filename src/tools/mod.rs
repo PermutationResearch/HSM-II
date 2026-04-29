@@ -55,6 +55,7 @@ pub mod harness_gate;
 pub mod integrated_executor;
 pub mod registry;
 pub mod scored_tool_router;
+pub mod secret_scanner;
 pub mod security;
 pub mod subprocess_env;
 pub mod shell_tools;

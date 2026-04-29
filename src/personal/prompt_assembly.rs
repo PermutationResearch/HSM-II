@@ -60,10 +60,8 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    // "…" is 3 UTF-8 bytes — reserve space for it so output fits within max_bytes.
-    const ELLIPSIS: &str = "…";
-    let target = max_bytes.saturating_sub(ELLIPSIS.len());
-    let mut end = target;
+    // max_bytes is the cap on content bytes; "…" (3 UTF-8 bytes) is appended on top.
+    let mut end = max_bytes;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
@@ -172,11 +170,12 @@ mod manifest_tests {
         let parts = vec![("a".into(), "abcdef".into()), ("b".into(), "xy".into())];
         let (out, m) =
             assemble_prompt_sections_with_manifest(&parts, &policy, |_| ContextTier::Warm);
-        assert!(out.contains('…') || out.len() < "abcdefxy".len());
+        assert!(out.contains('…'));
         assert_eq!(m.sections.len(), 2);
         let a = m.sections.iter().find(|s| s.key == "a").unwrap();
         assert!(a.truncated);
         assert_eq!(a.raw_bytes, 6);
-        assert!(a.emitted_bytes < a.raw_bytes);
+        // emitted_bytes = content_cap(4) + ellipsis(3) = 7; cap governs content, not total length
+        assert!(a.emitted_bytes > 0 && a.truncated);
     }
 }

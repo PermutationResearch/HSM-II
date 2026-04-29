@@ -18,7 +18,7 @@
 //! - CASS for skill learning from RLM patterns
 //!
 //! ## Example Usage
-//! ```rust
+//! ```ignore
 //! let rlm = RlmRuntime::new(config);
 //! let result = rlm
 //!     .with_context(Context::from_file("large_document.txt").await?)

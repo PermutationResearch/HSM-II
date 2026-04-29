@@ -6,7 +6,7 @@
 //!
 //! Usage:
 //! ```no_run
-//! use hyper_stigmergic_morphogenesis::bench::BenchSuite;
+//! use hyper_stigmergy::bench::BenchSuite;
 //!
 //! let mut suite = BenchSuite::new();
 //! suite.bench("example/noop", 1000, || {
@@ -750,7 +750,7 @@ pub fn bench_embedding_ops(suite: &mut BenchSuite) {
 ///
 /// Convenience function for binary entry points:
 /// ```no_run
-/// let suite = hyper_stigmergic_morphogenesis::bench::run_all();
+/// let suite = hyper_stigmergy::bench::run_all();
 /// suite.print_report();
 /// ```
 pub fn run_all() -> BenchSuite {

@@ -8,7 +8,7 @@
 //! - Cross-model review catches blind spots
 //!
 //! ## File Structure (`.hsm/ralph/{council_id}/`)
-//! ```
+//! ```text
 //! task.md              - The original task/goal
 //! iteration.txt        - Current iteration number
 //! work-summary.txt     - What the worker did this iteration
