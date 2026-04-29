@@ -2,6 +2,11 @@ export type RunStatus = "running" | "success" | "error" | "cancelled";
 export type ExecutionMode = "worker" | "llm_simulated" | "pending" | "unknown";
 export type RunLoopState =
   | "running"
+  | "waiting_tool"
+  | "waiting_elicitation"
+  | "waiting_approval"
+  | "checkpointed"
+  | "resuming"
   | "paused_auth"
   | "paused_approval"
   | "resumed"
@@ -20,11 +25,54 @@ export type PendingApprovalCheckpoint = {
   ts_ms?: number;
 };
 
+export type PendingElicitationCheckpoint = {
+  tool_name?: string;
+  call_id?: string | null;
+  message?: string;
+  resume_token?: string | null;
+  interaction?: Record<string, unknown> | null;
+  ts_ms?: number;
+};
+
 export type AgentRunMeta = {
   execution_mode?: ExecutionMode | string;
   loop_state?: RunLoopState | string;
   needs_human?: boolean;
   pending_approval_checkpoint?: PendingApprovalCheckpoint | null;
+  pending_elicitation_checkpoint?: PendingElicitationCheckpoint | null;
+  pending_interactions?: Array<{
+    kind?: "approval" | "elicitation";
+    resume_token?: string;
+    tool_name?: string;
+    call_id?: string | null;
+    message?: string;
+    interaction?: Record<string, unknown> | null;
+    ts_ms?: number;
+  }>;
+  todo_queue?: Array<{
+    id?: string;
+    content?: string;
+    status?: "pending" | "in_progress" | "completed" | "cancelled" | string;
+    updated_at?: string;
+  }>;
+  subagent_tasks?: Array<{
+    id?: string;
+    description?: string;
+    subagent_type?: string;
+    model?: string;
+    status?: "running" | "completed" | "failed" | string;
+    updated_at?: string;
+  }>;
+  bridge_proxy?: {
+    mode?: "local" | "proxy" | string;
+    status?: "idle" | "active" | "error" | string;
+    last_tool?: string | null;
+    last_mcp_server?: string | null;
+    last_mcp_tool?: string | null;
+    last_error?: string | null;
+    call_count?: number;
+    updated_at?: string;
+  } | null;
   [k: string]: unknown;
 };
 
@@ -56,7 +104,21 @@ export type ResumeRunResponse = {
 };
 
 export const ALLOWED_LOOP_TRANSITIONS: Record<RunLoopState, RunLoopState[]> = {
-  running: ["paused_auth", "paused_approval", "completed", "cancelled"],
+  running: [
+    "waiting_tool",
+    "waiting_elicitation",
+    "waiting_approval",
+    "paused_auth",
+    "paused_approval",
+    "checkpointed",
+    "completed",
+    "cancelled",
+  ],
+  waiting_tool: ["running", "checkpointed", "resuming", "resumed", "cancelled"],
+  waiting_elicitation: ["checkpointed", "resuming", "resumed", "cancelled"],
+  waiting_approval: ["checkpointed", "resuming", "resumed", "cancelled"],
+  checkpointed: ["resuming", "resumed", "running", "cancelled"],
+  resuming: ["running", "resumed", "completed", "cancelled"],
   paused_auth: ["resumed", "cancelled"],
   paused_approval: ["resumed", "cancelled"],
   resumed: ["running", "completed", "cancelled"],
@@ -84,6 +146,11 @@ export function parseRunLoopState(input: unknown): RunLoopState | null {
   const v = typeof input === "string" ? input : "";
   if (
     v === "running" ||
+    v === "waiting_tool" ||
+    v === "waiting_elicitation" ||
+    v === "waiting_approval" ||
+    v === "checkpointed" ||
+    v === "resuming" ||
     v === "paused_auth" ||
     v === "paused_approval" ||
     v === "resumed" ||

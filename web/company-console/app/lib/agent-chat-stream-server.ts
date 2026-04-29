@@ -2,31 +2,46 @@
  * Server-side NDJSON stream for operator chat: proxies Company OS runtime SSE (tool events)
  * while worker dispatch runs, and emits Claude Code–compatible `stream_event` lines
  * (Anthropic Messages API shapes: message_start, content_block_delta, message_stop) on the
- * OpenRouter streaming path. Legacy `{ type: "delta" }` is omitted there to avoid double text;
- * the client consumes `stream_event` first and still accepts `delta` if present.
+ * OpenRouter streaming path.
+ *
+ * Runtime telemetry is emitted strictly as `{ type: "runtime", payload }` NDJSON lines.
+ * Only genuine model stream events are sent as Claude SDK-compatible `{ type: "stream_event", event }`.
  *
  * When dispatch still goes to the worker (skills / execution / no key), an optional **companion**
- * OpenRouter stream runs in parallel (serialized with runtime SSE) so the rail shows live
- * `stream_event` text while tools run. Disable with `HSM_DISABLE_WORKER_COMPANION_STREAM=1`.
+ * OpenRouter stream can run in parallel (serialized with runtime SSE) so the rail shows live
+ * `stream_event` text while tools run. Companion is OFF by default; set
+ * `HSM_WORKER_COMPANION_STREAM=1` to enable. You can force-disable with
+ * `HSM_DISABLE_WORKER_COMPANION_STREAM=1`.
+ * If enabled, set `HSM_WORKER_COMPANION_WITH_CODING=0` to skip sidecar narration on coding /
+ * execution turns.
  */
 
 import {
   buildCompactedContextBundle,
   buildStrictToolFlowTrace,
   buildSystemPrompt,
-  CHAT_MODEL,
+  companyOsHarnessAddendum,
   compactNotesForLlm,
   deriveToolExecutionPolicy,
   detectSkillDispatch,
   dispatchSkillToWorker,
   finalizeAgentRun,
   createAgentRun,
-  looksLikeExecutionIntent,
-  OR_BASE,
+  looksLikeImplicitWorkspacePointer,
+  looksLikeQuickToolIntent,
+  looksLikeRepoInfoQuestion,
+  looksLikeSkillsOrCatalogQuestion,
+  parseAgentChatSlashCommand,
+  operatorChatQuickToolPromptMode,
+  executeTaskAction,
+  operatorChatShouldRouteWorker,
   parseOptimizeCommand,
-  readOpenRouterApiKey,
+  parseTaskManagementAction,
+  readAgentChatBackend,
   resolveAgentForPersona,
   saveCompactionToMemory,
+  isThinHarnessModel,
+  slashCommandWorkerInstruction,
   type WorkerDispatchResult,
   UPSTREAM,
   upsertThreadSessionState,
@@ -40,6 +55,11 @@ import {
   anthropicTextDelta,
   wrapSdkStreamEvent,
 } from "@/app/lib/claude-stream-shape";
+import {
+  buildExecutionEvidenceReply,
+  shouldExposeRuntimePayload,
+} from "@/app/lib/agent-chat-stream-policy.mjs";
+import { openRouterStreamDeltaToText, normalizeChatCompletionMessageContent } from "@/app/lib/llm-text-content";
 import { asObject } from "@/app/lib/runtime-contract";
 
 export type AgentChatRequestBody = {
@@ -53,6 +73,7 @@ export type AgentChatRequestBody = {
 
 export type NdjsonLineWriter = (obj: Record<string, unknown>) => Promise<void>;
 type RuntimePayloadHandler = (payload: Record<string, unknown>) => void | Promise<void>;
+type ChatBackend = NonNullable<ReturnType<typeof readAgentChatBackend>>;
 
 type MutableRunArtifact = {
   path: string;
@@ -76,6 +97,39 @@ type RunArtifactsPayload = {
     after_snapshot: string | null;
     updated_at: string;
   }>;
+};
+
+type OperationalTodoItem = {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  updated_at: string;
+};
+
+type OperationalSubagentTask = {
+  id: string;
+  description: string;
+  subagent_type?: string;
+  model?: string;
+  status: "running" | "completed" | "failed";
+  updated_at: string;
+};
+
+type BridgeProxyState = {
+  mode: "local" | "proxy";
+  status: "idle" | "active" | "error";
+  last_tool?: string | null;
+  last_mcp_server?: string | null;
+  last_mcp_tool?: string | null;
+  last_error?: string | null;
+  call_count: number;
+  updated_at: string;
+};
+
+type OperationalStateAccumulator = {
+  todo_queue: Map<string, OperationalTodoItem>;
+  subagent_tasks: Map<string, OperationalSubagentTask>;
+  bridge_proxy: BridgeProxyState;
 };
 
 const ARTIFACT_SNAPSHOT_MAX_CHARS = 800;
@@ -182,6 +236,179 @@ async function patchRunArtifactsMeta(
   }
 }
 
+function makeOperationalAccumulator(): OperationalStateAccumulator {
+  return {
+    todo_queue: new Map<string, OperationalTodoItem>(),
+    subagent_tasks: new Map<string, OperationalSubagentTask>(),
+    bridge_proxy: {
+      mode: "local",
+      status: "idle",
+      last_tool: null,
+      last_mcp_server: null,
+      last_mcp_tool: null,
+      last_error: null,
+      call_count: 0,
+      updated_at: new Date().toISOString(),
+    },
+  };
+}
+
+function captureOperationalStateFromRuntime(payload: Record<string, unknown>, acc: OperationalStateAccumulator) {
+  const eventType = typeof payload.event_type === "string" ? payload.event_type : "";
+  const toolNameRaw = typeof payload.tool_name === "string" ? payload.tool_name.trim() : "";
+  const toolName = toolNameRaw.toLowerCase();
+  const callId = typeof payload.call_id === "string" ? payload.call_id.trim() : "";
+  const input = asObject(payload.input);
+  const now = new Date().toISOString();
+
+  if (eventType === "tool_start") {
+    if (toolName === "todowrite") {
+      const todos = Array.isArray(input?.todos) ? input.todos : [];
+      for (const row of todos) {
+        const rec = asObject(row);
+        const id = typeof rec?.id === "string" ? rec.id.trim() : "";
+        const content = typeof rec?.content === "string" ? rec.content.trim() : "";
+        const status = typeof rec?.status === "string" ? rec.status : "pending";
+        if (!id || !content) continue;
+        if (status !== "pending" && status !== "in_progress" && status !== "completed" && status !== "cancelled") {
+          continue;
+        }
+        acc.todo_queue.set(id, { id, content, status, updated_at: now });
+      }
+    } else if (toolName === "subagent") {
+      const id = callId || `subagent-${acc.subagent_tasks.size + 1}`;
+      const description =
+        typeof input?.description === "string" && input.description.trim().length > 0
+          ? input.description.trim()
+          : "subagent task";
+      acc.subagent_tasks.set(id, {
+        id,
+        description,
+        subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : undefined,
+        model: typeof input?.model === "string" ? input.model : undefined,
+        status: "running",
+        updated_at: now,
+      });
+    }
+
+    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
+      acc.bridge_proxy.mode = "proxy";
+      acc.bridge_proxy.status = "active";
+      acc.bridge_proxy.last_tool = toolNameRaw || null;
+      acc.bridge_proxy.last_mcp_server = typeof input?.server === "string" ? input.server : null;
+      acc.bridge_proxy.last_mcp_tool = typeof input?.toolName === "string" ? input.toolName : null;
+      acc.bridge_proxy.call_count += 1;
+      acc.bridge_proxy.updated_at = now;
+    }
+  }
+
+  if (eventType === "tool_complete") {
+    if (toolName === "subagent" && callId && acc.subagent_tasks.has(callId)) {
+      const prev = acc.subagent_tasks.get(callId)!;
+      acc.subagent_tasks.set(callId, { ...prev, status: "completed", updated_at: now });
+    }
+    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
+      acc.bridge_proxy.status = "idle";
+      acc.bridge_proxy.updated_at = now;
+    }
+  }
+
+  if (eventType === "tool_error") {
+    if (toolName === "subagent" && callId && acc.subagent_tasks.has(callId)) {
+      const prev = acc.subagent_tasks.get(callId)!;
+      acc.subagent_tasks.set(callId, { ...prev, status: "failed", updated_at: now });
+    }
+    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
+      acc.bridge_proxy.status = "error";
+      acc.bridge_proxy.last_error = typeof payload.message === "string" ? payload.message.slice(0, 280) : "proxy tool error";
+      acc.bridge_proxy.updated_at = now;
+    }
+  }
+}
+
+function serializeOperationalState(acc: OperationalStateAccumulator): {
+  todo_queue: OperationalTodoItem[];
+  subagent_tasks: OperationalSubagentTask[];
+  bridge_proxy: BridgeProxyState;
+} {
+  return {
+    todo_queue: [...acc.todo_queue.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    subagent_tasks: [...acc.subagent_tasks.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    bridge_proxy: { ...acc.bridge_proxy },
+  };
+}
+
+async function patchRunOperationalMeta(
+  companyId: string,
+  runId: string | null | undefined,
+  operational: ReturnType<typeof serializeOperationalState>,
+): Promise<void> {
+  if (!runId) return;
+  try {
+    const runRes = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`);
+    if (!runRes.ok) return;
+    const runJson = (await runRes.json().catch(() => ({}))) as { run?: { meta?: Record<string, unknown> } };
+    const currentMeta = asObject(runJson.run?.meta) ?? {};
+    const mergedMeta: Record<string, unknown> = {
+      ...currentMeta,
+      todo_queue: operational.todo_queue,
+      subagent_tasks: operational.subagent_tasks,
+      bridge_proxy: operational.bridge_proxy,
+    };
+    await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta: mergedMeta }),
+    });
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function maybeExecutionReply(params: {
+  executionIntent: boolean;
+  codingIntent: boolean;
+  result: Extract<WorkerDispatchResult, { ok: true }>;
+  artifacts: RunArtifactsPayload | null;
+}): string | undefined {
+  if (!params.executionIntent && !params.codingIntent) return undefined;
+  if (!params.result.finalized) return undefined;
+  if (params.result.status !== "success") return undefined;
+  return buildExecutionEvidenceReply({
+    summary: params.result.summary,
+    artifacts: params.artifacts,
+    executionVerified: params.result.executionVerified,
+  });
+}
+
+function stripWorkerBoilerplate(summary: string): string {
+  let s = summary.trim();
+  if (!s) return "";
+  s = s.replace(/^worker start[^\n]*\n+/i, "");
+  s = s.replace(/^worker reply:\s*/i, "");
+  return s.trim();
+}
+
+function fallbackWorkerReply(result: Extract<WorkerDispatchResult, { ok: true }>): string {
+  const summary = stripWorkerBoilerplate(result.summary ?? "");
+  const low = summary.toLowerCase();
+  const looksLikeRoutingStatus =
+    low.startsWith("routed this turn through the worker agent loop") ||
+    low.startsWith("routed to worker — no conversational") ||
+    low.startsWith("routed to worker (quick read/edit");
+  if (looksLikeRoutingStatus) {
+    return "Execution started. I’ll return a grounded answer once tool results are available.";
+  }
+  if (summary) return summary;
+  if (!result.finalized || result.status === "running") {
+    return "Running now. I will report back with tool-backed results as soon as execution completes.";
+  }
+  if (result.status === "error") {
+    return "Execution failed. Check the run timeline for the exact error and I can retry with a narrower tool chain.";
+  }
+  return "Execution completed.";
+}
+
 /** Serialize writes so parallel `streamOpenRouterChat` + SSE mirror cannot interleave NDJSON lines. */
 function createSerializedNdjsonWriter(write: NdjsonLineWriter): NdjsonLineWriter {
   let chain: Promise<void> = Promise.resolve();
@@ -196,10 +423,28 @@ function workerCompanionSystemPrompt(
   kind: "skill" | "operator_execution",
   skillSlug: string | null,
 ): string {
+  const harness = companyOsHarnessAddendum("companion");
+  const pathHint =
+    "**Default cwd = leased checkout root:** narrate that the worker should `ls` / `read` / `grep` from `.` and repo-relative paths (`Cargo.toml`, `src/…`, `skills/<slug>/SKILL.md`, `company-files/…`) **without** asking the operator to paste or confirm a workspace root unless telemetry shows a path error. " +
+    "Do not mention lacking “shell” or “`/Users/...`” access—the worker runs in the **bound task tree** only. " +
+    "This stream has no file bodies until tool events land—**never** invent file contents or shell output.";
+
   if (kind === "skill" && skillSlug) {
-    return `You are ${persona} in the Company OS operator chat. The operator invoked skill \`${skillSlug}\`; a separate worker runtime is executing it (tools, checkout, telemetry). Stream a concise reply in character: acknowledge the skill, describe what this class of work usually involves at a high level, and say that concrete tool traces appear as separate live events in the UI. Do not invent tool outputs, file contents, or command results you have not been shown.`;
+    return [
+      harness,
+      "",
+      `You are ${persona} in the Company OS operator chat. The operator invoked skill \`${skillSlug}\`; a separate worker runtime is executing it (tools, checkout, telemetry).`,
+      "Stream a concise reply in character: acknowledge the skill, describe what this class of work usually involves at a high level, and say that concrete tool traces appear as separate live events in the UI.",
+      pathHint,
+    ].join("\n");
   }
-  return `You are ${persona} in the Company OS operator chat. The operator message is being handled by a leased worker (tools, task checkout). Stream a concise reply: acknowledge the request, outline your reasoning and next checks at a high level, and state that tool/runtime events stream separately—never fabricate shell output, paths, or file contents.`;
+  return [
+    harness,
+    "",
+    `You are ${persona} in the Company OS operator chat. The operator message is being handled by a leased worker (tools, task checkout).`,
+    "Stream a concise reply: acknowledge the request, outline reasoning and next checks at a high level, and state that tool/runtime events stream separately.",
+    pathHint,
+  ].join("\n");
 }
 
 /** Read Company OS runtime SSE and emit each `data:` JSON payload as `{ type: "runtime", payload }`. */
@@ -257,15 +502,9 @@ export async function forwardRuntimeSseAsNdjson(
           if (et === "stream_event" && inner != null && typeof inner === "object") {
             await write(wrapSdkStreamEvent(inner as Record<string, unknown>) as Record<string, unknown>);
           } else {
-            if ((et === "tool_start" || et === "tool_start_delta") && typeof payload.tool_name === "string") {
-              await write({
-                type: et,
-                tool_name: payload.tool_name,
-                call_id: typeof payload.call_id === "string" ? payload.call_id : null,
-                input: payload.input ?? null,
-              });
+            if (shouldExposeRuntimePayload(payload)) {
+              await write({ type: "runtime", payload });
             }
-            await write({ type: "runtime", payload });
           }
         } catch {
           await write({ type: "runtime_raw", text: data });
@@ -275,37 +514,57 @@ export async function forwardRuntimeSseAsNdjson(
   }
 }
 
-async function streamOpenRouterChat(params: {
-  apiKey: string;
+async function streamAgentChat(params: {
+  backend: ChatBackend;
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   maxTokens: number;
   temperature: number;
   write: NdjsonLineWriter;
 }): Promise<string> {
-  const { apiKey, messages, maxTokens, temperature, write } = params;
-  const res = await fetch(`${OR_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://hsm.ai",
-      "X-Title": "HSM Company Console",
+  const { backend, messages, maxTokens, temperature, write } = params;
+  const res = await fetch(
+    backend.provider === "openrouter" ? `${backend.baseUrl}/chat/completions` : `${backend.baseUrl}/api/chat`,
+    {
+      method: "POST",
+      headers:
+        backend.provider === "openrouter"
+          ? {
+              Authorization: `Bearer ${backend.apiKey}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": "https://hsm.ai",
+              "X-Title": "HSM Company Console",
+            }
+          : {
+              "Content-Type": "application/json",
+            },
+      body: JSON.stringify(
+        backend.provider === "openrouter"
+          ? {
+              model: backend.model,
+              messages,
+              max_tokens: maxTokens,
+              temperature,
+              stream: true,
+            }
+          : {
+              model: backend.model,
+              messages,
+              stream: true,
+              options: {
+                temperature,
+                num_predict: maxTokens,
+              },
+            },
+      ),
     },
-    body: JSON.stringify({
-      model: CHAT_MODEL,
-      messages,
-      max_tokens: maxTokens,
-      temperature,
-      stream: true,
-    }),
-  });
+  );
 
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => res.statusText);
     throw new Error(`LLM ${res.status}: ${errText}`);
   }
 
-  await write(wrapSdkStreamEvent(anthropicMessageStart(CHAT_MODEL)) as Record<string, unknown>);
+  await write(wrapSdkStreamEvent(anthropicMessageStart(backend.model)) as Record<string, unknown>);
   await write(wrapSdkStreamEvent(anthropicContentBlockStartText()) as Record<string, unknown>);
 
   const reader = res.body.getReader();
@@ -320,15 +579,21 @@ async function streamOpenRouterChat(params: {
     buf = lines.pop() ?? "";
     for (const line of lines) {
       const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const data = t.slice(5).trim();
-      if (data === "[DONE]") continue;
       try {
-        const j = JSON.parse(data) as Record<string, unknown>;
-        const choices = Array.isArray(j.choices) ? j.choices : [];
-        const ch0 = asObject(choices[0]);
-        const delta = asObject(ch0?.delta);
-        const piece = typeof delta?.content === "string" ? delta.content : "";
+        let piece = "";
+        if (backend.provider === "openrouter") {
+          if (!t.startsWith("data:")) continue;
+          const data = t.slice(5).trim();
+          if (data === "[DONE]") continue;
+          const j = JSON.parse(data) as Record<string, unknown>;
+          const choices = Array.isArray(j.choices) ? j.choices : [];
+          const ch0 = asObject(choices[0]);
+          piece = openRouterStreamDeltaToText(ch0?.delta);
+        } else {
+          const j = JSON.parse(t) as Record<string, unknown>;
+          const message = asObject(j.message);
+          piece = normalizeChatCompletionMessageContent(message?.content);
+        }
         if (piece) {
           full += piece;
           await write(wrapSdkStreamEvent(anthropicTextDelta(piece)) as Record<string, unknown>);
@@ -339,15 +604,28 @@ async function streamOpenRouterChat(params: {
     }
   }
   const tail = buf.trim();
-  if (tail.startsWith("data:")) {
-    const data = tail.slice(5).trim();
-    if (data && data !== "[DONE]") {
+  if (tail) {
+    if (backend.provider === "openrouter" && tail.startsWith("data:")) {
+      const data = tail.slice(5).trim();
+      if (data && data !== "[DONE]") {
+        try {
+          const j = JSON.parse(data) as Record<string, unknown>;
+          const choices = Array.isArray(j.choices) ? j.choices : [];
+          const ch0 = asObject(choices[0]);
+          const piece = openRouterStreamDeltaToText(ch0?.delta);
+          if (piece) {
+            full += piece;
+            await write(wrapSdkStreamEvent(anthropicTextDelta(piece)) as Record<string, unknown>);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (backend.provider === "ollama") {
       try {
-        const j = JSON.parse(data) as Record<string, unknown>;
-        const choices = Array.isArray(j.choices) ? j.choices : [];
-        const ch0 = asObject(choices[0]);
-        const delta = asObject(ch0?.delta);
-        const piece = typeof delta?.content === "string" ? delta.content : "";
+        const j = JSON.parse(tail) as Record<string, unknown>;
+        const message = asObject(j.message);
+        const piece = normalizeChatCompletionMessageContent(message?.content);
         if (piece) {
           full += piece;
           await write(wrapSdkStreamEvent(anthropicTextDelta(piece)) as Record<string, unknown>);
@@ -361,6 +639,128 @@ async function streamOpenRouterChat(params: {
   await write(wrapSdkStreamEvent(anthropicMessageDelta()) as Record<string, unknown>);
   await write(wrapSdkStreamEvent(anthropicMessageStop()) as Record<string, unknown>);
   return full;
+}
+
+type SemanticTurnRoute = {
+  actionable: boolean;
+  confidence: number;
+  reason: string;
+};
+
+function parseSemanticRouterJson(raw: string): SemanticTurnRoute | null {
+  const t = raw.trim();
+  if (!t) return null;
+  const candidate = t.match(/\{[\s\S]*\}/)?.[0] ?? t;
+  try {
+    const parsed = JSON.parse(candidate) as {
+      actionable?: unknown;
+      confidence?: unknown;
+      reason?: unknown;
+    };
+    if (typeof parsed.actionable !== "boolean") return null;
+    const confidenceRaw = typeof parsed.confidence === "number" ? parsed.confidence : 0.5;
+    const confidence = Number.isFinite(confidenceRaw)
+      ? Math.max(0, Math.min(1, confidenceRaw))
+      : 0.5;
+    const reason = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+    return {
+      actionable: parsed.actionable,
+      confidence,
+      reason: reason || "semantic_router",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function classifySemanticTurnRoute(params: {
+  backend: ChatBackend;
+  notes: AgentChatRequestBody["notes"];
+  lastOperatorText: string;
+}): Promise<SemanticTurnRoute | null> {
+  const { backend, notes, lastOperatorText } = params;
+  const recent = notes
+    .slice(-8)
+    .map((n) => `${n.actor}: ${n.text}`.slice(0, 380))
+    .join("\n");
+  const prompt = [
+    "Classify if the latest operator turn should be handled by the Hermes worker agent (which has full workspace/file/shell access).",
+    "Use full conversational context; do not rely on keyword-only matching.",
+    "actionable=true when ANY of these apply:",
+    "  • Explicitly asks to read/list/edit/search/run files or shell commands",
+    "  • Asks a technical question about code, architecture, or the repo that needs reading files to answer correctly (e.g. 'how does X work?', 'what does Y do?', 'explain Z')",
+    "  • Requests debugging, analysis, refactoring, testing, or building anything",
+    "  • Asks about errors, bugs, logs, or system behaviour",
+    "actionable=false ONLY for: greetings, pure chitchat, 'how are you', weekly strategy planning unrelated to code, 'what should we focus on (business-level)', or explicit capability questions ('can you read files?').",
+    "IMPORTANT: 'what does the SFT module do?' = actionable=true (needs file read). 'list 5 strategic priorities' = actionable=false (business strategy).",
+    'Return JSON only: {"actionable":true|false,"confidence":0..1,"reason":"short_reason"}',
+    "",
+    "Conversation context:",
+    recent,
+    "",
+    `Latest operator turn: ${lastOperatorText}`,
+  ].join("\n");
+
+  try {
+    const res = await fetch(
+      backend.provider === "openrouter" ? `${backend.baseUrl}/chat/completions` : `${backend.baseUrl}/api/chat`,
+      {
+        method: "POST",
+        headers:
+          backend.provider === "openrouter"
+            ? {
+                Authorization: `Bearer ${backend.apiKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://hsm.ai",
+                "X-Title": "HSM Company Console",
+              }
+            : {
+                "Content-Type": "application/json",
+              },
+        body: JSON.stringify(
+          backend.provider === "openrouter"
+            ? {
+                model: backend.model,
+                messages: [
+                  { role: "system", content: "You are a strict JSON classifier." },
+                  { role: "user", content: prompt },
+                ],
+                max_tokens: 120,
+                temperature: 0,
+                stream: false,
+              }
+            : {
+                model: backend.model,
+                messages: [
+                  { role: "system", content: "You are a strict JSON classifier." },
+                  { role: "user", content: prompt },
+                ],
+                stream: false,
+                options: {
+                  temperature: 0,
+                  num_predict: 120,
+                },
+              },
+        ),
+      },
+    );
+    if (!res.ok) return null;
+    const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!json) return null;
+    let out = "";
+    if (backend.provider === "openrouter") {
+      const choices = Array.isArray(json.choices) ? json.choices : [];
+      const ch0 = asObject(choices[0]);
+      const message = asObject(ch0?.message);
+      out = normalizeChatCompletionMessageContent(message?.content).trim();
+    } else {
+      const message = asObject(json.message);
+      out = normalizeChatCompletionMessageContent(message?.content).trim();
+    }
+    return parseSemanticRouterJson(out);
+  } catch {
+    return null;
+  }
 }
 
 async function withRuntimeMirror(
@@ -384,11 +784,13 @@ async function withRuntimeMirror(
  */
 export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write: NdjsonLineWriter): Promise<void> {
   const { taskId, persona, companyId, notes } = body;
-  const lastOperatorText = [...notes].reverse().find((n) => n.actor === "operator")?.text ?? "";
+  const rawLastOperatorText = [...notes].reverse().find((n) => n.actor === "operator")?.text ?? "";
+  let lastOperatorText = rawLastOperatorText;
 
   let agentRegistryId: string | undefined;
   let agentAdapterConfig: Record<string, unknown> | null = null;
   let detectedSkill: string | null = null;
+  let slashCommand: ReturnType<typeof parseAgentChatSlashCommand> = null;
 
   if (companyId) {
     const { agentRegistryId: aid, allKnownSlugs, agentAdapterConfig: cfg } = await resolveAgentForPersona(
@@ -397,7 +799,21 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     );
     agentRegistryId = aid;
     agentAdapterConfig = cfg;
-    detectedSkill = detectSkillDispatch(notes, allKnownSlugs);
+    slashCommand = parseAgentChatSlashCommand(rawLastOperatorText, allKnownSlugs);
+    if (slashCommand) {
+      lastOperatorText = slashCommandWorkerInstruction(slashCommand);
+      if (slashCommand.kind === "skill" && slashCommand.skillSlug) {
+        detectedSkill = slashCommand.skillSlug;
+      }
+      await write({
+        type: "phase",
+        phase: "slash_command",
+        command: slashCommand.kind,
+        skill: slashCommand.kind === "skill" ? slashCommand.skillSlug : undefined,
+      });
+    } else {
+      detectedSkill = detectSkillDispatch(notes, allKnownSlugs);
+    }
   }
 
   const strictFlow = companyId ? await buildStrictToolFlowTrace(companyId, lastOperatorText) : null;
@@ -412,15 +828,16 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       budgetBytes: 5200,
     });
     const companionOptOut = process.env.HSM_DISABLE_WORKER_COMPANION_STREAM === "1";
-    const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM !== "0";
-    const companionKey = companionOptOut || !workerCompanionEnabled ? undefined : readOpenRouterApiKey();
+    const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM === "1";
+    const companionBackend = companionOptOut || !workerCompanionEnabled ? null : readAgentChatBackend();
     await write({
       type: "phase",
       phase: "skill_dispatch_runtime",
-      live_companion_stream: !!companionKey,
+      live_companion_stream: !!companionBackend,
     });
     const ser = createSerializedNdjsonWriter(write);
     const runArtifacts = new Map<string, MutableRunArtifact>();
+    const operationalState = makeOperationalAccumulator();
     let result: WorkerDispatchResult | undefined;
     await withRuntimeMirror(
       UPSTREAM,
@@ -436,7 +853,6 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         waitForTelemetryMs: 120_000,
         requireWorkerEvidence: true,
         runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
-        dispatchNoteText: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
         extraMeta: {
           trigger: "operator_chat",
           operator_message: lastOperatorText.slice(0, 600),
@@ -450,9 +866,9 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           },
         },
       });
-      if (companionKey) {
-        const companion = streamOpenRouterChat({
-          apiKey: companionKey,
+      if (companionBackend) {
+        const companion = streamAgentChat({
+          backend: companionBackend,
           messages: [
             { role: "system", content: workerCompanionSystemPrompt(persona, "skill", detectedSkill) },
             { role: "user", content: lastOperatorText.slice(0, 8000) },
@@ -467,9 +883,14 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         result = await dispatchPromise;
       }
       },
-      (payload) => captureRunArtifactFromRuntime(payload, runArtifacts),
+      (payload) => {
+        captureRunArtifactFromRuntime(payload, runArtifacts);
+        captureOperationalStateFromRuntime(payload, operationalState);
+      },
     );
-    await patchRunArtifactsMeta(companyId, result?.runId, serializeRunArtifacts(runArtifacts));
+    const artifacts = serializeRunArtifacts(runArtifacts);
+    await patchRunArtifactsMeta(companyId, result?.runId, artifacts);
+    await patchRunOperationalMeta(companyId, result?.runId, serializeOperationalState(operationalState));
     if (!result || result.ok !== true) {
       const r = result;
       await write({
@@ -492,12 +913,13 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         compact_bytes: compact.bytes,
       },
     });
+    const skillReply = result.finalized
+      ? `Completed \`${detectedSkill}\` in worker agent runtime.`
+      : `Dispatched \`${detectedSkill}\` to worker runtime. Waiting for completion evidence.`;
     await write({
       type: "done",
       ok: true,
-      reply: result.finalized
-        ? `Completed \`${detectedSkill}\` in worker agent runtime.`
-        : `Dispatched \`${detectedSkill}\` to worker runtime. Waiting for completion evidence.`,
+      reply: skillReply,
       at: new Date().toISOString(),
       run_id: result.runId,
       skill: detectedSkill,
@@ -507,10 +929,42 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       execution_verified: result.executionVerified,
       finalized: result.finalized,
     });
+    if (result.finalized) {
+      await write({
+        type: "final_answer",
+        payload: {
+          message: result.workerEvidence || skillReply,
+        },
+      });
+    }
     return;
   }
 
-  if (!detectedSkill && companyId) {
+  if (!detectedSkill && companyId && !slashCommand) {
+    // ── Task Management Action Lane ──────────────────────────────────────────
+    // Handles "create task", "assign to", "hand back", "mark done", "add note",
+    // "requires human" deterministically without going through worker or LLM.
+    const taskAction = parseTaskManagementAction(lastOperatorText);
+    if (taskAction) {
+      await write({ type: "phase", phase: "task_action", action_kind: taskAction.kind });
+      const actionResult = await executeTaskAction({
+        action: taskAction,
+        companyId,
+        taskId,
+        persona,
+      });
+      await write({
+        type: "done",
+        ok: actionResult.ok,
+        reply: actionResult.message,
+        at: new Date().toISOString(),
+        task_action: actionResult.kind,
+        task_id: actionResult.taskId,
+        data: actionResult.data,
+      });
+      return;
+    }
+
     const optimize = parseOptimizeCommand(lastOperatorText);
     if (optimize) {
       await write({ type: "phase", phase: "optimize", optimize_kind: optimize.kind });
@@ -625,25 +1079,91 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
   }
 
   if (!detectedSkill && companyId) {
-    const openRouterKey = readOpenRouterApiKey();
-    const executionIntent = looksLikeExecutionIntent(lastOperatorText);
-    const forceWorkerDispatch = process.env.HSM_FORCE_OPERATOR_WORKER_DISPATCH === "1";
-    const routeWorker = forceWorkerDispatch || !openRouterKey;
+    const chatBackend = readAgentChatBackend();
+    const baseRoute = operatorChatShouldRouteWorker({
+      lastOperatorText,
+      hasChatBackend: !!chatBackend,
+    });
+    const semanticRouterEnabled = process.env.HSM_OPERATOR_CHAT_SEMANTIC_ROUTER !== "0";
+    const workerFirstMode =
+      process.env.HSM_OPERATOR_CHAT_WORKER_FIRST === "1" ||
+      process.env.HSM_OPERATOR_CLAUDE_CODE_MODE === "1";
+    const semanticRoute =
+      semanticRouterEnabled && chatBackend && workerFirstMode
+        ? await classifySemanticTurnRoute({
+            backend: chatBackend,
+            notes,
+            lastOperatorText,
+          })
+        : null;
+    // Hard file/workspace signals — these override a conversational semantic result because
+    // the semantic router cannot see the workspace context and may under-classify file queries.
+    const hardFileActionableIntent =
+      looksLikeRepoInfoQuestion(lastOperatorText) ||
+      looksLikeImplicitWorkspacePointer(lastOperatorText) ||
+      looksLikeQuickToolIntent(lastOperatorText);
+    const routeDecision = slashCommand
+      ? {
+          ...baseRoute,
+          routeWorker: true,
+          executionIntent: true,
+          codingIntent: true,
+          quickToolIntent: false,
+          reason: `slash_command_${slashCommand.kind}`,
+        }
+      : semanticRoute && baseRoute.reason === "worker_first_claude_code_mode"
+        ? {
+            ...baseRoute,
+            // Semantic router is authoritative for its domain:
+            //   • actionable=true  → worker (file/tool work confirmed by LLM)
+            //   • actionable=false → companion LLM answers from combined_system_addon context
+            //       EXCEPT when hard heuristics have high confidence it's a file query
+            //       (repo info / workspace pointer / quick-tool read-edit path).
+            routeWorker: semanticRoute.actionable
+              ? true
+              : hardFileActionableIntent && semanticRoute.confidence < 0.75,
+            executionIntent:
+              (semanticRoute.actionable || (hardFileActionableIntent && semanticRoute.confidence < 0.75))
+                ? true
+                : baseRoute.executionIntent,
+            reason: semanticRoute.actionable
+              ? "semantic_actionable"
+              : hardFileActionableIntent && semanticRoute.confidence < 0.75
+                ? "heuristic_file_low_confidence_override"
+                : "semantic_conversational",
+          }
+        : baseRoute;
+    const { routeWorker, executionIntent, codingIntent, quickToolIntent, reason: workerRouteReason } = routeDecision;
+    await write({
+      type: "phase",
+      phase: "turn_router",
+      route_worker: routeWorker,
+      route_reason: workerRouteReason,
+      router: semanticRoute ? "semantic+heuristic" : "heuristic",
+      semantic_confidence: semanticRoute?.confidence,
+      semantic_reason: semanticRoute?.reason,
+    });
     if (routeWorker) {
       const companionOptOut = process.env.HSM_DISABLE_WORKER_COMPANION_STREAM === "1";
-      const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM !== "0";
-      const sidecarKey = companionOptOut || !workerCompanionEnabled ? undefined : openRouterKey;
+      const workerCompanionEnabled = process.env.HSM_WORKER_COMPANION_STREAM === "1";
+      // Companion is opt-in; when enabled you can opt out of coding/execution narration with `...WITH_CODING=0`.
+      const companionWithCoding = process.env.HSM_WORKER_COMPANION_WITH_CODING !== "0";
+      const skillsCatalogQ = looksLikeSkillsOrCatalogQuestion(lastOperatorText);
+      const skipCompanionForCodingTurn =
+        !companionWithCoding && (executionIntent || codingIntent) && !skillsCatalogQ;
+      const companionBackend =
+        companionOptOut || !workerCompanionEnabled || skipCompanionForCodingTurn ? null : chatBackend;
       await write({
         type: "phase",
         phase: "operator_chat_worker",
         execution_intent: executionIntent,
-        force_worker_dispatch: forceWorkerDispatch,
-        openrouter_configured: !!openRouterKey,
-        token_stream: !!sidecarKey,
-        companion_sidecar: !!sidecarKey,
-        reason: forceWorkerDispatch
-          ? "forced_worker_dispatch"
-          : "missing_openrouter_key_in_next_env",
+        coding_intent: codingIntent,
+        quick_tool_intent: quickToolIntent,
+        chat_backend: chatBackend?.label ?? null,
+        token_stream: !!companionBackend,
+        companion_sidecar: !!companionBackend,
+        companion_skipped_for_coding: skipCompanionForCodingTurn,
+        route_reason: workerRouteReason,
       });
       const policy = deriveToolExecutionPolicy(agentAdapterConfig);
       const compact = await buildCompactedContextBundle({
@@ -652,17 +1172,18 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         agentRegistryId,
         budgetBytes: 5200,
       });
-      const dispatchNoteText =
-        !executionIntent && !openRouterKey
-          ? "Routed to worker — no OpenRouter key in this Next.js process, so this panel cannot stream answer tokens. Set OPENROUTER_API_KEY (or HSM_OPENROUTER_API_KEY) for web/company-console and restart, or put it in the repo-root .env (loaded by next.config). Worker is still running in the background."
-          : "Routed this turn through the worker agent loop runtime.";
       const ser = createSerializedNdjsonWriter(write);
       const runArtifacts = new Map<string, MutableRunArtifact>();
+      const operationalState = makeOperationalAccumulator();
       let result: WorkerDispatchResult | undefined;
       await withRuntimeMirror(
         UPSTREAM,
         ser,
         async () => {
+        const quickToolMode = operatorChatQuickToolPromptMode({
+          quickToolIntent,
+          routeReason: workerRouteReason,
+        });
         const dispatchPromise = dispatchSkillToWorker({
           companyId,
           taskId,
@@ -673,14 +1194,14 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           waitForTelemetryMs: 120_000,
           requireWorkerEvidence: true,
           runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
-          dispatchNoteText,
           extraMeta: {
             trigger: "operator_chat",
             operator_message: lastOperatorText.slice(0, 1000),
-            intent: executionIntent ? "execution" : "analysis",
+            intent: executionIntent || codingIntent ? "execution" : "analysis",
             loop_state: "running",
             strict_tool_flow: strictFlow,
             tool_execution_policy: policy,
+            quick_tool_mode: quickToolMode,
             compact_context: {
               bytes: compact.bytes,
               sections: compact.sections,
@@ -688,9 +1209,9 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
             },
           },
         });
-        if (sidecarKey) {
-          const companion = streamOpenRouterChat({
-            apiKey: sidecarKey,
+        if (companionBackend) {
+          const companion = streamAgentChat({
+            backend: companionBackend,
             messages: [
               {
                 role: "system",
@@ -708,9 +1229,14 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           result = await dispatchPromise;
         }
         },
-        (payload) => captureRunArtifactFromRuntime(payload, runArtifacts),
+        (payload) => {
+          captureRunArtifactFromRuntime(payload, runArtifacts);
+          captureOperationalStateFromRuntime(payload, operationalState);
+        },
       );
-      await patchRunArtifactsMeta(companyId, result?.runId, serializeRunArtifacts(runArtifacts));
+      const artifacts = serializeRunArtifacts(runArtifacts);
+      await patchRunArtifactsMeta(companyId, result?.runId, artifacts);
+      await patchRunOperationalMeta(companyId, result?.runId, serializeOperationalState(operationalState));
       if (!result || result.ok !== true) {
         const r = result;
         await write({
@@ -732,9 +1258,17 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           compact_bytes: compact.bytes,
         },
       });
+      const executionReply = maybeExecutionReply({
+        executionIntent,
+        codingIntent,
+        result,
+        artifacts,
+      });
+      const finalReply = executionReply ?? fallbackWorkerReply(result);
       await write({
         type: "done",
         ok: true,
+        reply: finalReply,
         at: new Date().toISOString(),
         run_id: result.runId,
         skill: "worker-agent-loop",
@@ -747,48 +1281,44 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       });
       return;
     }
-    await write({ type: "phase", phase: "openrouter_llm", chat_mode: "conversational_company" });
+    if (!chatBackend) {
+      await write({
+        type: "error",
+        message:
+          "No agent chat backend configured for Next.js. Set HSM_AGENT_CHAT_PROVIDER=ollama with OLLAMA_URL/OLLAMA_MODEL for local chat, or OPENROUTER_API_KEY for OpenRouter.",
+      });
+      return;
+    }
+    await write({
+      type: "phase",
+      phase: `${chatBackend.label}_llm`,
+      chat_mode: "conversational_company",
+      chat_backend: chatBackend.label,
+    });
   }
 
-  const key = readOpenRouterApiKey();
-  if (!key) {
+  const chatBackend = readAgentChatBackend();
+  if (!chatBackend) {
     await write({
       type: "error",
       message:
-        "OpenRouter API key not configured for Next.js (set OPENROUTER_API_KEY or HSM_OPENROUTER_API_KEY in web/company-console/.env.local or repo-root .env).",
+        "No agent chat backend configured for Next.js. Set HSM_AGENT_CHAT_PROVIDER=ollama with OLLAMA_URL/OLLAMA_MODEL for local chat, or OPENROUTER_API_KEY for OpenRouter.",
     });
     return;
   }
 
-  await write({ type: "phase", phase: "openrouter_llm" });
+  await write({ type: "phase", phase: `${chatBackend.label}_llm`, chat_backend: chatBackend.label });
+  const thin = isThinHarnessModel(chatBackend.model);
+  if (thin) {
+    await write({ type: "phase", phase: "thin_harness", model: chatBackend.model });
+  }
   const system = await Promise.race([
-    buildSystemPrompt(persona, companyId, detectedSkill, taskId, "operator_chat"),
+    buildSystemPrompt(persona, companyId, detectedSkill, taskId, "operator_chat", thin),
     new Promise<string>((resolve) =>
       setTimeout(() => resolve(`You are ${persona}, an AI agent. Be concise and in-character.`), 7000),
     ),
   ]);
   let enrichedSystem = system;
-  if (companyId) {
-    const [taskCtxData, threadData] = await Promise.all([
-      fetch(`${UPSTREAM}/api/company/tasks/${taskId}/llm-context`).then((r) => r.json()).catch(() => null),
-      agentRegistryId
-        ? fetch(`${UPSTREAM}/api/company/companies/${companyId}/agents/${agentRegistryId}/operator-thread`)
-            .then((r) => r.json())
-            .catch(() => null)
-        : Promise.resolve(null),
-    ]);
-    const addon = (taskCtxData as { combined_system_addon?: string } | null)?.combined_system_addon ?? "";
-    const compactDigest = (threadData as { compact_digest?: string } | null)?.compact_digest ?? "";
-    const compact = [
-      compactDigest ? `## Operator Thread Digest\n${compactDigest.slice(0, 1800)}` : "",
-      addon ? `## Task LLM Context (Compacted)\n${addon.slice(0, 2800)}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    if (compact) {
-      enrichedSystem = `${system}\n\n${compact}`;
-    }
-  }
 
   // Compact the note history if it has grown large — keeps LLM cost/latency
   // bounded and avoids context-window overflows on long operator threads.
@@ -798,11 +1328,16 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       type: "phase",
       phase: "context_compaction",
       notes_compacted: compaction.compactedCount,
-      notes_kept: notes.length - compaction.compactedCount,
+      // Verbatim turns sent to the LLM (matches `compactNotesForLlm` slice, not raw `notes.length`).
+      notes_kept: compaction.messageHistory.length,
     });
     // Fold the prose summary into the system prompt so the model has the full
     // thread narrative without it counting against the message-turn budget.
-    enrichedSystem = `${enrichedSystem}\n\n${compaction.compactionSummary}`;
+    // Thin mode: cap to 600 chars so a small free model isn't overwhelmed.
+    const summaryToInject = thin
+      ? (compaction.compactionSummary ?? "").slice(0, 600)
+      : (compaction.compactionSummary ?? "");
+    enrichedSystem = `${enrichedSystem}\n\n${summaryToInject}`;
     // Persist to supermemory so the history is searchable later.
     if (companyId && compaction.compactionSummary) {
       saveCompactionToMemory(companyId, taskId, persona, compaction.compactionSummary).catch(() => {});
@@ -818,8 +1353,8 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
 
   let reply: string;
   try {
-    reply = await streamOpenRouterChat({
-      apiKey: key,
+    reply = await streamAgentChat({
+      backend: chatBackend,
       messages: [{ role: "system", content: enrichedSystem }, ...messages],
       maxTokens: detectedSkill ? 1024 : 768,
       temperature: detectedSkill ? 0.4 : 0.7,
