@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, memo } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -28,6 +29,7 @@ import { Textarea } from "@/app/components/ui/textarea";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 import type { HsmTaskRow } from "@/app/lib/hsm-api-types";
 import {
+  callResolveRunInteraction,
   callResumeRun,
   createCompanyTask,
   getAgentRun,
@@ -147,9 +149,46 @@ type LiveRun = {
   taskId?: string | null;
   executionMode?: "worker" | "llm_simulated" | "pending" | "unknown";
   executionVerified?: boolean;
+  pendingInteractions?: Array<{
+    kind?: "approval" | "elicitation";
+    resume_token?: string;
+    tool_name?: string;
+    call_id?: string | null;
+    message?: string;
+    ts_ms?: number;
+  }>;
+  todoQueue?: Array<{
+    id?: string;
+    content?: string;
+    status?: string;
+    updated_at?: string;
+  }>;
+  subagentTasks?: Array<{
+    id?: string;
+    description?: string;
+    subagent_type?: string;
+    model?: string;
+    status?: string;
+    updated_at?: string;
+  }>;
+  bridgeProxy?: {
+    mode?: string;
+    status?: string;
+    last_tool?: string | null;
+    last_mcp_server?: string | null;
+    last_mcp_tool?: string | null;
+    call_count?: number;
+    last_error?: string | null;
+  } | null;
 };
+type PendingInteraction = NonNullable<LiveRun["pendingInteractions"]>[number];
 type RuntimeToolEvent = {
   event_type?: string;
+  harness_state?: string;
+  interaction_kind?: string;
+  resume_token?: string;
+  checkpoint_ref?: string;
+  interaction?: Record<string, unknown> | null;
   task_key?: string | null;
   tool_name?: string | null;
   call_id?: string | null;
@@ -195,6 +234,156 @@ function runFailureHint(summary: string | null | undefined): string | null {
   return null;
 }
 
+function extractRunOperationalMeta(meta: Record<string, unknown> | null | undefined): Pick<
+  LiveRun,
+  "todoQueue" | "subagentTasks" | "bridgeProxy"
+> {
+  const m = meta ?? {};
+  return {
+    todoQueue: Array.isArray(m.todo_queue) ? (m.todo_queue as LiveRun["todoQueue"]) : [],
+    subagentTasks: Array.isArray(m.subagent_tasks) ? (m.subagent_tasks as LiveRun["subagentTasks"]) : [],
+    bridgeProxy:
+      m.bridge_proxy && typeof m.bridge_proxy === "object" && !Array.isArray(m.bridge_proxy)
+        ? (m.bridge_proxy as LiveRun["bridgeProxy"])
+        : null,
+  };
+}
+
+function applyOperationalEventToLiveRun(prev: LiveRun, ev: RuntimeToolEvent): LiveRun {
+  const eventType = (ev.event_type ?? "").toLowerCase();
+  const tool = (ev.tool_name ?? "").trim();
+  const toolLc = tool.toLowerCase();
+  const tsIso = new Date(ev.ts_ms ?? Date.now()).toISOString();
+  const next: LiveRun = { ...prev };
+
+  if (eventType === "tool_start" && toolLc === "todowrite") {
+    const input = asObject(ev.input);
+    const todos = Array.isArray(input?.todos) ? input.todos : [];
+    const queue = [...(next.todoQueue ?? [])];
+    for (const row of todos) {
+      const rec = asObject(row);
+      const id = typeof rec?.id === "string" ? rec.id : "";
+      const content = typeof rec?.content === "string" ? rec.content : "";
+      const status = typeof rec?.status === "string" ? rec.status : "";
+      if (!id || !content) continue;
+      const idx = queue.findIndex((x) => x.id === id);
+      const merged = { id, content, status: status || "pending", updated_at: tsIso };
+      if (idx >= 0) queue[idx] = { ...queue[idx], ...merged };
+      else queue.push(merged);
+    }
+    next.todoQueue = queue;
+  }
+
+  if (toolLc === "subagent") {
+    const callId = ev.call_id ?? `subagent-${Date.now()}`;
+    const input = asObject(ev.input);
+    const tasks = [...(next.subagentTasks ?? [])];
+    const idx = tasks.findIndex((x) => x.id === callId);
+    const status =
+      eventType === "tool_error" ? "failed" : eventType === "tool_complete" ? "completed" : "running";
+    const merged = {
+      id: callId,
+      description: typeof input?.description === "string" ? input.description : tasks[idx]?.description ?? "subagent task",
+      subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : tasks[idx]?.subagent_type,
+      model: typeof input?.model === "string" ? input.model : tasks[idx]?.model,
+      status,
+      updated_at: tsIso,
+    };
+    if (idx >= 0) tasks[idx] = { ...tasks[idx], ...merged };
+    else tasks.push(merged);
+    next.subagentTasks = tasks;
+  }
+
+  if (toolLc === "callmcptool" || toolLc === "fetchmcpresource" || toolLc === "webfetch" || toolLc === "websearch") {
+    const current = next.bridgeProxy ?? {};
+    const count = typeof current.call_count === "number" ? current.call_count : 0;
+    next.bridgeProxy = {
+      ...current,
+      mode: "proxy",
+      last_tool: tool,
+      status: eventType === "tool_error" ? "error" : eventType === "tool_complete" ? "idle" : "active",
+      last_error: eventType === "tool_error" ? (ev.message ?? "proxy tool error") : null,
+      call_count: eventType === "tool_start" ? count + 1 : count,
+    };
+  }
+
+  return next;
+}
+
+function formatTimelineClock(ms?: number | null): string {
+  const d = typeof ms === "number" && Number.isFinite(ms) ? new Date(ms) : new Date();
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatTurnOrdinal(turn: number): string {
+  return String(Math.max(1, turn)).padStart(2, "0");
+}
+
+type OperatorTimelineTone = "turn" | "user" | "tool" | "assistant" | "runtime";
+
+function OperatorTimelineRow({
+  tone,
+  time,
+  label,
+  headline,
+  meta,
+  children,
+}: {
+  tone: OperatorTimelineTone;
+  time?: string;
+  label: string;
+  headline?: string;
+  meta?: string;
+  children?: ReactNode;
+}) {
+  const dotClass =
+    tone === "user"
+      ? "bg-[#2d8bc4]"
+      : tone === "tool"
+        ? "bg-[#c17618]"
+        : tone === "assistant"
+          ? "bg-[#7b5cd6]"
+          : tone === "runtime"
+            ? "bg-[#4a9e5c]"
+            : "border border-[#61718a] bg-[#111827]";
+  const labelClass =
+    tone === "user"
+      ? "text-[#4aa3dc]"
+      : tone === "tool"
+        ? "text-[#d08a27]"
+        : tone === "assistant"
+          ? "text-[#9b7dff]"
+          : tone === "runtime"
+            ? "text-[#70b982]"
+            : "text-[#a9b4c4]";
+  return (
+    <div className="nd-agent-timeline-row">
+      <div className="nd-agent-timeline-row__time">{time ?? formatTimelineClock()}</div>
+      <div className="nd-agent-timeline-row__rail" aria-hidden>
+        <span className={cn("nd-agent-timeline-row__dot", dotClass)} />
+      </div>
+      <div className="min-w-0 flex-1 pb-4">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <span className={cn("font-mono text-[10px] font-semibold uppercase tracking-[0.14em]", labelClass)}>
+            {label}
+          </span>
+          {headline ? (
+            <span className="min-w-0 truncate font-mono text-[13px] font-semibold tracking-tight text-[#e8e8e8]">
+              {headline}
+            </span>
+          ) : null}
+          {meta ? (
+            <span className="ml-auto shrink-0 rounded border border-[#273244] bg-[#101724] px-1.5 py-0.5 font-mono text-[9px] text-[#8391a6]">
+              {meta}
+            </span>
+          ) : null}
+        </div>
+        {children ? <div className="mt-1.5 min-w-0">{children}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 /** One tool row — shared by legacy transcript merge and Claude Code–style harness card. */
 function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
   const isErr =
@@ -215,33 +404,25 @@ function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
       : null;
   const cid = shortCallId(event.call_id);
   return (
-    <div className="border-t border-[#1a1a1a] py-1.5">
-      <div className="flex min-w-0 items-start gap-2">
-        <span
-          className={cn(
-            "mt-0.5 size-1.5 shrink-0 rounded-full",
-            isErr ? "bg-[#8a3030]" : "bg-[#2d4a33]",
-          )}
-          aria-hidden
-        />
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-[10px] leading-tight text-[#5a5a5a]">
-            <span className="text-[#666666]">{phase}</span>
-            {event.tool_name ? (
-              <>
-                <span className="mx-1 text-[#333333]">·</span>
-                <span className="text-[#888888]">{event.tool_name}</span>
-              </>
-            ) : null}
-            {cid ? (
-              <>
-                <span className="mx-1 text-[#333333]">·</span>
-                <span className="text-[#555555]" title={event.call_id ?? undefined}>
-                  {cid}
-                </span>
-              </>
-            ) : null}
-          </p>
+    <OperatorTimelineRow
+      tone="tool"
+      time={formatTimelineClock(event.ts_ms)}
+      label="Tool"
+      headline={event.tool_name ?? "tool"}
+      meta={isErr ? "error" : event.success === true ? "ok" : undefined}
+    >
+      <div className="rounded-sm border border-[#302515] bg-[#120d07] px-3 py-2">
+        <p className="font-mono text-[10px] leading-tight text-[#7c6a4f]">
+          <span className={isErr ? "text-[#c45a5a]" : "text-[#d08a27]"}>{phase}</span>
+          {cid ? (
+            <>
+              <span className="mx-1 text-[#4b3a20]">·</span>
+              <span className="text-[#8c7a5f]" title={event.call_id ?? undefined}>
+                {cid}
+              </span>
+            </>
+          ) : null}
+        </p>
           {event.message ? (
             <p
               className={cn(
@@ -266,9 +447,8 @@ function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
               </pre>
             </details>
           ) : null}
-        </div>
       </div>
-    </div>
+    </OperatorTimelineRow>
   );
 }
 
@@ -276,23 +456,32 @@ function OperatorHarnessTurnCard({
   items,
   thinking,
   chatPersona,
+  turnNumber,
 }: {
   items: HarnessTurnItem[];
   thinking: boolean;
   chatPersona: string;
+  turnNumber: number;
 }) {
+  const now = formatTimelineClock();
   return (
-    <div className="rounded-md border border-[#262626] bg-[#080808] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-      <div className="mb-2 flex items-center gap-2 border-b border-[#1a1a1a] pb-1.5">
-        <Bot className="size-3.5 shrink-0 text-[#5c7a9a]" aria-hidden />
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-[#8a8a8a]">Assistant</p>
-          <p className="truncate font-mono text-[9px] text-[#555555]">{chatPersona} · tools + reply (Claude Code harness)</p>
-        </div>
-      </div>
-      <div className="space-y-1">
+    <div className="nd-agent-timeline">
+      <OperatorTimelineRow
+        tone="turn"
+        time={now}
+        label={`Turn ${formatTurnOrdinal(turnNumber)}`}
+        headline={chatPersona}
+        meta="live"
+      >
+        <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[#5f6d80]">
+          Plan → Extract/Inspect → Generate/Act → Review/Verify · VM overlay · SmolVM bash
+        </p>
+      </OperatorTimelineRow>
+      <div>
         {items.length === 0 && thinking ? (
-          <p className="font-mono text-[10px] text-[#555555]">Connecting to agent stream…</p>
+          <OperatorTimelineRow tone="runtime" time={now} label="Runtime">
+            <p className="font-mono text-[11px] text-[#7a8a9f]">Connecting to agent stream…</p>
+          </OperatorTimelineRow>
         ) : null}
         {items.map((it, idx) => {
           if (it.kind === "tool") {
@@ -302,7 +491,7 @@ function OperatorHarnessTurnCard({
           const isLast = idx === items.length - 1;
           const streamCaret = thinking && isLast;
           return (
-            <div key={`h-txt-${it.seq}`} className="text-xs leading-snug">
+            <OperatorTimelineRow key={`h-txt-${it.seq}`} tone="assistant" time={now} label="Assistant">
               <div className="nd-stream-assistant__body">
                 <div className="min-w-0 flex-1">
                   <WorkspaceMarkdownStreamBody
@@ -319,7 +508,7 @@ function OperatorHarnessTurnCard({
                   <span className="nd-stream-assistant__caret nd-stream-assistant__caret--pulse" aria-hidden />
                 ) : null}
               </div>
-            </div>
+            </OperatorTimelineRow>
           );
         })}
       </div>
@@ -328,6 +517,29 @@ function OperatorHarnessTurnCard({
 }
 
 const CHANNEL_STORAGE_KEY = "pc-ws-agent-channels-v2";
+
+const AGENT_CHAT_QUICK_COMMANDS = [
+  {
+    label: "/plan",
+    text: "/plan ",
+  },
+  {
+    label: "/verify",
+    text: "/verify ",
+  },
+  {
+    label: "/apply",
+    text: "/apply ",
+  },
+  {
+    label: "/discard",
+    text: "/discard ",
+  },
+  {
+    label: "/skill",
+    text: "/skill ",
+  },
+];
 
 /** Workforce roster agent id — used to resolve `propertiesSelection.id` → canonical persona name for channel keys. */
 const AGENT_REGISTRY_UUID_RE =
@@ -1221,6 +1433,7 @@ export function WorkspaceRightRail() {
   const [runNeedsApproval, setRunNeedsApproval] = useState(false);
   const [runActionBusy, setRunActionBusy] = useState(false);
   const [runActionErr, setRunActionErr] = useState<string | null>(null);
+  const [interactionDrafts, setInteractionDrafts] = useState<Record<string, string>>({});
   const [railTab, setRailTab] = useState<"agents" | "files">("agents");
   /** Set when the server compacted the note history on the last send. */
   const [compactionBanner, setCompactionBanner] = useState<{
@@ -1496,6 +1709,10 @@ export function WorkspaceRightRail() {
                       summary: finalSummary,
                       taskId: runTaskId,
                       executionMode: finalMode,
+                      pendingInteractions: Array.isArray(run?.meta?.pending_interactions)
+                        ? (run?.meta?.pending_interactions as LiveRun["pendingInteractions"])
+                        : [],
+                      ...extractRunOperationalMeta((run?.meta as Record<string, unknown> | undefined) ?? null),
                     }
                   : null,
               );
@@ -1512,6 +1729,10 @@ export function WorkspaceRightRail() {
                   summary,
                   taskId: runTaskId,
                   executionMode: runMode,
+                  pendingInteractions: Array.isArray(run?.meta?.pending_interactions)
+                    ? (run?.meta?.pending_interactions as LiveRun["pendingInteractions"])
+                    : [],
+                  ...extractRunOperationalMeta((run?.meta as Record<string, unknown> | undefined) ?? null),
                 }
               : null,
           );
@@ -1524,6 +1745,10 @@ export function WorkspaceRightRail() {
                   summary: summary ?? r.summary,
                   taskId: runTaskId,
                   executionMode: runMode,
+                  pendingInteractions: Array.isArray(run?.meta?.pending_interactions)
+                    ? (run?.meta?.pending_interactions as LiveRun["pendingInteractions"])
+                    : r.pendingInteractions,
+                  ...extractRunOperationalMeta((run?.meta as Record<string, unknown> | undefined) ?? null),
                 }
               : null,
           );
@@ -1567,11 +1792,17 @@ export function WorkspaceRightRail() {
       const parsed: RuntimeToolEvent | null = obj
         ? {
             event_type: typeof obj.event_type === "string" ? obj.event_type : undefined,
+              harness_state: typeof obj.harness_state === "string" ? obj.harness_state : undefined,
+              interaction_kind: typeof obj.interaction_kind === "string" ? obj.interaction_kind : undefined,
+              resume_token: typeof obj.resume_token === "string" ? obj.resume_token : undefined,
+              checkpoint_ref: typeof obj.checkpoint_ref === "string" ? obj.checkpoint_ref : undefined,
+              interaction: asObject(obj.interaction),
             task_key: typeof obj.task_key === "string" || obj.task_key === null ? obj.task_key : undefined,
             tool_name: typeof obj.tool_name === "string" || obj.tool_name === null ? obj.tool_name : undefined,
             call_id: typeof obj.call_id === "string" || obj.call_id === null ? obj.call_id : undefined,
             success: typeof obj.success === "boolean" ? obj.success : undefined,
             message: typeof obj.message === "string" ? obj.message : undefined,
+            input: Object.prototype.hasOwnProperty.call(obj, "input") ? obj.input : undefined,
             ts_ms: typeof obj.ts_ms === "number" ? obj.ts_ms : undefined,
           }
         : null;
@@ -1582,9 +1813,17 @@ export function WorkspaceRightRail() {
       runtimeSeenRef.current.add(key);
 
       setLiveToolEvents((prev) => [parsed!, ...prev].slice(0, 24));
+      setLiveRun((prev) => (prev ? applyOperationalEventToLiveRun(prev, parsed) : prev));
       const eventPhase: RunTimelinePhase =
         parsed.event_type === "tool_start" || parsed.event_type === "tool_start_delta"
           ? "tool_start"
+          : parsed.event_type === "waiting_approval" ||
+            parsed.event_type === "waiting_elicitation" ||
+            parsed.event_type === "checkpoint_write" ||
+            parsed.harness_state === "checkpointed"
+            ? "checkpoint"
+            : parsed.event_type === "resuming" || parsed.harness_state === "resuming"
+              ? "resume"
           : parsed.success === false || /error|fail|blocked|denied/i.test(parsed.message ?? "")
             ? "tool_error"
             : "tool_complete";
@@ -1615,23 +1854,48 @@ export function WorkspaceRightRail() {
             body,
             step_external_id: parsed.call_id ?? undefined,
           });
-          const blocked = /blocked|approval|paused_approval|paused_auth|denied by approval|auth required|unauthorized|missing key|credentials/i.test(parsed.message ?? "");
+          const explicitApprovalWait =
+            parsed.event_type === "waiting_approval" || parsed.harness_state === "waiting_approval";
+          const explicitElicitationWait =
+            parsed.event_type === "waiting_elicitation" || parsed.harness_state === "waiting_elicitation";
+          const blocked =
+            explicitApprovalWait ||
+            explicitElicitationWait ||
+            /blocked|approval|paused_approval|paused_auth|denied by approval|auth required|unauthorized|missing key|credentials/i.test(parsed.message ?? "");
           if (blocked && liveRun.taskId) {
             setRunNeedsApproval(true);
             const approvalKeyMatch = /approval required for [`'"]([^`'"]+)[`'"]/i.exec(parsed.message ?? "");
             const approvalKey = approvalKeyMatch?.[1] ?? null;
             const executionIdMatch = /execution[_\s-]?id[:=\s]+([0-9a-f-]{36})/i.exec(parsed.message ?? "");
-            const executionId = executionIdMatch?.[1] ?? null;
+            const executionId = parsed.resume_token ?? executionIdMatch?.[1] ?? null;
             const pausedAuth = /paused_auth|auth required|unauthorized|missing key|credentials/i.test(parsed.message ?? "");
             const currentLoop = parseRunLoopState(liveRun?.status === "running" ? "running" : null) ?? "running";
-            const nextLoop = pausedAuth ? "paused_auth" : "paused_approval";
+            const nextLoop = explicitElicitationWait
+              ? "waiting_elicitation"
+              : explicitApprovalWait
+                ? "waiting_approval"
+                : pausedAuth
+                  ? "paused_auth"
+                  : "paused_approval";
+            const pendingInteraction = {
+              kind: explicitElicitationWait ? "elicitation" : "approval",
+              tool_name: tool,
+              call_id: parsed.call_id ?? null,
+              message: parsed.message ?? "",
+              resume_token: executionId,
+              interaction: parsed.interaction ?? null,
+              ts_ms: parsed.ts_ms ?? Date.now(),
+            };
             if (canTransitionRunLoopState(currentLoop, nextLoop)) {
               await patchAgentRun(apiBase, companyId, liveRun.runId, {
-                summary: `${pausedAuth ? "Paused for auth" : "Paused for approval"}: ${tool}`,
+                summary: explicitElicitationWait
+                  ? `Waiting for elicitation response: ${tool}`
+                  : `${pausedAuth ? "Paused for auth" : "Paused for approval"}: ${tool}`,
                 meta: {
                   execution_mode: "pending",
                   loop_state: nextLoop,
                   needs_human: true,
+                  pending_interactions: [pendingInteraction],
                   pending_approval_checkpoint: {
                     tool_name: tool,
                     call_id: parsed.call_id ?? null,
@@ -1641,6 +1905,16 @@ export function WorkspaceRightRail() {
                     kind: pausedAuth ? "auth" : "approval",
                     ts_ms: parsed.ts_ms ?? Date.now(),
                   },
+                  pending_elicitation_checkpoint: explicitElicitationWait
+                    ? {
+                        tool_name: tool,
+                        call_id: parsed.call_id ?? null,
+                        message: parsed.message ?? "",
+                        resume_token: executionId,
+                        interaction: parsed.interaction ?? null,
+                        ts_ms: parsed.ts_ms ?? Date.now(),
+                      }
+                    : null,
                 },
               });
             }
@@ -1650,7 +1924,9 @@ export function WorkspaceRightRail() {
               toolName: tool,
               callId: parsed.call_id ?? null,
               tsMs: parsed.ts_ms,
-              message: `Paused for approval checkpoint on ${tool}${parsed.call_id ? ` (${parsed.call_id})` : ""}.`,
+              message: explicitElicitationWait
+                ? `Waiting for elicitation response on ${tool}${parsed.call_id ? ` (${parsed.call_id})` : ""}.`
+                : `Paused for approval checkpoint on ${tool}${parsed.call_id ? ` (${parsed.call_id})` : ""}.`,
             });
             await markTaskRequiresHuman(apiBase, liveRun.taskId, {
               requires_human: true,
@@ -1978,6 +2254,11 @@ export function WorkspaceRightRail() {
         const parsed: RuntimeToolEvent | null = obj
           ? {
               event_type: typeof obj.event_type === "string" ? obj.event_type : undefined,
+              harness_state: typeof obj.harness_state === "string" ? obj.harness_state : undefined,
+              interaction_kind: typeof obj.interaction_kind === "string" ? obj.interaction_kind : undefined,
+              resume_token: typeof obj.resume_token === "string" ? obj.resume_token : undefined,
+              checkpoint_ref: typeof obj.checkpoint_ref === "string" ? obj.checkpoint_ref : undefined,
+              interaction: asObject(obj.interaction),
               task_key: typeof obj.task_key === "string" || obj.task_key === null ? obj.task_key : undefined,
               tool_name: typeof obj.tool_name === "string" || obj.tool_name === null ? obj.tool_name : undefined,
               call_id: typeof obj.call_id === "string" || obj.call_id === null ? obj.call_id : undefined,
@@ -1993,6 +2274,7 @@ export function WorkspaceRightRail() {
         if (runtimeSeenRef.current.has(key)) return;
         runtimeSeenRef.current.add(key);
         setLiveToolEvents((prev) => [parsed, ...prev].slice(0, 24));
+        setLiveRun((prev) => (prev ? applyOperationalEventToLiveRun(prev, parsed) : prev));
         if (typeof parsed.tool_name === "string" && parsed.tool_name.trim().length > 0) {
           const hk = `${(parsed.call_id ?? "").trim()}::${parsed.tool_name.trim()}`;
           if (!harnessToolDedupeRef.current.has(hk)) {
@@ -2006,6 +2288,13 @@ export function WorkspaceRightRail() {
           const eventPhase: RunTimelinePhase =
             parsed.event_type === "tool_start" || parsed.event_type === "tool_start_delta"
               ? "tool_start"
+              : parsed.event_type === "waiting_approval" ||
+                parsed.event_type === "waiting_elicitation" ||
+                parsed.event_type === "checkpoint_write" ||
+                parsed.harness_state === "checkpointed"
+                ? "checkpoint"
+                : parsed.event_type === "resuming" || parsed.harness_state === "resuming"
+                  ? "resume"
               : parsed.success === false || /error|fail|blocked|denied/i.test(parsed.message ?? "")
                 ? "tool_error"
                 : "tool_complete";
@@ -2128,6 +2417,16 @@ export function WorkspaceRightRail() {
               notesCompacted: typeof ev.notes_compacted === "number" ? ev.notes_compacted : 0,
               notesKept: typeof ev.notes_kept === "number" ? ev.notes_kept : 0,
             });
+          } else if (t === "phase" && ev.phase === "slash_command") {
+            const command = typeof ev.command === "string" ? ev.command : "command";
+            const skill = typeof ev.skill === "string" ? ` · ${ev.skill}` : "";
+            ingestRuntimeFromPayload({
+              event_type: "checkpoint",
+              tool_name: "slash_command",
+              success: true,
+              message: `/${command}${skill}`,
+              ts_ms: Date.now(),
+            });
           } else if (t === "error") {
             replyJ = {
               ok: false,
@@ -2208,6 +2507,10 @@ export function WorkspaceRightRail() {
           summary: null,
           executionVerified: replyJ.execution_verified === true,
           executionMode: replyJ.execution_mode ? parseExecutionMode(replyJ.execution_mode) : undefined,
+          pendingInteractions: [],
+          todoQueue: [],
+          subagentTasks: [],
+          bridgeProxy: null,
         });
         void (async () => {
           try {
@@ -2222,6 +2525,10 @@ export function WorkspaceRightRail() {
                     taskId: typeof run?.task_id === "string" ? run.task_id : null,
                     executionMode: parseExecutionMode(run?.meta?.execution_mode),
                     executionVerified: run?.meta?.execution_verified === true,
+                    pendingInteractions: Array.isArray(run?.meta?.pending_interactions)
+                      ? (run?.meta?.pending_interactions as LiveRun["pendingInteractions"])
+                      : [],
+                    ...extractRunOperationalMeta((run?.meta as Record<string, unknown> | undefined) ?? null),
                   }
               : prev,
             );
@@ -2441,12 +2748,97 @@ export function WorkspaceRightRail() {
     }
   }, [apiBase, companyId, chatPersona, liveRun?.runId, liveRun?.taskId, pushRunTimeline, qc, refreshWorkspace]);
 
+  const resolvePendingInteraction = useCallback(
+    async (
+      interaction: {
+        kind?: "approval" | "elicitation";
+        resume_token?: string;
+        tool_name?: string;
+        call_id?: string | null;
+        message?: string;
+      },
+      action: "approve" | "reject" | "respond",
+    ) => {
+      if (!companyId || !liveRun?.runId) return;
+      const kind = interaction.kind;
+      const resumeToken = interaction.resume_token?.trim();
+      if (!kind || !resumeToken) return;
+      setRunActionBusy(true);
+      setRunActionErr(null);
+      try {
+        const responseText = interactionDrafts[resumeToken] ?? "";
+        const j = await callResolveRunInteraction({
+          companyId,
+          runId: liveRun.runId,
+          interaction: {
+            kind,
+            resume_token: resumeToken,
+            tool_name: interaction.tool_name,
+            call_id: interaction.call_id ?? null,
+            message: interaction.message,
+          },
+          action,
+          responseText: action === "respond" ? responseText : undefined,
+        });
+        const nextPending = Array.isArray(j.pending_interactions)
+          ? (j.pending_interactions.filter(
+              (x): x is PendingInteraction =>
+                !!x && typeof x === "object" && !Array.isArray(x),
+            ) as PendingInteraction[])
+          : (liveRun.pendingInteractions ?? []).filter((x) => x.resume_token !== resumeToken);
+        setLiveRun((prev) =>
+          prev
+            ? {
+                ...prev,
+                pendingInteractions: nextPending,
+                summary: `Interaction ${action}ed for ${interaction.tool_name ?? "tool"}.`,
+              }
+            : prev,
+        );
+        setInteractionDrafts((prev) => {
+          const { [resumeToken]: _omit, ...rest } = prev;
+          return rest;
+        });
+        setRunNeedsApproval(nextPending.length > 0);
+        pushRunTimeline({
+          runId: liveRun.runId,
+          phase: "resume",
+          message: `${(kind ?? "interaction").toUpperCase()} ${action}ed by operator.`,
+          toolName: interaction.tool_name ?? null,
+          callId: interaction.call_id ?? null,
+        });
+        await refreshWorkspace();
+      } catch (e) {
+        setRunActionErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setRunActionBusy(false);
+      }
+    },
+    [companyId, interactionDrafts, liveRun, pushRunTimeline, refreshWorkspace],
+  );
+
   const threadNotes = chatPersona ? channels[chatPersona]?.notes ?? [] : [];
   const visibleNotes = threadNotes.slice(-24);
   const showChat = chatPersona.length > 0;
   const humanLabel = selectedRow?.title?.trim() || selectedRow?.role?.trim() || chatPersona;
   const harnessSnapshot = useMemo(() => turnHarnessRef.current.getItems(), [harnessUiVersion]);
   const harnessLayoutActive = showChat && (sending || thinking || harnessSnapshot.length > 0);
+  const currentTurnNumber = Math.max(1, visibleNotes.filter((n) => n.actor === "operator").length + (harnessLayoutActive ? 1 : 0));
+  const activeToolCount = useMemo(
+    () => mergeRuntimeToolEventsByCallId(mergeToolEventLists(channels[chatPersona]?.toolEvents ?? [], liveToolEvents)).length,
+    [channels, chatPersona, liveToolEvents],
+  );
+  const activeSessionState = thinking || liveRun?.status === "running" ? "running" : liveRun?.status ?? "ready";
+  const appendQuickCommand = useCallback((text: string) => {
+    setDraft((prev) => {
+      const p = prev.trimEnd();
+      if (text.startsWith("/") && p && !p.startsWith("/")) {
+        return `${text}${p}`;
+      }
+      return p ? `${p}\n${text}` : text;
+    });
+    requestAnimationFrame(() => chatInputRef.current?.focus());
+  }, []);
   const transcriptItems = useMemo((): ChatTranscriptItem[] => {
     if (harnessLayoutActive) {
       return visibleNotes.map((note, i) => ({
@@ -2619,6 +3011,65 @@ export function WorkspaceRightRail() {
               ) : (
                 <p className="font-mono text-[9px] text-[#555555]">Tool traces stream in the transcript above.</p>
               )}
+              <p className="font-mono text-[9px] text-[#666666]">
+                todo {liveRun.todoQueue?.length ?? 0} · subagents {liveRun.subagentTasks?.length ?? 0} · bridge{" "}
+                {liveRun.bridgeProxy?.status ?? "idle"}
+                {typeof liveRun.bridgeProxy?.call_count === "number"
+                  ? ` (${liveRun.bridgeProxy.call_count} calls)`
+                  : ""}
+              </p>
+              <div className="mt-1.5 space-y-1.5 rounded border border-[#2b2b2b] bg-black/40 p-2">
+                <p className="font-mono text-[9px] uppercase tracking-wide text-[#8ea3bd]">Operational State</p>
+                <div className="space-y-1">
+                  <p className="font-mono text-[9px] text-[#7f8b99]">
+                    Todos ({liveRun.todoQueue?.length ?? 0})
+                  </p>
+                  {Array.isArray(liveRun.todoQueue) && liveRun.todoQueue.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {liveRun.todoQueue.slice(0, 8).map((todo, idx) => (
+                        <p key={`${todo.id ?? "todo"}:${idx}`} className="font-mono text-[9px] text-[#a7b3c2]">
+                          [{todo.status ?? "pending"}] {todo.id ?? "todo"} · {todo.content ?? ""}
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="font-mono text-[9px] text-[#555555]">No todo items captured yet.</p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <p className="font-mono text-[9px] text-[#7f8b99]">
+                    Subagents ({liveRun.subagentTasks?.length ?? 0})
+                  </p>
+                  {Array.isArray(liveRun.subagentTasks) && liveRun.subagentTasks.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {liveRun.subagentTasks.slice(0, 8).map((task, idx) => (
+                        <p key={`${task.id ?? "subagent"}:${idx}`} className="font-mono text-[9px] text-[#a7b3c2]">
+                          [{task.status ?? "running"}] {task.subagent_type ?? "subagent"} ·{" "}
+                          {task.description ?? task.id ?? "task"}
+                          {task.model ? ` · ${task.model}` : ""}
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="font-mono text-[9px] text-[#555555]">No subagent tasks observed yet.</p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <p className="font-mono text-[9px] text-[#7f8b99]">Bridge / Proxy</p>
+                  <p className="font-mono text-[9px] text-[#a7b3c2]">
+                    mode {liveRun.bridgeProxy?.mode ?? "local"} · status {liveRun.bridgeProxy?.status ?? "idle"} ·
+                    last tool {liveRun.bridgeProxy?.last_tool ?? "—"}
+                  </p>
+                  <p className="font-mono text-[9px] text-[#a7b3c2]">
+                    last MCP {liveRun.bridgeProxy?.last_mcp_server ?? "—"} / {liveRun.bridgeProxy?.last_mcp_tool ?? "—"}
+                  </p>
+                  {liveRun.bridgeProxy?.last_error ? (
+                    <p className="line-clamp-2 font-mono text-[9px] text-rose-200">
+                      error: {liveRun.bridgeProxy.last_error}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
             </div>
             <button
               type="button"
@@ -2657,7 +3108,67 @@ export function WorkspaceRightRail() {
           ) : null}
           {runNeedsApproval ? (
             <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5">
-              <p className="font-mono text-[10px] text-amber-200">Blocked tool action queued for operator approval.</p>
+              <p className="font-mono text-[10px] text-amber-200">
+                Blocked runtime interaction queued for operator action.
+              </p>
+              {Array.isArray(liveRun.pendingInteractions) && liveRun.pendingInteractions.length > 0 ? (
+                <div className="mt-1 space-y-1 rounded border border-amber-400/20 bg-black/30 p-1.5">
+                  {liveRun.pendingInteractions.slice(0, 4).map((it, idx) => (
+                    <div key={`${it.resume_token ?? "pending"}:${idx}`} className="space-y-1 rounded border border-amber-300/10 p-1">
+                      <p className="font-mono text-[9px] text-amber-100">
+                        {(it.kind ?? "approval").toUpperCase()} · {it.tool_name ?? "tool"}
+                        {it.call_id ? ` (${it.call_id})` : ""}
+                        {it.resume_token ? ` · token ${it.resume_token.slice(0, 8)}…` : ""}
+                      </p>
+                      {it.message ? <p className="font-mono text-[9px] text-amber-50/80">{it.message}</p> : null}
+                      {it.kind === "elicitation" && it.resume_token ? (
+                        <Textarea
+                          value={interactionDrafts[it.resume_token] ?? ""}
+                          onChange={(e) =>
+                            setInteractionDrafts((prev) => ({
+                              ...prev,
+                              [it.resume_token!]: e.target.value,
+                            }))
+                          }
+                          placeholder="Optional response payload text…"
+                          className="min-h-14 border-amber-400/20 bg-black/40 font-mono text-[10px] text-amber-50 placeholder:text-amber-100/30"
+                        />
+                      ) : null}
+                      <div className="flex flex-wrap gap-1">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={runActionBusy || !it.resume_token}
+                          className="border-emerald-500/40 bg-transparent font-mono text-[10px] text-emerald-200 hover:bg-emerald-500/10"
+                          onClick={() => void resolvePendingInteraction(it, "approve")}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={runActionBusy || !it.resume_token}
+                          className="border-rose-500/40 bg-transparent font-mono text-[10px] text-rose-200 hover:bg-rose-500/10"
+                          onClick={() => void resolvePendingInteraction(it, "reject")}
+                        >
+                          Reject
+                        </Button>
+                        {it.kind === "elicitation" ? (
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            disabled={runActionBusy || !it.resume_token}
+                            className="border-sky-500/40 bg-transparent font-mono text-[10px] text-sky-200 hover:bg-sky-500/10"
+                            onClick={() => void resolvePendingInteraction(it, "respond")}
+                          >
+                            Respond
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <Link
                   href="/workspace/approvals"
@@ -2672,7 +3183,7 @@ export function WorkspaceRightRail() {
                   disabled={runActionBusy}
                   onClick={() => void resumeBlockedRun()}
                 >
-                  {runActionBusy ? "Working…" : "Resume Run"}
+                  {runActionBusy ? "Working…" : "Resume / Continue"}
                 </Button>
               </div>
             </div>
@@ -2879,28 +3390,40 @@ export function WorkspaceRightRail() {
         </>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="shrink-0 border-b border-[#222222] px-3 pb-3 pt-2">
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "size-2 shrink-0 rounded-full bg-[#4A9E5C]",
-                  workingPersonas.has(chatPersona) && "nd-agent-status-dot--busy",
-                )}
-                aria-hidden
-              />
-              <Bot className="size-4 shrink-0 text-[#666666]" strokeWidth={1.5} />
-              <p className="min-w-0 flex-1 truncate font-mono text-sm text-[#e8e8e8]">{chatPersona}</p>
-              <span
-                className="hidden max-w-[9rem] truncate rounded border border-[#333333] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.06em] text-[#e8e8e8] sm:inline-block"
-                title={rolePillText(selectedRow)}
-              >
-                {rolePillText(selectedRow)}
-              </span>
+          <div className="nd-agent-cockpit shrink-0 border-b border-[#223021] px-3 pb-3 pt-2">
+            <div className="flex items-start gap-2">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#314025] bg-[#141b0f] text-[#b7e36b] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                <Bot className="size-4" strokeWidth={1.5} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={cn(
+                      "size-2 shrink-0 rounded-full bg-[#9bd64d]",
+                      workingPersonas.has(chatPersona) && "nd-agent-status-dot--busy",
+                    )}
+                    aria-hidden
+                  />
+                  <p className="min-w-0 flex-1 truncate font-mono text-[15px] font-semibold tracking-tight text-[#f2f7e8]">
+                    {chatPersona}
+                  </p>
+                  <span
+                    className="hidden max-w-[9rem] truncate rounded border border-[#34422a] bg-[#0b1008] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.08em] text-[#d7e8bd] sm:inline-block"
+                    title={rolePillText(selectedRow)}
+                  >
+                    {rolePillText(selectedRow)}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[#8d997e]">
+                  {humanLabel} runs as a persistent coding session: workspace context, tool trace, VM overlay, and
+                  SmolVM verification stay visible while it works.
+                </p>
+              </div>
               <button
                 type="button"
                 title="Reset agent chat session cache"
                 onClick={resetAgentSessionCache}
-                className="flex size-8 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+                className="flex size-8 shrink-0 items-center justify-center rounded-md border border-transparent text-[#70805f] hover:border-[#2d3a25] hover:bg-[#10170c] hover:text-[#e8f7d5]"
               >
                 <RefreshCw className="size-4" strokeWidth={1.5} />
               </button>
@@ -2908,28 +3431,50 @@ export function WorkspaceRightRail() {
                 type="button"
                 title="Close"
                 onClick={clearAgent}
-                className="flex size-8 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
+                className="flex size-8 shrink-0 items-center justify-center rounded-md border border-transparent text-[#70805f] hover:border-[#2d3a25] hover:bg-[#10170c] hover:text-[#e8f7d5]"
               >
                 <X className="size-4" strokeWidth={1.5} />
               </button>
             </div>
-            <p className="mt-2 pl-6 text-[11px] leading-relaxed text-[#666666]">
-              {humanLabel} — messages become tasks assigned to this agent.
+
+            <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              <div className="nd-agent-cockpit__stat">
+                <span>Session</span>
+                <strong>{activeSessionState}</strong>
+              </div>
+              <div className="nd-agent-cockpit__stat">
+                <span>Turns</span>
+                <strong>{formatTurnOrdinal(Math.max(1, currentTurnNumber))}</strong>
+              </div>
+              <div className="nd-agent-cockpit__stat">
+                <span>Tools</span>
+                <strong>{activeToolCount}</strong>
+              </div>
+              <div className="nd-agent-cockpit__stat">
+                <span>Runtime</span>
+                <strong>SmolVM</strong>
+              </div>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <span className="rounded-full border border-[#314025] bg-[#10170c] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-[#9db88a]">
+                VM overlay staged
+              </span>
+              <span className="rounded-full border border-[#314025] bg-[#10170c] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-[#9db88a]">
+                Apply after review
+              </span>
               {selectedRow?.registryId ? (
-                <>
-                  {" "}
-                  <Link
-                    href={`/workspace/agents/${selectedRow.registryId}?tab=workspace`}
-                    className="font-medium text-[#e8e8e8] underline-offset-4 hover:underline"
-                  >
-                    Workspace files
-                  </Link>
-                  , memory, and skills live on the full agent page.
-                </>
+                <Link
+                  href={`/workspace/agents/${selectedRow.registryId}?tab=workspace`}
+                  className="rounded-full border border-[#314025] bg-[#10170c] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-[#d7e8bd] hover:border-[#607a42]"
+                >
+                  Workspace files
+                </Link>
               ) : null}
-            </p>
+            </div>
+
             <span
-              className="mt-2 inline-block max-w-full truncate rounded border border-[#333333] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.06em] text-[#e8e8e8] sm:hidden"
+              className="mt-2 inline-block max-w-full truncate rounded border border-[#34422a] bg-[#0b1008] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.08em] text-[#d7e8bd] sm:hidden"
               title={rolePillText(selectedRow)}
             >
               {rolePillText(selectedRow)}
@@ -2963,13 +3508,16 @@ export function WorkspaceRightRail() {
                 {transcriptItems.map((item) => {
                   if (item.kind === "note") {
                     const n = item.note;
+                    const isUser = n.actor === "operator" || n.actor === "operator_resume";
                     return (
-                      <div key={item.key} className="text-xs leading-snug">
-                        <span className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
-                          {noteActorTranscriptLabel(n.actor)}
-                          {n.at ? ` · ${n.at.slice(0, 19)}` : ""}
-                        </span>
-                        <div className="mt-1">
+                      <OperatorTimelineRow
+                        key={item.key}
+                        tone={isUser ? "user" : "assistant"}
+                        time={n.at ? formatTimelineClock(isoToMs(n.at)) : undefined}
+                        label={isUser ? "User" : "Assistant"}
+                        headline={isUser ? undefined : noteActorTranscriptLabel(n.actor)}
+                      >
+                        <div className="text-xs leading-snug">
                           {item.typing && typeoutNote ? (
                             <div className="nd-stream-assistant__body">
                               <div className="min-w-0 flex-1">
@@ -2986,17 +3534,16 @@ export function WorkspaceRightRail() {
                             <WorkspaceMarkdownBody text={n.text} />
                           )}
                         </div>
-                      </div>
+                      </OperatorTimelineRow>
                     );
                   }
                   if (item.kind === "tool") {
                     return <OperatorTranscriptToolRow key={item.key} event={item.event} />;
                   }
                   return (
-                    <div key={item.key} className="border-t border-[#222222] py-2">
-                      <p className="nd-label">RUNTIME</p>
+                    <OperatorTimelineRow key={item.key} tone="runtime" label="Runtime">
                       <p className="mt-1 font-mono text-[11px] leading-snug text-[#999999]">{item.text}</p>
-                    </div>
+                    </OperatorTimelineRow>
                   );
                 })}
                 {harnessLayoutActive ? (
@@ -3004,6 +3551,7 @@ export function WorkspaceRightRail() {
                     items={harnessSnapshot}
                     thinking={thinking}
                     chatPersona={chatPersona}
+                    turnNumber={currentTurnNumber}
                   />
                 ) : null}
               </div>
@@ -3021,12 +3569,29 @@ export function WorkspaceRightRail() {
             </div>
           ) : null}
 
-          <div className="shrink-0 border-t border-[#222222] bg-[#0a0a0a] p-3">
+          <div className="nd-agent-composer shrink-0 border-t border-[#26321f] p-3">
             {sendErr ? (
               <p className="mb-2 font-mono text-[10px] uppercase tracking-wide text-[#D4A843]">
                 [ERROR: {sendErr}]
               </p>
             ) : null}
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 font-mono text-[9px] uppercase tracking-[0.12em] text-[#758267]">
+                Commands
+              </span>
+              {AGENT_CHAT_QUICK_COMMANDS.map((cmd) => (
+                <button
+                  key={cmd.label}
+                  type="button"
+                  disabled={sending}
+                  onClick={() => appendQuickCommand(cmd.text)}
+                  className="rounded border border-[#2f3b27] bg-[#0b1008] px-2 py-1 font-mono text-[10px] text-[#b8d59b] transition-colors hover:border-[#5d783e] hover:bg-[#151f0f] disabled:cursor-not-allowed disabled:opacity-50"
+                  title={cmd.text}
+                >
+                  {cmd.label}
+                </button>
+              ))}
+            </div>
             <div className="flex gap-2">
               <Textarea
                 ref={chatInputRef}
@@ -3039,10 +3604,10 @@ export function WorkspaceRightRail() {
                   e.preventDefault();
                   void sendHandoff();
                 }}
-                placeholder={`Message ${chatPersona}… (Enter send · Shift+Enter new line)`}
+                placeholder={`Message ${chatPersona}…`}
                 rows={2}
                 disabled={sending}
-                className="min-h-[44px] flex-1 resize-none border-[#333333] bg-black font-sans text-sm text-[#e8e8e8] placeholder:text-[#555555] focus-visible:border-[#555555] focus-visible:ring-1 focus-visible:ring-[#444444]"
+                className="min-h-[48px] flex-1 resize-none border-[#36432d] bg-[#050805] font-sans text-sm text-[#edf5e5] placeholder:text-[#6f7b64] focus-visible:border-[#8fb95d] focus-visible:ring-1 focus-visible:ring-[#4f682f]"
               />
               <Button
                 type="button"
@@ -3050,11 +3615,15 @@ export function WorkspaceRightRail() {
                 size="icon"
                 disabled={sending}
                 title="Send"
-                className="size-11 shrink-0 border-[#333333] bg-black text-[#e8e8e8] hover:bg-white/[0.08]"
+                className="size-12 shrink-0 border-[#4a5d35] bg-[#11190b] text-[#e6ffd0] hover:bg-[#1b2812]"
                 onClick={() => void sendHandoff()}
               >
                 <Send className="size-4" strokeWidth={1.5} />
               </Button>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.08em] text-[#657159]">
+              <span>Enter send · Shift+Enter newline</span>
+              <span>Plan → Act → Verify → Apply/Discard</span>
             </div>
           </div>
         </div>
