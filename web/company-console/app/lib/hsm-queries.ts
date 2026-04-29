@@ -28,6 +28,7 @@ import type {
   HsmOperatorInbox,
   HsmSpendSummaryRow,
   HsmTaskRow,
+  HsmMissionControlSummary,
 } from "./hsm-api-types";
 
 export function getApiBase(): string {
@@ -424,7 +425,9 @@ export function useSkillBank(apiBase: string, companyId: string | null) {
   return useQuery({
     queryKey: ["hsm", "skill-bank", apiBase, companyId],
     queryFn: async () => {
-      const r = await fetch(`${apiBase}/api/company/companies/${companyId}/skills/bank`);
+      const r = await fetch(
+        `${apiBase}/api/company/companies/${companyId}/skills/bank?include_body=0&max_body_bytes=0`,
+      );
       const j = await readJsonObject(r);
       if (!r.ok) {
         throw new Error(getErrorMessage(j, `skill-bank ${r.status}`));
@@ -438,6 +441,22 @@ export function useSkillBank(apiBase: string, companyId: string | null) {
     },
     enabled: !!companyId,
   });
+}
+
+export async function fetchSkillBankEntry(
+  apiBase: string,
+  companyId: string,
+  slug: string,
+): Promise<HsmSkillBankEntry> {
+  const q = new URLSearchParams({ slug });
+  const r = await fetch(
+    `${apiBase}/api/company/companies/${companyId}/skills/bank/entry?${q.toString()}`,
+  );
+  const j = await readJsonObject(r);
+  if (!r.ok) {
+    throw new Error(getErrorMessage(j, `skill-bank-entry ${r.status}`));
+  }
+  return asObject(j.skill) as HsmSkillBankEntry;
 }
 
 export function useBrowserProviders(apiBase: string, companyId: string | null) {
@@ -567,6 +586,20 @@ export function useOperatorInbox(apiBase: string, companyId: string | null) {
       const j = await readJsonObject(r);
       if (!r.ok) throw new Error(getErrorMessage(j, `operator inbox ${r.status}`));
       return j as HsmOperatorInbox;
+    },
+    enabled: !!companyId,
+    refetchInterval: 10_000,
+  });
+}
+
+export function useMissionControl(apiBase: string, companyId: string | null) {
+  return useQuery({
+    queryKey: ["hsm", "mission-control", apiBase, companyId],
+    queryFn: async () => {
+      const r = await fetch(companyOsUrl(apiBase, `/api/company/companies/${companyId}/mission-control`));
+      const j = await readJsonObject(r);
+      if (!r.ok) throw new Error(getErrorMessage(j, `mission-control ${r.status}`));
+      return j as HsmMissionControlSummary;
     },
     enabled: !!companyId,
     refetchInterval: 10_000,

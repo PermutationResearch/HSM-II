@@ -31,7 +31,6 @@ import {
   looksLikeQuickToolIntent,
   looksLikeRepoInfoQuestion,
   looksLikeSkillsOrCatalogQuestion,
-  parseAgentChatSlashCommand,
   operatorChatQuickToolPromptMode,
   executeTaskAction,
   operatorChatShouldRouteWorker,
@@ -41,7 +40,6 @@ import {
   resolveAgentForPersona,
   saveCompactionToMemory,
   isThinHarnessModel,
-  slashCommandWorkerInstruction,
   type WorkerDispatchResult,
   UPSTREAM,
   upsertThreadSessionState,
@@ -790,7 +788,7 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
   let agentRegistryId: string | undefined;
   let agentAdapterConfig: Record<string, unknown> | null = null;
   let detectedSkill: string | null = null;
-  let slashCommand: ReturnType<typeof parseAgentChatSlashCommand> = null;
+  let slashCommand: { kind: "skill" | "run"; skillSlug?: string } | null = null;
 
   if (companyId) {
     const { agentRegistryId: aid, allKnownSlugs, agentAdapterConfig: cfg } = await resolveAgentForPersona(
@@ -799,19 +797,17 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     );
     agentRegistryId = aid;
     agentAdapterConfig = cfg;
-    slashCommand = parseAgentChatSlashCommand(rawLastOperatorText, allKnownSlugs);
-    if (slashCommand) {
-      lastOperatorText = slashCommandWorkerInstruction(slashCommand);
-      if (slashCommand.kind === "skill" && slashCommand.skillSlug) {
+    const trimmed = rawLastOperatorText.trim();
+    if (trimmed.startsWith("/run ")) {
+      slashCommand = { kind: "run", skillSlug: trimmed.slice("/run ".length).trim() || undefined };
+    }
+    if (trimmed.startsWith("/skill ")) {
+      slashCommand = { kind: "skill", skillSlug: trimmed.slice("/skill ".length).trim() || undefined };
+      if (slashCommand.skillSlug) {
         detectedSkill = slashCommand.skillSlug;
       }
-      await write({
-        type: "phase",
-        phase: "slash_command",
-        command: slashCommand.kind,
-        skill: slashCommand.kind === "skill" ? slashCommand.skillSlug : undefined,
-      });
-    } else {
+    }
+    if (!detectedSkill) {
       detectedSkill = detectSkillDispatch(notes, allKnownSlugs);
     }
   }

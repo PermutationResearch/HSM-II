@@ -181,6 +181,36 @@ export async function callResumeRun(payload: {
   };
 }
 
+export async function callResolveRunInteraction(payload: {
+  companyId: string;
+  runId: string;
+  interaction: {
+    kind: "approval" | "elicitation";
+    resume_token: string;
+    tool_name?: string;
+    call_id?: string | null;
+    message?: string;
+  };
+  action: "approve" | "reject" | "respond";
+  responseText?: string;
+}): Promise<{ ok: boolean; loop_state?: string; pending_interactions?: unknown[] }> {
+  const res = await fetch("/api/agent-runs/interaction", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const json = await readJson(res);
+  if (!res.ok) {
+    throw new Error(errorFromJson(json, res.statusText));
+  }
+  const o = asObject(json);
+  return {
+    ok: o?.ok === true,
+    loop_state: typeof o?.loop_state === "string" ? o.loop_state : undefined,
+    pending_interactions: Array.isArray(o?.pending_interactions) ? o.pending_interactions : undefined,
+  };
+}
+
 export function ensureOk(json: unknown): asserts json is { ok: true } & ApiErrorShape {
   const o = asObject(json);
   if (!o || o.ok !== true) {

@@ -2,7 +2,9 @@
  * Shared server-only helpers for operator chat + skill execution (OpenRouter + Company OS).
  */
 
+import { execFile } from "node:child_process";
 import { canTransitionRunLoopState, type RunLoopState } from "@/app/lib/runtime-contract";
+import { extractReplyFromChatCompletionPayload } from "@/app/lib/llm-text-content";
 
 export const UPSTREAM = (process.env.HSM_CONSOLE_URL ?? "http://127.0.0.1:3847").replace(/\/+$/, "");
 export const OR_BASE = (process.env.OPENROUTER_API_BASE ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
@@ -16,14 +18,37 @@ export function readOpenRouterApiKey(): string | undefined {
 }
 
 export function normalizeModel(m: string): string {
-  return m.replace(/^openrouter\//, "");
+  const t = m.trim();
+  if (!t.startsWith("openrouter/")) return t;
+  const rest = t.slice("openrouter/".length);
+  // Keep OpenRouter-native ids like `openrouter/elephant-alpha`.
+  // Strip only wrapper ids like `openrouter/openai/gpt-4o`.
+  return rest.includes("/") ? rest : t;
 }
 
-const DEFAULT_MODEL = "openai/gpt-oss-120b:free";
+const DEFAULT_MODEL = "openrouter/elephant-alpha";
 
 export const CHAT_MODEL = normalizeModel(
   process.env.HSM_AGENT_CHAT_MODEL ?? process.env.DEFAULT_LLM_MODEL ?? DEFAULT_MODEL,
 );
+
+/**
+ * Shared harness contract addendum used by worker-sidecar prompts.
+ * Kept exported so stream routes can import without duplicating policy text.
+ */
+export function companyOsHarnessAddendum(mode: "default" | "companion" = "default"): string {
+  const core = [
+    "You are operating inside the Company OS harness.",
+    "Use tools for actionable repo/workspace requests.",
+    "Keep responses concise and grounded in tool output.",
+  ];
+  if (mode === "companion") {
+    core.push(
+      "You are a sidecar stream: summarize intent/progress briefly while runtime tool events stream separately.",
+    );
+  }
+  return core.join("\n");
+}
 
 export type StigNote = { at: string; actor: string; text: string };
 
@@ -32,11 +57,683 @@ export type OptimizeCommand =
   | { kind: "signature"; signatureName: string }
   | { kind: "task" };
 
+const OLLAMA_BASE = (process.env.OLLAMA_URL ?? process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(
+  /\/+$/,
+  "",
+);
+const DEFAULT_OLLAMA_MODEL = "llama3.2";
+
+export type AgentChatBackend =
+  | { provider: "openrouter"; label: "openrouter"; model: string; baseUrl: string; apiKey: string }
+  | { provider: "ollama"; label: "ollama"; model: string; baseUrl: string };
+
+/** Resolve conversational backend for Next operator chat routes. */
+export function readAgentChatBackend(): AgentChatBackend | null {
+  const provider = (process.env.HSM_AGENT_CHAT_PROVIDER ?? "").trim().toLowerCase();
+  const openRouterKey = readOpenRouterApiKey();
+  if (provider === "openrouter") {
+    return openRouterKey
+      ? {
+          provider: "openrouter",
+          label: "openrouter",
+          model: CHAT_MODEL,
+          baseUrl: OR_BASE,
+          apiKey: openRouterKey,
+        }
+      : null;
+  }
+  if (provider === "ollama") {
+    return {
+      provider: "ollama",
+      label: "ollama",
+      model: process.env.HSM_AGENT_CHAT_MODEL ?? process.env.OLLAMA_MODEL ?? DEFAULT_OLLAMA_MODEL,
+      baseUrl: OLLAMA_BASE,
+    };
+  }
+  if (openRouterKey) {
+    return {
+      provider: "openrouter",
+      label: "openrouter",
+      model: CHAT_MODEL,
+      baseUrl: OR_BASE,
+      apiKey: openRouterKey,
+    };
+  }
+  return {
+    provider: "ollama",
+    label: "ollama",
+    model: process.env.HSM_AGENT_CHAT_MODEL ?? process.env.OLLAMA_MODEL ?? DEFAULT_OLLAMA_MODEL,
+    baseUrl: OLLAMA_BASE,
+  };
+}
+
 export function looksLikeExecutionIntent(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (!t) return false;
-  return /^(please\s+)?(run|do|execute|fix|implement|build|search|grep|read|edit|write|analyze)\b/.test(t);
+  // Strong signal: message starts with an action verb (imperative).
+  if (
+    /^(please\s+)?(run|do|execute|fix|implement|build|search|grep|read|edit|write|analyze|check|verify|look|find|show|inspect|test|deploy|review|validate|list|create|delete|remove|refactor|debug|investigate|fetch|pull|push|diff|lint|format|compile|install|update|patch)\b/.test(
+      t,
+    )
+  )
+    return true;
+  // Weaker signal: contains an action verb paired with a tool-work object anywhere in the message.
+  const hasToolVerb =
+    /\b(check|verify|inspect|validate|confirm|investigate|look\s+(?:at|into|for)|find\s+(?:all|where|any|the)|show\s+(?:me|the))\b/i.test(
+      t,
+    );
+  const hasToolObject =
+    /\b(test|tests|build|error|bug|issue|file|repo|code|workspace|log|output|result|function|method|class|module|route|endpoint|migration|schema)\b/i.test(
+      t,
+    );
+  return hasToolVerb && hasToolObject;
 }
+
+export const QUICK_TOOL_PATH_SEGMENT_ROOTS =
+  "src|apps|web|crates|packages|lib|tests?|scripts|\\.github|docs|migrations|app|components|pages|api|server|infra|tools|skills|e2e|playwright|benchmarks|examples|contracts|proto|internal|pkg|cmd";
+
+export function looksLikeCodingToolIntentBody(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/```/.test(text)) return true;
+  if (/`[^`\n]{4,200}`/.test(text)) return true;
+  if (/\b(src\/|apps\/|web\/|crates\/|packages\/|lib\/|tests?\/|scripts\/|\.github\/)\S+/i.test(text)) return true;
+  if (/\S+\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|go|py|toml|json|ya?ml|md|sh)\b/i.test(text)) return true;
+  if (/\b(cargo|pnpm|npm|yarn|npx|bun|git|make|cmake|pytest|jest|vitest|deno|docker|kubectl)\s+/i.test(text)) return true;
+  if (/\b(Cargo\.toml|package\.json|pnpm-lock|Dockerfile|go\.mod)\b/i.test(text)) return true;
+  if (/\b(bug|stack\s*trace|TypeError|panic|undefined is not|failing test|test failed)\b/i.test(text)) return true;
+  return false;
+}
+
+export function looksLikeCodingToolIntent(text: string): boolean {
+  return looksLikeExecutionIntent(text) || looksLikeCodingToolIntentBody(text);
+}
+
+/** Very short social replies — keep on conversational LLM when worker-first mode is on. */
+export function looksPurelyConversationalChitChat(text: string): boolean {
+  const t = text.trim();
+  if (t.length > 120) return false;
+  if (/[/`]/.test(t)) return false;
+  if (/\.\w{1,6}\b/.test(t)) return false;
+  // Require the greeting/ack word fills the WHOLE message — "ok, please fix the bug" is not chitchat.
+  return (
+    /^(hi|hello|hey|thanks|thank you|thx|ok+|okay|yes|no|bye|good morning|good night)[\s!.?,]*$/i.test(t) || t.length <= 4
+  );
+}
+
+export function looksLikeQuickToolIntent(text: string): boolean {
+  if (process.env.HSM_OPERATOR_CHAT_DISABLE_QUICK_TOOL === "1") return false;
+  const t = text.trim();
+  if (!t || t.length > 12_000) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  if (/```/.test(text)) return false;
+  const ext =
+    "ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|go|py|toml|json|ya?ml|md|sh|html|htm|css|scss|less|sql|graphql|vue|svelte|kt|kts|java|rb|ex|exs|swift|cpp|hpp|cc|hh|c|h|zsh|fish|ps1|lock|wasm|wgsl|txt|ini|nix|bazel|bzl|gradle";
+  const seg = QUICK_TOOL_PATH_SEGMENT_ROOTS;
+  const segmentPath = new RegExp(`\\b(?:${seg})\\/\\S+`, "i");
+  const relDotPath = /(?:^|[\s([{<,])\.{1,2}\/[\w./-]+/i.test(t);
+  const deepRelFile = new RegExp(`[\\w.-]+(?:\\/[\\w.-]+)+\\.(?:${ext})\\b`, "i");
+  const backtickPathLike = /`[^`\n]*(?:\/|\.\/|\.\.\/)[^`\n]{1,240}`/i.test(t);
+  const backtickFileish = new RegExp("`[^`\\n]{1,240}\\.(?:" + ext + ")\\b[^`\\n]{0,40}`", "i").test(t);
+  const fileWithExt = new RegExp(`\\b[\\w./-]*[\\w.-]+\\.(?:${ext})\\b`, "i");
+  const hasPathLike =
+    segmentPath.test(t) ||
+    relDotPath ||
+    deepRelFile.test(t) ||
+    /\bCargo\.toml\b|\bpackage\.json\b|\bpnpm-lock\.yaml\b|\bDockerfile\b|\bgo\.mod\b|\bflake\.nix\b|\b(?:WORKSPACE|MODULE\.bazel)\b/i.test(
+      t,
+    ) ||
+    backtickPathLike ||
+    backtickFileish ||
+    fileWithExt.test(t) ||
+    /`[^`\n]{2,260}`/.test(t);
+  if (!hasPathLike) return false;
+  const readPhrasing =
+    /\b(can you|could you|please)\s+(read|open|show|view|display|print|peek at|pull up|grab|load)\b/i.test(t) ||
+    /\b(show me|let me see|i(?:'d)?\s+like to see|i need to see|want to see|take a look at)\b/i.test(t) ||
+    /\b(what'?s?\s+in|what is in|contents of|content of|look inside|open up|snippet from|paste)\b/i.test(t) ||
+    /\b(read|open|view|show)\s+[`'"]?[\w./-]/i.test(t) ||
+    /\b(head|tail)\s+[`'"]?[\w./-]/i.test(t) ||
+    /\b(grep|rg)\b.{0,160}\bin\b/i.test(t);
+  const editPhrasing =
+    /\b(can you|could you|please)\s+(change|update|edit|modify|patch|fix|replace|rename)\b/i.test(t) ||
+    new RegExp(
+      "\\b(change|update|edit|modify|replace|append to|delete|remove from)\\s+.{0,140}(`[^`]{2,200}`|\\./|(?:src|web|apps|lib|tests?|app|components)/|\\S+\\.(?:" +
+        ext +
+        ")\\b)",
+      "i",
+    ).test(t);
+  return readPhrasing || editPhrasing;
+}
+
+export function looksLikeSkillsOrCatalogQuestion(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 8000) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  const mentionsSkills =
+    /\bskills?\b/i.test(t) ||
+    /\bSKILL\.md\b/i.test(t) ||
+    /\bskill_md_read\b/i.test(t) ||
+    /\bskills_list\b/i.test(t);
+  if (!mentionsSkills) return false;
+  return (
+    /\b(what'?s?\s+in|what\s+is\s+in|tell me|show me|describe|list|contents?|catalog)\b/i.test(t) ||
+    /\bwhat\b/i.test(t) || // "what skills does the company have?" — bare 'what' + mentionsSkills is enough
+    /\b(integrat|added|merged|paperclip|on[- ]disk|repo)\b/i.test(t) ||
+    /\b(can you|could you|please)\b/i.test(t)
+  );
+}
+
+export function looksLikeImplicitWorkspacePointer(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 600) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  if (/\b(?:run|execute|dispatch)\s+/.test(t)) return false;
+  return (
+    /\b(?:it'?s|its)\s+in\s+(?:the\s+)?(?:files?|file|repo|repository|workspace|codebase|tree)\b/i.test(t) ||
+    /\bin\s+(?:the\s+)?(?:files?|repo|repository|workspace|codebase)\s+(?:here|already|now)\b/i.test(t) ||
+    /\blook\s+(?:in|at)\s+(?:the\s+)?(?:files?|repo|workspace)\b/i.test(t) ||
+    /\b(?:on|under)\s+dis(?:k|c)\b/i.test(t) ||
+    /\bfiles\b.*\bcompany\b/i.test(t) ||
+    /\bwhat(?:'s|s|\s+are)\s+(?:the\s+)?files\b.*\bcompany\b/i.test(t) ||
+    /\bwhat\s+files\b.*\b(?:company|repo|workspace|codebase)\b/i.test(t) ||
+    /\bwhich\s+files\b.*\b(?:company|repo|workspace)\b/i.test(t) ||
+    /\b(list|enumerate|show)\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:files|directories|folders)\b.*\b(?:company|repo|workspace)\b/i.test(t)
+  );
+}
+
+export function looksLikeCapabilityQuestion(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 500) return false;
+  const asksCapability =
+    /\b(can you|could you|you can|are you able to|do you have access to|are you allowed to)\b/i.test(t) ||
+    /\bdo you (?:read|access|see|open|modify|edit|write)\b/i.test(t);
+  if (!asksCapability) return false;
+  const mentionsResources =
+    /\b(file|files|repo|repository|workspace|directory|folder|codebase|internal|company)\b/i.test(t);
+  if (!mentionsResources) return false;
+  const asksConcreteExecution =
+    /\b(please|go ahead|now|right now)\b/i.test(t) ||
+    /\b(read|open|show|list|edit|write|update|patch)\b.{0,140}\b(?:`[^`]+`|\.{1,2}\/|src\/|web\/|app\/|Cargo\.toml|package\.json)\b/i.test(
+      t,
+    );
+  return !asksConcreteExecution;
+}
+
+export function looksLikeRepoInfoQuestion(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 800) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  if (looksLikeCapabilityQuestion(text)) return false;
+  const asksForInfo = /\b(what(?:'s| is| are)?|which|show|list|enumerate|where)\b/i.test(t) || /\?$/.test(t);
+  if (!asksForInfo) return false;
+  const mentionsWorkObject =
+    /\b(file|files|repo|repository|workspace|codebase|directory|directories|folder|folders|tree|skill|skills)\b/i.test(
+      t,
+    );
+  if (!mentionsWorkObject) return false;
+  const impliesLocalContext =
+    /\b(internal|company|here|in (?:the )?(?:repo|repository|workspace|project|company)|of (?:the )?company)\b/i.test(
+      t,
+    );
+  return impliesLocalContext;
+}
+
+/**
+ * Technical/code questions that need workspace context to answer properly.
+ * These aren't imperative commands, but the worker should still handle them
+ * so it can read relevant files rather than hallucinating from training data.
+ *
+ * Examples that match:
+ *   "What does the SFT module do?"
+ *   "How does the execute-worker path work?"
+ *   "Why is the routing split into two files?"
+ *   "Explain the Hermes tool loop"
+ *   "Walk me through the agent loop"
+ */
+export function looksLikeTechnicalQuestion(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length < 15) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  if (looksLikeCapabilityQuestion(text)) return false;
+  // Must be question-shaped (ends with ? or starts with interrogative / explain verb)
+  const isQuestion =
+    /[?]$/.test(t) ||
+    /^(what|how|why|where|which|when|explain|describe|tell me(?:\s+about)?|walk me through|show me how|help me understand)\b/i.test(
+      t,
+    );
+  if (!isQuestion) return false;
+  // Must mention something code/project-specific so generic curiosity ("what time is it?") doesn't match.
+  return /\b(module|function|fn|method|class|struct|trait|impl|enum|type|interface|route|endpoint|schema|config|service|handler|middleware|guard|hook|component|util|helper|macro|plugin|provider|action|evaluator|worker|agent|loop|pipeline|trace|capture|sft|hermes|skill|tool|crate|lib|src|api|auth|token|session|db|database|query|migration|test|build|compile|deploy|task|persona|note|memory|workspace|repo|codebase|execute|dispatch|routing|streaming|agentic|runtime|harness)\b/i.test(
+    t,
+  );
+}
+
+export function looksLikeActionableWorkTurn(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (looksPurelyConversationalChitChat(text)) return false;
+  if (looksLikeCapabilityQuestion(text)) return false;
+  if (looksLikeRepoInfoQuestion(text)) return true;
+  if (looksLikeCodingToolIntent(text)) return true;
+  if (looksLikeQuickToolIntent(text)) return true;
+  if (looksLikeSkillsOrCatalogQuestion(text)) return true;
+  if (looksLikeImplicitWorkspacePointer(text)) return true;
+  if (looksLikeTechnicalQuestion(text)) return true;
+  const hasActionVerb =
+    /\b(run|execute|fix|implement|build|debug|refactor|analy(?:s|z)e|investigate|inspect|open|read|show|list|edit|write|update|patch|create|delete|remove)\b/i.test(
+      t,
+    );
+  const hasWorkObject =
+    /\b(file|files|repo|repository|workspace|code|task|issue|bug|test|tests|build|command|terminal|directory|folder|project|skill|skills|tool|tools)\b/i.test(
+      t,
+    );
+  return hasActionVerb && hasWorkObject;
+}
+
+export function operatorChatShouldRouteWorker(params: {
+  lastOperatorText: string;
+  hasChatBackend: boolean;
+}): {
+  routeWorker: boolean;
+  executionIntent: boolean;
+  codingIntent: boolean;
+  quickToolIntent: boolean;
+  reason: string;
+} {
+  const { lastOperatorText, hasChatBackend } = params;
+  const quickToolIntent = looksLikeQuickToolIntent(lastOperatorText);
+  const skillsCatalogQuestion = looksLikeSkillsOrCatalogQuestion(lastOperatorText);
+  const implicitWorkspace = looksLikeImplicitWorkspacePointer(lastOperatorText);
+  const actionableWork = looksLikeActionableWorkTurn(lastOperatorText);
+  const codingFromSignals =
+    looksLikeCodingToolIntent(lastOperatorText) || skillsCatalogQuestion || implicitWorkspace;
+  const codingIntent = codingFromSignals || quickToolIntent;
+  const executionIntent = looksLikeExecutionIntent(lastOperatorText) || codingIntent;
+
+  if (process.env.HSM_FORCE_OPERATOR_WORKER_DISPATCH === "1") {
+    return {
+      routeWorker: true,
+      executionIntent: looksLikeExecutionIntent(lastOperatorText) || codingIntent,
+      codingIntent,
+      quickToolIntent,
+      reason: "forced_worker_dispatch",
+    };
+  }
+  const workerFirst =
+    process.env.HSM_OPERATOR_CHAT_WORKER_FIRST === "1" ||
+    process.env.HSM_OPERATOR_CLAUDE_CODE_MODE === "1";
+  if (!hasChatBackend) {
+    return {
+      routeWorker: actionableWork,
+      executionIntent,
+      codingIntent,
+      quickToolIntent,
+      reason: actionableWork ? "no_chat_backend_actionable" : "no_chat_backend_conversational",
+    };
+  }
+  if (workerFirst && actionableWork) {
+    return {
+      routeWorker: true,
+      executionIntent,
+      codingIntent,
+      quickToolIntent,
+      reason: "worker_first_claude_code_mode",
+    };
+  }
+  if (executionIntent) {
+    const quickOnly =
+      quickToolIntent &&
+      !looksLikeCodingToolIntentBody(lastOperatorText) &&
+      !looksLikeExecutionIntent(lastOperatorText);
+    return {
+      routeWorker: true,
+      executionIntent,
+      codingIntent,
+      quickToolIntent,
+      reason: quickOnly ? "quick_tool_read_edit" : "execution_or_coding_intent",
+    };
+  }
+  // Actionable work (verb + work-object match, technical question, file signal, etc.)
+  // routes to the worker even when a conversational backend is available.
+  if (actionableWork) {
+    return {
+      routeWorker: true,
+      executionIntent,
+      codingIntent,
+      quickToolIntent,
+      reason: "actionable_work_turn",
+    };
+  }
+
+  // ── Default: route non-trivial turns to the Hermes worker ─────────────────
+  //
+  // The worker can answer conversationally too — it has full system-prompt,
+  // task context, memory, AND workspace tools available.  Sending everything
+  // non-trivial through Hermes avoids the case where the user asks a code or
+  // architecture question and gets a stale LLM answer that can't read local files.
+  //
+  // "Trivial" = pure chitchat (greetings, one-word acks) or a capability question
+  // ("can you read files?").  These don't need tools so LLM-direct is fine.
+  //
+  // Opt out with HSM_OPERATOR_CHAT_CONSERVATIVE_ROUTING=1 to restore the old
+  // behaviour (only route when explicit execution/coding signals fire).
+  if (process.env.HSM_OPERATOR_CHAT_CONSERVATIVE_ROUTING !== "1") {
+    const trivial =
+      looksPurelyConversationalChitChat(lastOperatorText) ||
+      looksLikeCapabilityQuestion(lastOperatorText);
+    if (!trivial) {
+      return {
+        routeWorker: true,
+        executionIntent,
+        codingIntent,
+        quickToolIntent,
+        reason: "non_trivial_default_worker",
+      };
+    }
+  }
+
+  return {
+    routeWorker: false,
+    executionIntent: false,
+    codingIntent: false,
+    quickToolIntent: false,
+    reason: "conversational_chat",
+  };
+}
+
+export function operatorChatQuickToolPromptMode(params: {
+  quickToolIntent: boolean;
+  routeReason: string;
+}): boolean {
+  if (!params.quickToolIntent) return false;
+  if (
+    params.routeReason === "worker_first_claude_code_mode" ||
+    params.routeReason === "forced_worker_dispatch"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+// ─── Task Management Action Lane ────────────────────────────────────────────
+//
+// Deterministic parser + executor for task-management intents so prompts like
+// "create a follow-up task: …", "assign this to maya", "hand back / release"
+// never fall through to conversational LLM behavior.
+
+export type TaskActionKind =
+  | "create_task"
+  | "assign_task"
+  | "hand_back"
+  | "mark_done"
+  | "add_note"
+  | "requires_human";
+
+export interface TaskAction {
+  kind: TaskActionKind;
+  /** Raw operator intent text (used for note body / task title fallback). */
+  raw: string;
+  /** For create_task: extracted title after the trigger phrase. */
+  title?: string;
+  /** For create_task: optional specification paragraph following the title. */
+  spec?: string;
+  /** For assign_task: persona/agent name the operator named. */
+  targetPersona?: string;
+  /** For add_note: body of the note. */
+  noteBody?: string;
+}
+
+export interface TaskActionResult {
+  ok: boolean;
+  kind: TaskActionKind;
+  taskId?: string;
+  message: string;
+  /** Machine-readable data returned from the API (task object, etc.). */
+  data?: unknown;
+}
+
+/** Classify operator text as a deterministic task-management action, or return null. */
+export function parseTaskManagementAction(text: string): TaskAction | null {
+  const t = text.trim();
+  if (!t || t.length > 2000) return null;
+
+  // ── create task ──────────────────────────────────────────────────────────
+  // "create a follow-up task: Implement XYZ"
+  // "create task: ..." | "new task: ..." | "add task: ..." | "open task: ..."
+  const createM =
+    /^(?:please\s+)?(?:create|add|open|make|new)\s+(?:a\s+)?(?:follow[\s-]up\s+)?(?:company\s+|workspace\s+)?task(?:\s+titled)?[:\s]+(.+)/is.exec(t);
+  if (createM) {
+    const body = createM[1].trim();
+    // First sentence / line is the title; remainder is spec
+    const lineBreak = body.search(/[\n\r]/);
+    const periodBreak = body.search(/\.\s+[A-Z]/);
+    const splitAt =
+      lineBreak > 10 ? lineBreak : periodBreak > 10 ? periodBreak + 1 : body.length;
+    const title = body.slice(0, splitAt).trim().replace(/\.$/, "");
+    const spec = body.slice(splitAt).trim();
+    return { kind: "create_task", raw: t, title, spec: spec || undefined };
+  }
+
+  // ── assign task ──────────────────────────────────────────────────────────
+  // "assign this to maya" | "assign to @kai" | "reassign to ..."
+  const assignM =
+    /^(?:please\s+)?(?:assign|re-?assign)\s+(?:this\s+)?(?:task\s+)?to\s+[@]?(\w[\w\s-]{0,40})/i.exec(t);
+  if (assignM) {
+    return { kind: "assign_task", raw: t, targetPersona: assignM[1].trim() };
+  }
+
+  // ── hand back / release ──────────────────────────────────────────────────
+  // "hand back" | "hand this back" | "release task" | "release checkout"
+  if (
+    /^(?:please\s+)?(?:hand\s+(?:this\s+)?back|release\s+(?:this\s+)?(?:task|checkout)?)\b/i.test(t)
+  ) {
+    return { kind: "hand_back", raw: t };
+  }
+
+  // ── mark done ────────────────────────────────────────────────────────────
+  // "mark done" | "mark this done" | "mark complete" | "close task"
+  if (
+    /^(?:please\s+)?(?:mark\s+(?:this\s+)?(?:done|complete[d]?)|close\s+(?:this\s+)?task|done\s+with\s+this)\b/i.test(t)
+  ) {
+    return { kind: "mark_done", raw: t };
+  }
+
+  // ── requires human ───────────────────────────────────────────────────────
+  // "needs human" | "flag for human review" | "requires human"
+  if (
+    /^(?:please\s+)?(?:needs?\s+human|flag\s+(?:for\s+)?human|requires?\s+human|escalat[e]?\s+to\s+human)\b/i.test(t)
+  ) {
+    return { kind: "requires_human", raw: t };
+  }
+
+  // ── add note ─────────────────────────────────────────────────────────────
+  // "add note: ..." | "note: ..." | "add a note: ..." | "log: ..."
+  const noteM =
+    /^(?:please\s+)?(?:add\s+(?:a\s+)?note|note|log)[:\s]+(.+)/is.exec(t);
+  if (noteM) {
+    return { kind: "add_note", raw: t, noteBody: noteM[1].trim() };
+  }
+
+  return null;
+}
+
+/** Execute a parsed task management action deterministically against Company OS APIs. */
+export async function executeTaskAction(params: {
+  action: TaskAction;
+  companyId: string;
+  taskId: string;
+  persona: string;
+}): Promise<TaskActionResult> {
+  const { action, companyId, taskId, persona } = params;
+
+  switch (action.kind) {
+    case "create_task": {
+      const title = action.title ?? action.raw.slice(0, 120);
+      const body: Record<string, unknown> = {
+        title,
+        owner_persona: persona,
+        priority: 0,
+      };
+      if (action.spec) body["specification"] = action.spec;
+      const res = await fetch(
+        `${UPSTREAM}/api/company/companies/${companyId}/tasks`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const j = (await res.json().catch(() => ({}))) as { task?: { id?: string; display_number?: number } };
+      if (!res.ok) {
+        return { ok: false, kind: "create_task", message: (j as { error?: string }).error ?? `API error ${res.status}` };
+      }
+      const newId = j.task?.id;
+      const num = j.task?.display_number;
+      // Post a stigmergic note on the source task linking to the new one
+      await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: `Created follow-up task${num ? ` #${num}` : ""}${newId ? ` (${newId})` : ""}: **${title}**`,
+          actor: persona,
+        }),
+      }).catch(() => {});
+      return {
+        ok: true,
+        kind: "create_task",
+        taskId: newId,
+        message: `Created task${num ? ` #${num}` : ""}${newId ? ` \`${newId.slice(0, 8)}\`` : ""}: **${title}**`,
+        data: j.task,
+      };
+    }
+
+    case "assign_task": {
+      const target = action.targetPersona ?? persona;
+      const res = await fetch(
+        `${UPSTREAM}/api/company/companies/${companyId}/tasks`,
+      );
+      if (!res.ok) {
+        return { ok: false, kind: "assign_task", message: `Could not load task list (${res.status})` };
+      }
+      // PATCH the current task's owner_persona
+      const patchRes = await fetch(
+        `${UPSTREAM}/api/company/companies/${companyId}/tasks/${taskId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner_persona: target }),
+        },
+      );
+      if (!patchRes.ok) {
+        // Fallback: post a stigmergic handoff note
+        await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: `Assign to **${target}**: ${action.raw}`, actor: persona }),
+        }).catch(() => {});
+        return {
+          ok: true,
+          kind: "assign_task",
+          taskId,
+          message: `Logged assignment handoff to **${target}** as a task note (PATCH not available).`,
+        };
+      }
+      await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: `Task reassigned to **${target}** by ${persona}.`,
+          actor: persona,
+        }),
+      }).catch(() => {});
+      return { ok: true, kind: "assign_task", taskId, message: `Task assigned to **${target}**.`, data: { target } };
+    }
+
+    case "hand_back": {
+      const releaseRes = await fetch(
+        `${UPSTREAM}/api/company/tasks/${taskId}/release`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor: persona }),
+        },
+      );
+      const note = releaseRes.ok
+        ? `Task checkout released by ${persona}.`
+        : `Release request noted (release endpoint returned ${releaseRes.status}).`;
+      await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: note, actor: persona }),
+      }).catch(() => {});
+      return { ok: true, kind: "hand_back", taskId, message: note };
+    }
+
+    case "mark_done": {
+      const patchRes = await fetch(
+        `${UPSTREAM}/api/company/companies/${companyId}/tasks/${taskId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: "done" }),
+        },
+      );
+      const msg = patchRes.ok
+        ? "Task marked as done."
+        : `State update noted (PATCH returned ${patchRes.status}); adding completion note.`;
+      await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: `Marked done by ${persona}. ${action.raw}`, actor: persona }),
+      }).catch(() => {});
+      return { ok: true, kind: "mark_done", taskId, message: msg };
+    }
+
+    case "requires_human": {
+      const rhRes = await fetch(
+        `${UPSTREAM}/api/company/tasks/${taskId}/requires-human`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ requires_human: true, actor: persona, reason: action.raw }),
+        },
+      );
+      const msg = rhRes.ok
+        ? "Task flagged for human review."
+        : `Human-review flag noted (API returned ${rhRes.status}); added task note.`;
+      await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: `Flagged for human review by ${persona}: ${action.raw}`,
+          actor: persona,
+        }),
+      }).catch(() => {});
+      return { ok: true, kind: "requires_human", taskId, message: msg };
+    }
+
+    case "add_note": {
+      const body = action.noteBody ?? action.raw;
+      const noteRes = await fetch(`${UPSTREAM}/api/company/tasks/${taskId}/stigmergic-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: body, actor: persona }),
+      });
+      return {
+        ok: noteRes.ok,
+        kind: "add_note",
+        taskId,
+        message: noteRes.ok ? `Note added to task.` : `Failed to add note (${noteRes.status}).`,
+      };
+    }
+
+    default:
+      return { ok: false, kind: action.kind, message: "Unknown action kind." };
+  }
+}
+
+// ─── End Task Management Action Lane ────────────────────────────────────────
 
 export function parseOptimizeCommand(text: string): OptimizeCommand | null {
   const t = text.trim();
@@ -464,12 +1161,38 @@ export async function finalizeAgentRun(
 
 export type PromptAudience = "operator_chat" | "headless";
 
+/**
+ * Returns true when the model is a free-tier or known-small model that has a
+ * tight context window (≤ 8K tokens).  In thin mode we compress the system
+ * prompt so the model has real headroom for the conversation and its reply.
+ *
+ * Detects:
+ *  - OpenRouter free-tier  (`:free` suffix, e.g. `deepseek/deepseek-r1:free`)
+ *  - Ollama small models   (llama3.2, mistral:7b, phi3:mini, gemma:2b …)
+ *  - Env override:         HSM_THIN_HARNESS=1 forces thin always
+ *                          HSM_THIN_HARNESS=0 disables thin always
+ */
+export function isThinHarnessModel(modelId: string): boolean {
+  const override = (process.env.HSM_THIN_HARNESS ?? "").trim();
+  if (override === "1") return true;
+  if (override === "0") return false;
+
+  const m = modelId.toLowerCase();
+  // OpenRouter free-tier suffix
+  if (m.endsWith(":free")) return true;
+  // Known small Ollama / generic models
+  if (/\b(llama3(?:\.[12])?|llama3?[._:-]?[123]b?|phi[23]|gemma[._:-]?[27]b|mistral(?:[._:-]?7b)?|qwen[._:-]?[0-9]+b|smollm|tinyllama)\b/.test(m)) return true;
+  return false;
+}
+
 export async function buildSystemPrompt(
   persona: string,
   companyId: string | undefined,
   skillSlug: string | null,
   taskId: string,
   audience: PromptAudience = "operator_chat",
+  /** When true, caps every section to stay under ~1 K tokens total for free/small models. */
+  thin = false,
 ): Promise<string> {
   const now = new Date().toLocaleString("en-US", {
     weekday: "long",
@@ -522,10 +1245,21 @@ export async function buildSystemPrompt(
     .filter((a) => a !== me && a.title)
     .map((a) => `- **${a.title}** (${a.role ?? a.agent_ref ?? "agent"})`);
 
+  // Thin-mode limits — keep total system prompt under ~1 K tokens (~4 K chars)
+  const visionMax  = thin ? 400  : 2000;
+  const memMax     = thin ? 4    : 8;
+  const memChars   = thin ? 80   : 120;
+  const noteMax    = thin ? 3    : 6;
+  const noteChars  = thin ? 120  : 200;
+  const ctxMax     = thin ? 800  : 3000;
+  const teamMax    = thin ? 3    : Infinity;
+
   const parts: string[] = [];
 
   if (me?.briefing) {
-    parts.push(me.briefing.trim());
+    // Thin: cap briefing at 300 chars so it doesn't crowd everything else
+    const briefing = thin ? me.briefing.trim().slice(0, 300) : me.briefing.trim();
+    parts.push(briefing);
   } else {
     const label = me?.title ?? persona;
     const roleStr = me?.role ? ` — ${me.role}` : "";
@@ -536,8 +1270,10 @@ export async function buildSystemPrompt(
 
   if (visionContent) {
     const snippet =
-      visionContent.length > 2000 ? visionContent.slice(0, 2000) + "\n…[truncated]" : visionContent;
-    parts.push(`\n## Company Vision (VISION.md)\n${snippet}`);
+      visionContent.length > visionMax
+        ? visionContent.slice(0, visionMax) + "\n…[truncated]"
+        : visionContent;
+    parts.push(`\n## Company Vision\n${snippet}`);
   }
 
   if (audience === "operator_chat") {
@@ -558,12 +1294,12 @@ export async function buildSystemPrompt(
 
     const ctxData = taskCtx as { combined_system_addon?: string; context_notes?: unknown[] } | null;
     if (ctxData?.combined_system_addon) {
-      parts.push(`\n### Task Context\n${ctxData.combined_system_addon.slice(0, 3000)}`);
+      parts.push(`\n### Task Context\n${ctxData.combined_system_addon.slice(0, ctxMax)}`);
     }
     if (Array.isArray(ctxData?.context_notes) && ctxData.context_notes.length > 0) {
       const noteLines = (ctxData.context_notes as Array<{ actor?: string; text?: string }>)
-        .slice(-6)
-        .map((n) => `[${n.actor ?? "?"}] ${(n.text ?? "").slice(0, 200)}`);
+        .slice(-noteMax)
+        .map((n) => `[${n.actor ?? "?"}] ${(n.text ?? "").slice(0, noteChars)}`);
       parts.push(`\n### Recent context\n${noteLines.join("\n")}`);
     }
 
@@ -575,18 +1311,23 @@ export async function buildSystemPrompt(
   }
 
   if (teammates.length > 0) {
-    parts.push(`\n## Your team\n${teammates.join("\n")}`);
+    const team = teammates.slice(0, teamMax);
+    const suffix = thin && teammates.length > teamMax ? ` (+${teammates.length - teamMax} more)` : "";
+    parts.push(`\n## Your team\n${team.join("\n")}${suffix}`);
   }
 
   if (mySkills.length > 0) {
-    const skillLines = mySkills.map((s) => `- **${s.slug}**: ${s.description ?? ""}`).join("\n");
-    parts.push(`\n## Your skills\n${skillLines}`);
+    const skillLines = thin
+      ? mySkills.map((s) => `- ${s.slug}`).join(", ")                    // thin: names only
+      : mySkills.map((s) => `- **${s.slug}**: ${s.description ?? ""}`).join("\n");
+    const header = thin ? `\nYour skills: ` : `\n## Your skills\n`;
+    parts.push(`${header}${skillLines}`);
   }
 
   if (memories.length > 0) {
     const memLines = memories
-      .slice(0, 8)
-      .map((m) => `- [${m.kind ?? "note"}] ${m.title ?? ""}: ${(m.content ?? "").slice(0, 120)}`)
+      .slice(0, memMax)
+      .map((m) => `- [${m.kind ?? "note"}] ${m.title ?? ""}: ${(m.content ?? "").slice(0, memChars)}`)
       .join("\n");
     parts.push(`\n## Company memory (recent)\n${memLines}`);
   }
@@ -838,6 +1579,218 @@ async function createFallbackDispatchTask(params: {
   return typeof j.task?.id === "string" ? j.task.id : null;
 }
 
+export function consoleUpstreamIsLoopback(): boolean {
+  try {
+    const u = new URL(UPSTREAM);
+    const h = u.hostname.toLowerCase();
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+export function detectGitRepoRootForWorkspace(cwd = process.cwd()): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 5000, maxBuffer: 4096 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const p = stdout.toString().trim();
+      resolve(p.length > 0 ? p : null);
+    });
+  });
+}
+
+function normalizeTaskWorkspacePaths(raw: unknown): string[] {
+  if (!raw) return [];
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[])
+    .filter((x) => typeof x === "string" && (x as string).trim().length > 0)
+    .map((x) => (x as string).trim());
+}
+
+export async function ensureTaskWorkspaceFromCompanyDefaults(params: {
+  companyId: string;
+  taskId: string;
+}): Promise<{ patched: boolean; root?: string }> {
+  const tasksJson = (await safeFetch(`${UPSTREAM}/api/company/companies/${params.companyId}/tasks`, 8000)) as {
+    tasks?: Array<{ id: string; workspace_attachment_paths?: unknown }>;
+  } | null;
+  const task = tasksJson?.tasks?.find((x) => x.id === params.taskId);
+  if (!task) return { patched: false };
+  const paths = normalizeTaskWorkspacePaths(task.workspace_attachment_paths);
+  if (paths.length > 0) return { patched: false };
+  const companyJson = (await safeFetch(`${UPSTREAM}/api/company/companies/${params.companyId}`, 5000)) as {
+    company?: { default_workspace_root?: string | null; hsmii_home?: string | null };
+  } | null;
+  const autoRepoOff = process.env.HSM_OPERATOR_CHAT_AUTO_REPO_WORKSPACE === "0";
+  let root =
+    (companyJson?.company?.default_workspace_root ?? "").trim() ||
+    (companyJson?.company?.hsmii_home ?? "").trim();
+  if (!root && !autoRepoOff && consoleUpstreamIsLoopback()) {
+    const fromGit = await detectGitRepoRootForWorkspace();
+    if (fromGit) root = fromGit.trim();
+  }
+  if (!root) return { patched: false };
+  try {
+    const res = await fetch(`${UPSTREAM}/api/company/tasks/${params.taskId}/context`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_attachment_paths: [root] }),
+    });
+    return { patched: res.ok, root };
+  } catch {
+    return { patched: false };
+  }
+}
+
+function pickWorkerFinalizeSummary(input: {
+  runSummaryInitial?: string;
+  storedSummary: string;
+  logTail: string;
+  taskRunStatus: string;
+  taskToolCalls: number;
+}): string {
+  const capSummary = (text: string): string => {
+    const maxCharsRaw = Number(process.env.HSM_AGENT_CHAT_SUMMARY_MAX_CHARS ?? "200000");
+    const maxChars = Number.isFinite(maxCharsRaw) ? maxCharsRaw : 200000;
+    if (maxChars <= 0) return text;
+    if (text.length <= maxChars) return text;
+    return text.slice(-maxChars);
+  };
+  const runSummaryInitial = (input.runSummaryInitial ?? "").trim();
+  const trimmedStored = input.storedSummary.trim();
+  const trimmedLog = input.logTail.trim();
+  const looksLikeInitialDispatchSummary =
+    trimmedStored.length > 0 &&
+    (runSummaryInitial.length > 0
+      ? trimmedStored === runSummaryInitial ||
+        trimmedStored.startsWith("Operator turn via agent loop") ||
+        trimmedStored.startsWith("Skill dispatched to worker")
+      : trimmedStored.startsWith("Operator turn via agent loop") ||
+        trimmedStored.startsWith("Skill dispatched to worker"));
+  if (trimmedLog.length > 0 && (looksLikeInitialDispatchSummary || !trimmedStored)) {
+    return capSummary(trimmedLog);
+  }
+  if (trimmedStored.length > 0 && !looksLikeInitialDispatchSummary) {
+    return capSummary(trimmedStored);
+  }
+  if (trimmedLog.length > 0) {
+    return capSummary(trimmedLog);
+  }
+  return `Task runtime ${input.taskRunStatus} (${input.taskToolCalls} tool calls)`;
+}
+
+const HIGH_VALUE_WORKER_TOOLS = new Set([
+  "bash",
+  "read",
+  "read_file",
+  "grep",
+  "edit",
+  "write",
+  "find",
+  "search_files",
+  "list_directory",
+]);
+
+function extractHighValueToolSignalsFromSummary(summary: string): Set<string> {
+  const out = new Set<string>();
+  const s = summary.toLowerCase();
+  const loopMatch = s.match(/agentic tool loop:\s*\d+\s*tool calls\s*\(([^)]+)\)/i);
+  if (loopMatch?.[1]) {
+    for (const raw of loopMatch[1].split(",")) {
+      const t = raw.trim().toLowerCase();
+      if (HIGH_VALUE_WORKER_TOOLS.has(t)) out.add(t);
+    }
+  }
+  const toolLabelRegex = /\btool(?:s)?:\s*([a-z0-9_,\-\s]+)/gi;
+  for (const m of s.matchAll(toolLabelRegex)) {
+    const group = m[1] ?? "";
+    for (const raw of group.split(",")) {
+      const t = raw.trim().toLowerCase();
+      if (HIGH_VALUE_WORKER_TOOLS.has(t)) out.add(t);
+    }
+  }
+  return out;
+}
+
+function extractHighValueToolSignalsFromRunMeta(meta: Record<string, unknown> | null | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!meta) return out;
+  const artifacts = toObject(meta.run_artifacts);
+  const touched = Array.isArray(artifacts?.touched_files) ? artifacts?.touched_files : [];
+  for (const row of touched) {
+    const rec = toObject(row);
+    const tools = Array.isArray(rec?.tools) ? rec?.tools : [];
+    for (const tool of tools) {
+      if (typeof tool !== "string") continue;
+      const t = tool.trim().toLowerCase();
+      if (HIGH_VALUE_WORKER_TOOLS.has(t)) out.add(t);
+    }
+  }
+  return out;
+}
+
+function detectWorkerExecutionFailureReason(summary: string): string | null {
+  const s = summary.toLowerCase();
+  if (s.includes("llm unavailable for agentic execution")) return "Worker LLM unavailable for agentic execution.";
+  if (s.includes("worker llm error")) return "Worker LLM error during execution.";
+  if (s.includes("ollama returned status 404")) return "Ollama model/provider not available (404).";
+  if (s.includes("no llm providers configured")) return "No LLM provider configured for worker runtime.";
+  if (s.includes("no tool calls were executed")) return "Worker exited without executing any real tool calls.";
+  if (s.includes("no successful non-dispatch tool completions observed")) return "Worker ran tools but none completed successfully.";
+  if (s.includes("ended without a final answer (max turns reached)")) return "Worker exhausted tool loop without producing a final answer.";
+  return null;
+}
+
+function sanitizeWorkerMirrorText(summary: string): string | null {
+  let text = summary.replace(/\r\n/g, "\n").trim();
+  const lower = text.toLowerCase();
+  const replyIdx = lower.lastIndexOf("worker reply:");
+  const successIdx = lower.lastIndexOf("worker success:");
+  const startIdx = Math.max(replyIdx, successIdx);
+  if (startIdx >= 0) {
+    const marker = lower.startsWith("worker reply:", startIdx) ? "worker reply:" : "worker success:";
+    text = text.slice(startIdx + marker.length).trim();
+  }
+  text = text.replace(/\n{2,}---\n\*agentic tool loop:[\s\S]*$/i, "").trim();
+  text = text
+    .split("\n")
+    .filter((line) => !/^\s*worker (start|error|success|reply):/i.test(line))
+    .join("\n")
+    .trim();
+  if (/^(we need to|i need to|need to|probably|unclear|hard to guess|maybe\b|might be\b)/i.test(text)) {
+    const anchors = [
+      /\bHere(?:'s| is)\b/i,
+      /\bIt looks like\b/i,
+      /\bIn\s+`?Cargo\.toml`?\b/i,
+      /\bThe\s+(?:package|project|repository)\b/i,
+    ];
+    let best = -1;
+    for (const re of anchors) {
+      const m = re.exec(text);
+      if (!m) continue;
+      const idx = m.index ?? -1;
+      if (idx <= 0) continue;
+      if (best < 0 || idx < best) best = idx;
+    }
+    if (best > 0) text = text.slice(best).trim();
+    if (best < 0) return null;
+  }
+  if (!text) return null;
+  const low = text.toLowerCase();
+  if (
+    low.startsWith("routed this turn through the worker agent loop") ||
+    low.startsWith("routed to worker — no conversational") ||
+    low.startsWith("routed to worker (quick read/edit")
+  ) {
+    return null;
+  }
+  if (low.includes("agentic tool loop ended without a final answer")) return null;
+  if (low.includes("worker tool execution required but no tool calls were executed")) return null;
+  if (low.startsWith("worker error:")) return null;
+  return text.slice(0, 12000);
+}
+
+
 /**
  * Worker-first dispatch for skill execution (checkout path), with optional
  * telemetry-based finalization of `agent_runs`.
@@ -872,6 +1825,7 @@ export async function dispatchSkillToWorker(params: {
   } = params;
 
   const { agentRegistryId } = await resolveAgentForPersona(companyId, persona);
+  await ensureTaskWorkspaceFromCompanyDefaults({ companyId, taskId }).catch(() => {});
 
   let activeTaskId = taskId;
   let checkout = await checkoutTaskForWorker(activeTaskId, persona);
@@ -967,7 +1921,9 @@ export async function dispatchSkillToWorker(params: {
     }).catch(() => {});
   }
 
-  if (persistAgentNote) {
+  const shouldPersistDispatchNote =
+    persistAgentNote && externalSystem !== "worker-dispatch-chat" && externalSystem !== "worker-dispatch";
+  if (shouldPersistDispatchNote) {
     await fetch(`${UPSTREAM}/api/company/tasks/${activeTaskId}/stigmergic-note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -975,7 +1931,8 @@ export async function dispatchSkillToWorker(params: {
         text:
           dispatchNoteText ??
           `Dispatched skill \`${skillSlug}\` to worker runtime.${checkoutFallbackUsed ? ` (fallback task ${activeTaskId})` : ""}`,
-        actor: persona,
+        // Use "system" so the UI poll does not treat this dispatch line as the persona's reply.
+        actor: "system",
       }),
     }).catch(() => {});
   }
@@ -986,11 +1943,24 @@ export async function dispatchSkillToWorker(params: {
     body: JSON.stringify({ actor: persona, reason: "operator-chat-dispatch" }),
   }).catch(() => {});
 
-  const executePrompt =
+  const opMsg =
     (typeof extraMeta?.operator_message === "string" && extraMeta.operator_message.trim().length > 0
       ? extraMeta.operator_message.trim()
       : runSummary?.trim()) ??
     `Run skill ${skillSlug} for task ${activeTaskId}`;
+  const shouldPrimeWorkspaceTools =
+    (externalSystem === "worker-dispatch-chat" || externalSystem === "worker-dispatch") &&
+    (looksLikeImplicitWorkspacePointer(opMsg) || looksLikeCodingToolIntent(opMsg));
+  const executePrompt = shouldPrimeWorkspaceTools
+    ? [
+        opMsg,
+        "",
+        "Tool-first execution:",
+        "- Inspect the attached workspace with real tools before answering.",
+        "- For file/location requests, prefer glob/list_directory first, then read/grep as needed.",
+        "- Return concrete file paths and a short evidence-based summary; do not answer from assumptions.",
+      ].join("\n")
+    : opMsg;
   const executeRes = await fetch(`${UPSTREAM}/api/company/tasks/${activeTaskId}/execute-worker`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1014,6 +1984,7 @@ export async function dispatchSkillToWorker(params: {
   let latestSummary: string | null = null;
   let latestMode: "pending" | "worker" | "llm_simulated" = "pending";
   let sawWorkerEvidence = false;
+  let sawHighValueToolEvidence = false;
   const dispatchStartedAt = Date.now();
   let baselineActivityMs = 0;
   try {
@@ -1051,8 +2022,11 @@ export async function dispatchSkillToWorker(params: {
     const task = (tasksJson.tasks ?? []).find((t) => t.id === activeTaskId);
     const taskRunStatus = (task?.run?.status ?? "").toLowerCase();
     const taskToolCalls = task?.run?.tool_calls ?? 0;
+    // Runtime snapshot tool_calls already reflects real tool completions (dispatch is excluded).
+    // Treat any successful tool completion as execution evidence.
     const observedFromTask = taskToolCalls > 0;
     let observedFromRuntime = false;
+    let runtimeToolName = "";
     if (activityRes && "ok" in activityRes && activityRes.ok) {
       const activityJson = (await activityRes.json().catch(() => ({}))) as {
         activity?: {
@@ -1067,12 +2041,33 @@ export async function dispatchSkillToWorker(params: {
           : 0;
       const activityAdvanced =
         lastActivityMs > Math.max(baselineActivityMs, dispatchStartedAt - 1_000);
-      const hasToolName = typeof activityJson.activity?.tool_name === "string" && activityJson.activity.tool_name.length > 0;
+      const toolName =
+        typeof activityJson.activity?.tool_name === "string" ? activityJson.activity.tool_name.trim().toLowerCase() : "";
+      runtimeToolName = toolName;
+      const hasNonDispatchToolName =
+        toolName.length > 0 && toolName !== "worker_dispatch" && toolName !== "claude_harness";
       const phase = typeof activityJson.activity?.phase === "string" ? activityJson.activity.phase : "";
-      observedFromRuntime = activityAdvanced && (hasToolName || phase === "start" || phase === "finish");
+      observedFromRuntime =
+        activityAdvanced &&
+        (hasNonDispatchToolName ||
+          ((phase === "start" || phase === "finish") && hasNonDispatchToolName));
     }
     const observedWorker = observedFromTask || observedFromRuntime;
     sawWorkerEvidence = sawWorkerEvidence || observedWorker;
+    const highValueFromRuntime =
+      runtimeToolName.length > 0 &&
+      runtimeToolName !== "worker_dispatch" &&
+      runtimeToolName !== "claude_harness" &&
+      HIGH_VALUE_WORKER_TOOLS.has(runtimeToolName);
+    const highValueFromSummary = extractHighValueToolSignalsFromSummary(
+      [runJson.run?.summary ?? "", task?.run?.log_tail ?? "", runSummary ?? ""].join("\n"),
+    );
+    const highValueFromMeta = extractHighValueToolSignalsFromRunMeta(runJson.run?.meta ?? null);
+    sawHighValueToolEvidence =
+      sawHighValueToolEvidence ||
+      highValueFromRuntime ||
+      highValueFromSummary.size > 0 ||
+      highValueFromMeta.size > 0;
 
     latestMode = sawWorkerEvidence ? "worker" : latestMode;
     if (observedWorker && runJson.run?.meta?.execution_mode !== "worker") {
@@ -1080,8 +2075,49 @@ export async function dispatchSkillToWorker(params: {
     }
 
     if (taskRunStatus === "success" || taskRunStatus === "error") {
-      if (requireWorkerEvidence && !sawWorkerEvidence) {
+      if (requireWorkerEvidence && (!sawWorkerEvidence || !sawHighValueToolEvidence)) {
         const summary = "Worker run finished without tool evidence; refusing optimistic completion.";
+        await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "error",
+            summary,
+            finished_at: true,
+            meta: {
+              ...(runJson.run?.meta ?? {}),
+              execution_mode: "pending",
+              execution_verified: false,
+              needs_human: true,
+            },
+          }),
+        }).catch(() => {});
+        return {
+          ok: false,
+          error: !sawWorkerEvidence
+            ? summary
+            : "Worker run finished without high-value tool evidence; need at least one successful bash/read/grep/edit/write/find/search/list_directory signal.",
+          httpStatus: 409,
+          runId,
+        };
+      }
+      const finalMode = sawWorkerEvidence ? "worker" : "llm_simulated";
+      const logTail =
+        typeof task?.run?.log_tail === "string" && task.run.log_tail.trim() ? task.run.log_tail : "";
+      latestSummary = pickWorkerFinalizeSummary({
+        runSummaryInitial: runSummary,
+        storedSummary: (runJson.run?.summary ?? "").trim(),
+        logTail,
+        taskRunStatus,
+        taskToolCalls,
+      });
+      const hardFailureReason = detectWorkerExecutionFailureReason(latestSummary);
+      if ((taskRunStatus === "success" && (!sawWorkerEvidence || !sawHighValueToolEvidence)) || hardFailureReason) {
+        const summary = hardFailureReason
+          ? `${hardFailureReason} No non-dispatch tool execution observed.`
+          : !sawWorkerEvidence
+            ? "Worker run finished without non-dispatch tool evidence; refusing optimistic completion."
+            : "Worker run finished without high-value tool evidence; refusing optimistic completion.";
         await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -1104,12 +2140,6 @@ export async function dispatchSkillToWorker(params: {
           runId,
         };
       }
-      const finalMode = sawWorkerEvidence ? "worker" : "llm_simulated";
-      latestSummary =
-        runJson.run?.summary?.trim() ||
-        (typeof task?.run?.log_tail === "string" && task.run.log_tail.trim()
-          ? task.run.log_tail.slice(-500)
-          : `Task runtime ${taskRunStatus} (${taskToolCalls} tool calls)`);
       await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1120,17 +2150,34 @@ export async function dispatchSkillToWorker(params: {
           meta: {
             ...(runJson.run?.meta ?? {}),
             execution_mode: finalMode,
-            execution_verified: sawWorkerEvidence,
+            execution_verified: sawWorkerEvidence && sawHighValueToolEvidence,
           },
         }),
       });
+      // Mirror the worker reply back into the task thread as a stigmergic note.
+      if (
+        persistAgentNote &&
+        taskRunStatus === "success" &&
+        sawWorkerEvidence &&
+        (externalSystem === "worker-dispatch-chat" || externalSystem === "worker-dispatch") &&
+        typeof latestSummary === "string"
+      ) {
+        const mirrorText = sanitizeWorkerMirrorText(latestSummary);
+        if (mirrorText) {
+          await fetch(`${UPSTREAM}/api/company/tasks/${activeTaskId}/stigmergic-note`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: mirrorText, actor: persona }),
+          }).catch(() => {});
+        }
+      }
       return {
         ok: true,
         runId,
         status: taskRunStatus as "success" | "error",
         executionMode: finalMode,
         workerEvidence: sawWorkerEvidence,
-        executionVerified: sawWorkerEvidence,
+        executionVerified: sawWorkerEvidence && sawHighValueToolEvidence,
         summary: latestSummary,
         finalized: true,
       };
@@ -1141,7 +2188,7 @@ export async function dispatchSkillToWorker(params: {
 
   // Soft-timeout behavior: keep the run alive if no evidence was observed yet.
   // We still enforce strict proof if/when the task reaches success/error without evidence.
-  if (requireWorkerEvidence && !sawWorkerEvidence) {
+  if (requireWorkerEvidence && (!sawWorkerEvidence || !sawHighValueToolEvidence)) {
     const pendingSummary =
       latestSummary ??
       "No worker tool activity observed within telemetry window yet; run remains pending until evidence arrives.";
@@ -1155,6 +2202,7 @@ export async function dispatchSkillToWorker(params: {
           execution_mode: latestMode,
           execution_verified: false,
           evidence_pending: true,
+          high_value_evidence_pending: !sawHighValueToolEvidence,
           evidence_timeout_ms: waitForTelemetryMs,
         },
       }),
@@ -1164,7 +2212,7 @@ export async function dispatchSkillToWorker(params: {
       runId,
       status: "running",
       executionMode: latestMode,
-      workerEvidence: false,
+      workerEvidence: sawWorkerEvidence,
       executionVerified: false,
       summary: pendingSummary,
       finalized: false,
@@ -1177,7 +2225,7 @@ export async function dispatchSkillToWorker(params: {
     status: "running",
     executionMode: latestMode,
     workerEvidence: sawWorkerEvidence,
-    executionVerified: sawWorkerEvidence,
+    executionVerified: sawWorkerEvidence && sawHighValueToolEvidence,
     summary: latestSummary,
     finalized: false,
   };
@@ -1262,7 +2310,7 @@ export async function executeSkillLlmFlow(params: {
     return { ok: false, error: data.error.message ?? "LLM error", httpStatus: 502, runId };
   }
 
-  const reply = data.choices?.[0]?.message?.content?.trim() ?? "";
+  const reply = extractReplyFromChatCompletionPayload(data).trim();
   if (!reply) {
     if (runId) await finalizeAgentRun(companyId, runId, "Empty LLM response", "error");
     return { ok: false, error: "Empty response from LLM", httpStatus: 502, runId };

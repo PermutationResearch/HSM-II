@@ -13,23 +13,26 @@ import {
   buildStrictToolFlowTrace,
   buildCompactedContextBundle,
   buildSystemPrompt,
-  CHAT_MODEL,
   compactNotesForLlm,
   deriveToolExecutionPolicy,
   detectSkillDispatch,
   dispatchSkillToWorker,
+  executeTaskAction,
   finalizeAgentRun,
   createAgentRun,
-  looksLikeExecutionIntent,
+  operatorChatQuickToolPromptMode,
+  operatorChatShouldRouteWorker,
+  parseTaskManagementAction,
   OR_BASE,
   parseOptimizeCommand,
-  readOpenRouterApiKey,
+  readAgentChatBackend,
   resolveAgentForPersona,
   saveCompactionToMemory,
   UPSTREAM,
   upsertThreadSessionState,
 } from "@/app/lib/agent-chat-server";
 import { asObject } from "@/app/lib/runtime-contract";
+import { extractReplyFromChatCompletionPayload } from "@/app/lib/llm-text-content";
 
 type StigNote = { at: string; actor: string; text: string };
 
@@ -95,7 +98,6 @@ export async function POST(req: NextRequest) {
       waitForTelemetryMs: 120_000,
       requireWorkerEvidence: true,
       runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
-      dispatchNoteText: `Running \`${detectedSkill}\` in worker agent loop runtime.`,
       extraMeta: {
         trigger: "operator_chat",
         operator_message: lastOperatorText.slice(0, 600),
@@ -143,6 +145,25 @@ export async function POST(req: NextRequest) {
 
   // `optimize [task|plan|signature]` command path -> optimize APIs + tracked run.
   if (!detectedSkill && companyId) {
+    // Deterministic task action lane: create/assign/release/mark-done/note/requires-human.
+    const taskAction = parseTaskManagementAction(lastOperatorText);
+    if (taskAction) {
+      const actionResult = await executeTaskAction({
+        action: taskAction,
+        companyId,
+        taskId,
+        persona,
+      });
+      return NextResponse.json({
+        ok: actionResult.ok,
+        reply: actionResult.message,
+        at: new Date().toISOString(),
+        task_action: actionResult.kind,
+        task_id: actionResult.taskId,
+        data: actionResult.data,
+      });
+    }
+
     const optimize = parseOptimizeCommand(lastOperatorText);
     if (optimize) {
       const compact = await buildCompactedContextBundle({
@@ -258,9 +279,12 @@ export async function POST(req: NextRequest) {
   }
 
   if (!detectedSkill && companyId) {
-    const openRouterKey = readOpenRouterApiKey();
-    const executionIntent = looksLikeExecutionIntent(lastOperatorText);
-    const routeWorker = executionIntent || !openRouterKey;
+    const chatBackend = readAgentChatBackend();
+    const { routeWorker, executionIntent, codingIntent, quickToolIntent, reason: workerRouteReason } =
+      operatorChatShouldRouteWorker({
+        lastOperatorText,
+        hasChatBackend: !!chatBackend,
+      });
     if (routeWorker) {
       const policy = deriveToolExecutionPolicy(agentAdapterConfig);
       const compact = await buildCompactedContextBundle({
@@ -269,10 +293,10 @@ export async function POST(req: NextRequest) {
         agentRegistryId,
         budgetBytes: 5200,
       });
-      const dispatchNoteText =
-        !executionIntent && !openRouterKey
-          ? "Routed to worker — no OpenRouter key in this Next.js process (set OPENROUTER_API_KEY or HSM_OPENROUTER_API_KEY). Worker runs without streamed tokens in this UI until the loop finishes."
-          : "Routed this turn through the worker agent loop runtime.";
+      const quickToolMode = operatorChatQuickToolPromptMode({
+        quickToolIntent,
+        routeReason: workerRouteReason,
+      });
       const result = await dispatchSkillToWorker({
         companyId,
         taskId,
@@ -283,14 +307,14 @@ export async function POST(req: NextRequest) {
         waitForTelemetryMs: 120_000,
         requireWorkerEvidence: true,
         runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
-        dispatchNoteText,
         extraMeta: {
           trigger: "operator_chat",
           operator_message: lastOperatorText.slice(0, 1000),
-          intent: executionIntent ? "execution" : "analysis",
+          intent: executionIntent || codingIntent ? "execution" : "analysis",
           loop_state: "running",
           strict_tool_flow: strictFlow,
           tool_execution_policy: policy,
+          quick_tool_mode: quickToolMode,
           compact_context: {
             bytes: compact.bytes,
             sections: compact.sections,
@@ -327,10 +351,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const key = readOpenRouterApiKey();
-  if (!key) {
+  const chatBackend = readAgentChatBackend();
+  if (!chatBackend) {
     return NextResponse.json(
-      { error: "OpenRouter API key not configured (OPENROUTER_API_KEY or HSM_OPENROUTER_API_KEY)" },
+      {
+        error:
+          "No agent chat backend configured. Set HSM_AGENT_CHAT_PROVIDER=ollama with OLLAMA_URL/OLLAMA_MODEL for local chat, or OPENROUTER_API_KEY for OpenRouter.",
+      },
       { status: 500 },
     );
   }
@@ -379,21 +406,41 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No operator message to respond to" }, { status: 400 });
   }
 
-  const llmRes = await fetch(`${OR_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://hsm.ai",
-      "X-Title": "HSM Company Console",
+  const llmRes = await fetch(
+    chatBackend.provider === "openrouter" ? `${OR_BASE}/chat/completions` : `${chatBackend.baseUrl}/api/chat`,
+    {
+      method: "POST",
+      headers:
+        chatBackend.provider === "openrouter"
+          ? {
+              Authorization: `Bearer ${chatBackend.apiKey}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": "https://hsm.ai",
+              "X-Title": "HSM Company Console",
+            }
+          : {
+              "Content-Type": "application/json",
+            },
+      body: JSON.stringify(
+        chatBackend.provider === "openrouter"
+          ? {
+              model: chatBackend.model,
+              messages: [{ role: "system", content: enrichedSystem }, ...messages],
+              max_tokens: detectedSkill ? 1024 : 768,
+              temperature: detectedSkill ? 0.4 : 0.7,
+            }
+          : {
+              model: chatBackend.model,
+              messages: [{ role: "system", content: enrichedSystem }, ...messages],
+              stream: false,
+              options: {
+                temperature: detectedSkill ? 0.4 : 0.7,
+                num_predict: detectedSkill ? 1024 : 768,
+              },
+            },
+      ),
     },
-    body: JSON.stringify({
-      model: CHAT_MODEL,
-      messages: [{ role: "system", content: enrichedSystem }, ...messages],
-      max_tokens: detectedSkill ? 1024 : 768,
-      temperature: detectedSkill ? 0.4 : 0.7,
-    }),
-  });
+  );
 
   if (!llmRes.ok) {
     const errText = await llmRes.text().catch(() => llmRes.statusText);
@@ -406,12 +453,9 @@ export async function POST(req: NextRequest) {
   const dataRaw = await llmRes.json().catch(() => ({}));
   const dataObj = asObject(dataRaw);
   const errorObj = asObject(dataObj?.error);
-  const choices = Array.isArray(dataObj?.choices) ? dataObj.choices : [];
-  const firstChoice = asObject(choices[0]);
-  const firstMsg = asObject(firstChoice?.message);
   const data = {
     error: typeof errorObj?.message === "string" ? { message: errorObj.message } : undefined,
-    content: typeof firstMsg?.content === "string" ? firstMsg.content : "",
+    content: extractReplyFromChatCompletionPayload(dataObj),
   };
 
   if (data.error) {
