@@ -3273,13 +3273,28 @@ async fn build_worker_skill_instruction_block(
     match normalized.as_str() {
         "validate-delivery" => {
             out.push_str(
-                "\nYou are validating delivery readiness, not giving a generic status update.\n\
-                 Required before final answer:\n\
-                 - Inspect the relevant repo/workspace files or changes with real tools.\n\
-                 - Run or inspect at least one concrete verification step tied to build/test/requirements.\n\
-                 - End with an explicit verdict: `PASS`, `FAIL`, or `BLOCKED`.\n\
-                 - Cite the concrete evidence you used.\n\
-                 If you do not have enough evidence for a verdict, say `BLOCKED` and state what is missing.\n",
+                "\n## Validate-Delivery Execution Protocol\n\n\
+                 You are an autonomous delivery validator. \
+                 Execute the steps below immediately — **do NOT ask follow-up questions**, \
+                 do NOT wait for confirmation, do NOT ask what to explore. \
+                 Use whatever evidence is in the workspace and emit a verdict.\n\n\
+                 **Step 1 — Orient (always run these first):**\n\
+                 - `list_directory` on `.` to see workspace root\n\
+                 - `bash \"git log --oneline -10\"` to see recent commits\n\
+                 - `bash \"git status --short\"` to see outstanding changes\n\
+                 - Read `Cargo.toml`, `package.json`, or the primary build manifest if present\n\n\
+                 **Step 2 — Collect build/test evidence (run at least one):**\n\
+                 - If Rust: `bash \"cargo check --message-format short 2>&1 | tail -30\"`\n\
+                 - If Node/TS: `bash \"npm run build 2>&1 | tail -30\"` or check `dist/` / `.next/`\n\
+                 - Look for test result files: `coverage/`, `test-results/`, `*.test.log`, `.cargo/`\n\
+                 - Check CI config: `.github/workflows/` for what gates are expected\n\
+                 - Read `tasks/todo.md` or `CHANGELOG` if present to understand scope\n\n\
+                 **Step 3 — Emit verdict (required, always last line of your response):**\n\
+                 End with exactly one of:\n\
+                 - `PASS — <one-line reason citing specific evidence>`\n\
+                 - `FAIL — <specific failure: file, test name, or build error>`\n\
+                 - `BLOCKED — <what is missing that prevents a verdict>`\n\n\
+                 Do not skip Step 3. If evidence is ambiguous, emit `BLOCKED` with what is missing.\n",
             );
         }
         "orchestrate-review" => {

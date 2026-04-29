@@ -2018,7 +2018,22 @@ export async function dispatchSkillToWorker(params: {
   const shouldPrimeWorkspaceTools =
     (externalSystem === "worker-dispatch-chat" || externalSystem === "worker-dispatch") &&
     (looksLikeImplicitWorkspacePointer(opMsg) || looksLikeCodingToolIntent(opMsg));
-  const executePrompt = shouldPrimeWorkspaceTools
+  const executePrompt = skillSlug === "validate-delivery"
+    ? [
+        "Execute the Validate-Delivery Execution Protocol from your skill contract immediately.",
+        "Do NOT ask questions or wait for confirmation. Run all three steps now:",
+        "",
+        "Step 1 (orient): run `git log --oneline -10`, `git status --short`, list_directory on `.`",
+        "Step 2 (evidence): run `cargo check --message-format short 2>&1 | tail -30` if Rust,",
+        "  or `npm run build 2>&1 | tail -30` if Node/TS, or inspect test/build artifacts.",
+        "Step 3 (verdict): end your response with exactly one of:",
+        "  PASS — <reason>",
+        "  FAIL — <specific failure>",
+        "  BLOCKED — <what is missing>",
+        "",
+        `Original request: ${opMsg}`,
+      ].join("\n")
+    : shouldPrimeWorkspaceTools
     ? [
         opMsg,
         "",

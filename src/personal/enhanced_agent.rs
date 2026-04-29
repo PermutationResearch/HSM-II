@@ -2345,7 +2345,11 @@ impl EnhancedPersonalAgent {
                             ).await;
                         }
 
-                        // Feed tool result back as next user message
+                        // Feed tool result back as next user message.
+                        // Push both sides of the exchange so the model retains
+                        // full task context (including the original instruction) on
+                        // every subsequent turn.
+                        conversation.push(("user".to_string(), current_query.clone()));
                         conversation.push(("assistant".to_string(), response_text.clone()));
                         current_query = format!(
                             "Tool '{}' returned:\n{}\n\nContinue with the task or provide the final answer.",
@@ -2354,6 +2358,7 @@ impl EnhancedPersonalAgent {
                         continue;
                     } else {
                         warn!("Hermes turn {}: unknown tool '{}'", turn + 1, tool_name);
+                        conversation.push(("user".to_string(), current_query.clone()));
                         conversation.push(("assistant".to_string(), response_text.clone()));
                         current_query = format!(
                             "Tool '{}' does not exist. Pick from the available tools list.",
