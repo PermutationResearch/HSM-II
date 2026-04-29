@@ -18,6 +18,7 @@
 //! - [`coordinator`] — coordinator delegation tracing (`coordinator_step_span`, `HarnessRunEnvelope::subagent_delegate`).
 
 mod anti_sycophancy;
+mod agent_capabilities;
 mod approval;
 mod cc_orchestrator;
 mod context_tier;
@@ -36,6 +37,7 @@ mod resume;
 mod runtime;
 mod scheduler;
 mod session_persist;
+mod srt_sandbox;
 mod store;
 mod thread_workspace;
 mod tool_checkpoint;
@@ -46,6 +48,7 @@ pub use anti_sycophancy::{
     run_anti_sycophancy_loop, sycophancy_heuristic, AntiSycophancyConfig, AntiSycophancyRoundLog,
     AntiSycophancyRunResult, CriticParse, CriticVerdict,
 };
+pub use agent_capabilities::baseline_coding_agent_contract;
 pub use approval::{ApprovalOutcome, ApprovalService, ApprovalStore, PendingApproval};
 pub use cc_orchestrator::{
     CcAgentSlot, CcCrossReviewMode, CcDraft, CcOrchestrator, CcOrchestratorConfig, CcReview,
@@ -72,9 +75,14 @@ pub use resume::ResumeSessionMap;
 pub use runtime::HarnessRuntime;
 pub use scheduler::Scheduler;
 pub use session_persist::{append_session_event, load_recent_session_events, session_events_path};
+pub use srt_sandbox::{
+    check_srt_write_allowed, commit_bytes_via_srt, run_srt_argv_blocking, run_srt_bash_blocking,
+    srt_executable, srt_sandbox_enabled, srt_settings_value,
+};
 pub use store::HarnessStore;
 pub use thread_workspace::{
-    activate_thread_workspace, appliance_home, current_root, deactivate_thread_workspace,
+    activate_thread_workspace, activate_thread_workspace_at, appliance_home, current_root,
+    deactivate_thread_workspace,
     ensure_thread_workspace_on_disk, resolve_tool_fs_path, sanitize_thread_id,
     thread_workspace_enabled, workspace_dirs, HarnessTurnCleanup,
 };

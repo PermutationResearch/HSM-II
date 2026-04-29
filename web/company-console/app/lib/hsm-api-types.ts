@@ -263,6 +263,25 @@ export type HsmThreadSession = {
   updated_at: string;
 };
 
+export type HsmMissionControlSummary = {
+  autonomy_policy?: Record<string, unknown> | null;
+  ops: {
+    pending_approvals: number;
+    running_connector_ops: number;
+    active_schedules: number;
+    automation_queue: number;
+    recent_incidents_48h: number;
+  };
+  kpis: Array<{
+    kpi_key: string;
+    value: number;
+    snapshot_at: string;
+    target_value?: number | null;
+    direction?: string | null;
+    target_enabled?: boolean;
+  }>;
+};
+
 /** `GET /api/company/companies/:id/spend/summary` */
 export type HsmSpendSummaryRow = {
   company_id: string;

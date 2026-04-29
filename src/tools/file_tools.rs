@@ -28,6 +28,23 @@ impl ReadTool {
         Self
     }
 
+    /// Read a line range via `sed` inside `srt` (same sandbox as bash/write).
+    fn read_file_via_srt(path: &Path, offset: usize, limit: usize) -> Result<String, String> {
+        let start = offset.max(1);
+        let end = start.saturating_add(limit.saturating_sub(1)).max(start);
+        let argv = vec![
+            "sed".to_string(),
+            "-n".to_string(),
+            format!("{},{}p", start, end),
+            path.to_string_lossy().into_owned(),
+        ];
+        let (stdout, stderr, code) = crate::harness::run_srt_argv_blocking(&argv, None)?;
+        if code != 0 {
+            return Err(format!("srt sed read failed (exit {code}): {stderr}"));
+        }
+        Ok(stdout)
+    }
+
     fn read_file_internal(
         &self,
         path: &Path,
@@ -124,6 +141,21 @@ impl Tool for ReadTool {
             path_str, offset, limit
         );
 
+        if crate::harness::srt_sandbox_enabled() {
+            if let Err(e) = crate::harness::check_srt_write_allowed(&path) {
+                // Re-use write-root allowlist for reads under SRT (same roots as sandbox policy).
+                return ToolOutput::error(e);
+            }
+            match Self::read_file_via_srt(&path, offset, limit) {
+                Ok(content) => {
+                    return ToolOutput::success(format!(
+                        "{content}\n\n[read via srt sed; offset={offset} limit={limit}]"
+                    ));
+                }
+                Err(e) => return ToolOutput::error(e),
+            }
+        }
+
         match self.read_file_internal(&path, offset, limit) {
             Ok(content) => ToolOutput::success(content),
             Err(e) => ToolOutput::error(e),
@@ -180,6 +212,10 @@ impl Tool for WriteTool {
             Err(e) => return ToolOutput::error(e),
         };
 
+        if let Err(e) = crate::harness::check_srt_write_allowed(&path) {
+            return ToolOutput::error(e);
+        }
+
         // Create parent directories
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
@@ -191,14 +227,26 @@ impl Tool for WriteTool {
 
         debug!("Writing file: {} ({} bytes)", path_str, content.len());
 
-        match fs::write(&path, content) {
+        let write_res = if crate::harness::srt_sandbox_enabled() {
+            crate::harness::commit_bytes_via_srt(&path, content.as_bytes()).map_err(|e| e)
+        } else {
+            fs::write(&path, content).map_err(|e| e.to_string())
+        };
+
+        match write_res {
             Ok(_) => {
                 let action = if existed { "Updated" } else { "Created" };
-                ToolOutput::success(format!("{} file: {}", action, path_str)).with_metadata(
+                let via = if crate::harness::srt_sandbox_enabled() {
+                    " (via srt cp)"
+                } else {
+                    ""
+                };
+                ToolOutput::success(format!("{} file: {}{}", action, path_str, via)).with_metadata(
                     serde_json::json!({
                         "path": path_str,
                         "bytes_written": content.len(),
                         "existed": existed,
+                        "srt": crate::harness::srt_sandbox_enabled(),
                     }),
                 )
             }
@@ -248,9 +296,22 @@ impl EditTool {
 
         let new_content = content.replacen(old_string, new_string, 1);
 
-        fs::write(path, new_content).map_err(|e| format!("Failed to write file: {}", e))?;
+        if crate::harness::srt_sandbox_enabled() {
+            crate::harness::commit_bytes_via_srt(path, new_content.as_bytes())
+                .map_err(|e| format!("Failed to write file (srt): {}", e))?;
+        } else {
+            fs::write(path, new_content).map_err(|e| format!("Failed to write file: {}", e))?;
+        }
 
-        Ok(format!("Successfully edited file: {}", path.display()))
+        Ok(format!(
+            "Successfully edited file: {}{}",
+            path.display(),
+            if crate::harness::srt_sandbox_enabled() {
+                " (via srt cp)"
+            } else {
+                ""
+            }
+        ))
     }
 }
 
@@ -300,6 +361,10 @@ impl Tool for EditTool {
 
         if !path.exists() {
             return ToolOutput::error(format!("File not found: {}", path_str));
+        }
+
+        if let Err(e) = crate::harness::check_srt_write_allowed(&path) {
+            return ToolOutput::error(e);
         }
 
         if old_string.is_empty() {

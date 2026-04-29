@@ -1,8 +1,14 @@
 //! HarnessV1 turn lifecycle + JSONL store smoke tests.
 
 use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
 
 use hyper_stigmergy::harness::{HarnessEvent, HarnessRuntime, HarnessState, HarnessStore};
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 struct EnvSet<'a> {
     key: &'a str,
@@ -57,6 +63,7 @@ fn noop_runtime_turn_cycle_no_io() {
 
 #[test]
 fn from_env_logs_two_lines_per_turn() {
+    let _guard = env_lock().lock().expect("env lock");
     let dir = tempfile::tempdir().expect("tempdir");
     let log = dir.path().join("harness.jsonl");
     let _log_guard = EnvSet::new("HSM_HARNESS_LOG", log.to_str().unwrap());
@@ -75,6 +82,7 @@ fn from_env_logs_two_lines_per_turn() {
 
 #[test]
 fn from_env_logs_failed_turn() {
+    let _guard = env_lock().lock().expect("env lock");
     let dir = tempfile::tempdir().expect("tempdir");
     let log = dir.path().join("harness.jsonl");
     let _log_guard = EnvSet::new("HSM_HARNESS_LOG", log.to_str().unwrap());

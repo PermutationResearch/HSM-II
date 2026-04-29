@@ -3,6 +3,7 @@
 //! Bash execution, grep search, and file finding.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
@@ -60,6 +61,10 @@ impl BashTool {
         argv: Vec<String>,
         working_dir: Option<String>,
     ) -> Result<(String, String, i32), String> {
+        if crate::harness::srt_sandbox_enabled() {
+            let cwd = working_dir.as_deref().map(Path::new);
+            return crate::harness::run_srt_argv_blocking(&argv, cwd);
+        }
         if argv.is_empty() || argv[0].is_empty() {
             return Err("argv must be a non-empty array with a program path or name first".into());
         }
@@ -130,6 +135,10 @@ impl BashTool {
         command: String,
         working_dir: Option<String>,
     ) -> Result<(String, String, i32), String> {
+        if crate::harness::srt_sandbox_enabled() {
+            let cwd = working_dir.as_deref().map(Path::new);
+            return crate::harness::run_srt_bash_blocking(&command, cwd);
+        }
         warn_host_bash_unsafe_once();
         let cwd = working_dir.as_deref().map(std::path::Path::new);
         let mut cmd = crate::harness::host_bash_command(&command, cwd);
@@ -153,7 +162,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command or (preferred) argv-only: pass `argv` as [\"prog\", \"arg1\", ...]. Use with caution. 30s timeout. HSM_BASH_POLICY=strict, HSM_BASH_ARGV_ONLY=1, HSM_BASH_ARGV_ALLOWLIST=ls,git. Isolation: Docker by default for shell commands (HSM_THREAD_WORKSPACE=1); argv runs on host with minimal env. HSM_BASH_ISOLATE, HSM_DOCKER_BASH=0, HSM_UNSAFE_HOST_BASH=1."
+        "Execute a bash command or (preferred) argv-only: pass `argv` as [\"prog\", \"arg1\", ...]. Use with caution. 30s timeout. HSM_BASH_POLICY=strict, HSM_BASH_ARGV_ONLY=1, HSM_BASH_ARGV_ALLOWLIST=ls,git. Isolation: Docker by default for shell commands (HSM_THREAD_WORKSPACE=1); argv runs on host with minimal env. Host hardening: HSM_BASH_ISOLATE=firejail|unshare, HSM_SRT=1 wraps host bash/argv with Anthropic `srt` (npm i -g @anthropic-ai/sandbox-runtime; see src/harness/srt_sandbox.rs). HSM_DOCKER_BASH=0, HSM_UNSAFE_HOST_BASH=1."
     }
 
     fn parameters_schema(&self) -> Value {

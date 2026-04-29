@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
 use clap::Parser;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -58,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     hyper_stigmergy::policy_config::ensure_loaded();
     hyper_stigmergy::telemetry::init_from_env();
+    let _telemetry_session = hyper_stigmergy::telemetry::start_session_guard();
 
     let args = Args::parse();
     let home = resolve_hsmii_home(args.config, args.hsm_profile.as_deref());
@@ -75,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
 
     let paperclip = Arc::new(Mutex::new(IntelligenceLayer::new()));
     let state = ConsoleState::with_paperclip_layer(home.clone(), company_db, paperclip);
+    hyper_stigmergy::company_os::start_paperclip_reconcile_worker(state.clone());
+    tracing::info!("Company OS Paperclip reconcile worker started");
     if let Some(pool) = state.company_db.clone() {
         hyper_stigmergy::company_os::start_automation_worker(pool, home.clone());
         tracing::info!("Company OS automation worker started");
@@ -84,7 +88,14 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{}:{}", args.bind_host, args.listen_port).parse()?;
     tracing::info!(%addr, home = %home.display(), "HSM company console API");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| {
+            format!(
+                "cannot bind {addr} (e.g. address already in use / os error 48); another hsm_console may hold port {} — try: lsof -nP -iTCP:{} -sTCP:LISTEN",
+                args.listen_port, args.listen_port
+            )
+        })?;
     axum::serve(listener, app).await?;
     Ok(())
 }

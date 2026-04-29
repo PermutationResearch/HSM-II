@@ -12,13 +12,31 @@ pub fn subprocess_inherit_full_env() -> bool {
 }
 
 fn default_path() -> String {
-    std::env::var("HSM_SUBPROCESS_PATH").unwrap_or_else(|_| {
-        if cfg!(target_os = "macos") {
-            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin".to_string()
-        } else {
-            "/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+    if let Ok(explicit) = std::env::var("HSM_SUBPROCESS_PATH") {
+        return explicit;
+    }
+    let base = if cfg!(target_os = "macos") {
+        "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+    } else {
+        "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+    };
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut out = Vec::<String>::new();
+    for part in current.split(':').chain(base.split(':')) {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
         }
-    })
+        if seen.insert(p.to_string()) {
+            out.push(p.to_string());
+        }
+    }
+    if out.is_empty() {
+        base.to_string()
+    } else {
+        out.join(":")
+    }
 }
 
 fn minimal_env_pairs() -> Vec<(OsString, OsString)> {

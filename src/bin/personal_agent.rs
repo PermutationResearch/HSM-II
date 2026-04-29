@@ -223,6 +223,7 @@ async fn main() -> Result<()> {
 
     load_repo_dotenv();
     hyper_stigmergy::telemetry::init_from_env();
+    let _telemetry_session = hyper_stigmergy::telemetry::start_session_guard();
 
     let cli = Cli::parse();
 
@@ -434,6 +435,8 @@ async fn cmd_start(home: &PathBuf, daemon: bool, discord: bool, telegram: bool) 
 
         let console_state =
             ConsoleState::with_paperclip_layer(home.clone(), company_db.clone(), Arc::clone(&intelligence));
+        hyper_stigmergy::company_os::start_paperclip_reconcile_worker(console_state.clone());
+        info!("Company OS Paperclip reconcile worker started (embedded console)");
         let console_app = console_router(console_state)
             .layer(local_cors_layer())
             .layer(tower_http::trace::TraceLayer::new_for_http());

@@ -12,13 +12,6 @@ import {
 } from "@/app/components/ui/collapsible";
 import { Input } from "@/app/components/ui/input";
 import { Label } from "@/app/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/app/components/ui/select";
 import { Textarea } from "@/app/components/ui/textarea";
 import { companyOsUrl } from "@/app/lib/company-api-url";
 import { ISSUE_LABEL_SEED_DEFAULTS } from "@/app/lib/issue-label-defaults";
@@ -612,24 +605,19 @@ export function WorkspaceNewIssueForm({
             <Label className="text-xs text-foreground" htmlFor={`${idPrefix}-project`}>
               Project
             </Label>
-            <Select
+            <select
+              id={`${idPrefix}-project`}
               value={projectId || "__none__"}
-              onValueChange={(v) => setProjectId(v === "__none__" ? "" : v)}
+              onChange={(e) => setProjectId(e.target.value === "__none__" ? "" : e.target.value)}
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
-              <SelectTrigger id={`${idPrefix}-project`} className="h-9 text-sm">
-                <SelectValue placeholder="No project" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__" className="text-sm">
-                  No project
-                </SelectItem>
-                {projectsSorted.map((p) => (
-                  <SelectItem key={p.id} value={p.id} className="text-sm">
-                    {p.title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              <option value="__none__">No project</option>
+              {projectsSorted.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title}
+                </option>
+              ))}
+            </select>
             {projectsSorted.length === 0 ? (
               <p className="text-[11px] text-muted-foreground">No projects yet — add one from the console home.</p>
             ) : null}
@@ -871,60 +859,44 @@ export function WorkspaceNewIssueForm({
               <p className="text-[10px] text-muted-foreground">
                 Defaults to this workspace agent; pick who should review (any company agent).
               </p>
-              <Select
+              <select
                 value={reviewerPersona || "__none__"}
-                onValueChange={(v) => setReviewerPersona(v === "__none__" ? "" : v)}
+                onChange={(e) => setReviewerPersona(e.target.value === "__none__" ? "" : e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               >
-                <SelectTrigger className="font-mono text-xs">
-                  <SelectValue placeholder="No reviewer" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__" className="font-mono text-xs">
-                    No reviewer
-                  </SelectItem>
-                  {reviewerPersona && !agents.some((a) => a.name === reviewerPersona) ? (
-                    <SelectItem value={reviewerPersona} className="font-mono text-xs">
-                      {reviewerPersona} (current)
-                    </SelectItem>
-                  ) : null}
-                  {agents.map((a) => (
-                    <SelectItem key={a.id} value={a.name} className="font-mono text-xs">
-                      {a.name}
-                      {a.title ? ` — ${a.title}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <option value="__none__">No reviewer</option>
+                {reviewerPersona && !agents.some((a) => a.name === reviewerPersona) ? (
+                  <option value={reviewerPersona}>{reviewerPersona} (current)</option>
+                ) : null}
+                {agents.map((a) => (
+                  <option key={a.id} value={a.name}>
+                    {a.name}
+                    {a.title ? ` — ${a.title}` : ""}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs">Approver</Label>
               <p className="text-[10px] text-muted-foreground">
                 Who signs off — defaults to the agent in charge; choose another if needed.
               </p>
-              <Select
+              <select
                 value={approverPersona || "__none__"}
-                onValueChange={(v) => setApproverPersona(v === "__none__" ? "" : v)}
+                onChange={(e) => setApproverPersona(e.target.value === "__none__" ? "" : e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               >
-                <SelectTrigger className="font-mono text-xs">
-                  <SelectValue placeholder="No approver" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__" className="font-mono text-xs">
-                    No approver
-                  </SelectItem>
-                  {approverPersona && !agents.some((a) => a.name === approverPersona) ? (
-                    <SelectItem value={approverPersona} className="font-mono text-xs">
-                      {approverPersona} (current)
-                    </SelectItem>
-                  ) : null}
-                  {agents.map((a) => (
-                    <SelectItem key={a.id} value={a.name} className="font-mono text-xs">
-                      {a.name}
-                      {a.title ? ` — ${a.title}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <option value="__none__">No approver</option>
+                {approverPersona && !agents.some((a) => a.name === approverPersona) ? (
+                  <option value={approverPersona}>{approverPersona} (current)</option>
+                ) : null}
+                {agents.map((a) => (
+                  <option key={a.id} value={a.name}>
+                    {a.name}
+                    {a.title ? ` — ${a.title}` : ""}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -936,17 +908,16 @@ export function WorkspaceNewIssueForm({
               <span className="ml-auto font-mono text-[11px] font-normal text-muted-foreground">{recurringLabel}</span>
             </CollapsibleTrigger>
             <CollapsibleContent className="mt-2 space-y-2 pl-1 data-[state=closed]:pointer-events-none">
-              <Select value={recurring} onValueChange={(v) => setRecurring(v as Recurring)}>
-                <SelectTrigger className="max-w-xs font-mono text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">One-time (not recurring)</SelectItem>
-                  <SelectItem value="daily">Daily</SelectItem>
-                  <SelectItem value="weekly">Weekly</SelectItem>
-                  <SelectItem value="monthly">Monthly</SelectItem>
-                </SelectContent>
-              </Select>
+              <select
+                value={recurring}
+                onChange={(e) => setRecurring(e.target.value as Recurring)}
+                className="h-9 max-w-xs rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              >
+                <option value="none">One-time (not recurring)</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
               <p className="text-[10px] text-muted-foreground">
                 Stored as <span className="font-mono">mode: recurring:…</span> on the task; your scheduler integration
                 enforces cadence.

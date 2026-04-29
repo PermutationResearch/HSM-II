@@ -96,8 +96,7 @@ export async function POST(req: NextRequest) {
     persistAgentNote: body.persist_note !== false,
     waitForTelemetryMs,
     requireWorkerEvidence: true,
-    runSummary: `Skill run via worker agent loop: ${skillSlug}`,
-    dispatchNoteText: `Running \`${skillSlug}\` in worker agent loop runtime.`,
+    runSummary: `Skill run via worker: ${skillSlug}`,
     extraMeta: {
       trigger: "skill_run_api",
       operator_message: body.instruction?.slice(0, 1000) ?? "",

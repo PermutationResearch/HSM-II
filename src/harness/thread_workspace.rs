@@ -90,6 +90,24 @@ pub fn activate_thread_workspace(thread_id: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Force tool FS resolution (`resolve_tool_fs_path`) to this directory for the current turn.
+///
+/// Used by Company OS `execute-worker` so `read`/`grep`/`bash` see the **task workspace** (repo
+/// checkout or `workspace_attachment_paths`) instead of an empty `workspaces/<id>/` sandbox.
+/// Cleared by [`HarnessTurnCleanup`] / [`deactivate_thread_workspace`].
+pub fn activate_thread_workspace_at(root: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    let root = root.as_ref();
+    if !root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("thread workspace root is not a directory: {}", root.display()),
+        ));
+    }
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    *active_slot().write().expect("workspace lock poisoned") = Some(canonical.clone());
+    Ok(canonical)
+}
+
 pub fn deactivate_thread_workspace() {
     if let Ok(mut g) = active_slot().write() {
         *g = None;

@@ -20,7 +20,9 @@
 //! ```
 
 use super::{CouncilDecision, CouncilId};
-use crate::ollama_client::OllamaClient;
+use crate::ollama_client::{
+    resolve_model_from_env, try_cloud_chat_env, OllamaClient, OllamaConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -81,10 +83,7 @@ impl AgentConfig {
     /// Resolve model from `OLLAMA_MODEL` env var, falling back to `qwen2.5:14b`.
     /// When set to `"auto"`, defer to auto-detection (caller should run `OllamaConfig::detect_model`).
     fn resolve_model() -> String {
-        match std::env::var("OLLAMA_MODEL") {
-            Ok(m) if !m.is_empty() && m != "auto" => m,
-            _ => "qwen2.5:14b".to_string(),
-        }
+        resolve_model_from_env("qwen2.5:14b")
     }
 
     pub fn default_worker() -> Self {
@@ -123,7 +122,6 @@ pub struct RalphCouncil {
     council_id: CouncilId,
     config: RalphConfig,
     state_dir: PathBuf,
-    _ollama: OllamaClient,
     history: Vec<RalphIteration>,
 }
 
@@ -158,46 +156,82 @@ impl RalphCouncil {
     /// Create new Ralph Council
     pub fn new(council_id: CouncilId, config: RalphConfig) -> Self {
         let state_dir = config.state_dir.join(council_id.to_string());
-        let _ollama = OllamaClient::new(crate::ollama_client::OllamaConfig::default());
 
         Self {
             council_id,
             config,
             state_dir,
-            _ollama,
             history: Vec::new(),
         }
     }
 
-    /// Generate text using Ollama with a specific model
-    async fn generate_with_model(&self, model: &str, prompt: &str) -> anyhow::Result<String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+    fn ollama_config_for_agent(&self, agent: &AgentConfig) -> OllamaConfig {
+        let mut cfg = OllamaConfig::default();
+        cfg.model = agent.model.clone();
+        cfg.temperature = agent.temperature;
+        // Ralph phases can be long-running; honor council timeout (default 600s).
+        cfg.latency_budget_ms = self
+            .config
+            .phase_timeout_secs
+            .saturating_mul(1000)
+            .clamp(5_000, 3_600_000);
+        cfg
+    }
 
-        let body = serde_json::json!({
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-        });
+    /// Worker/reviewer LLM: thin conductor — prefers OpenRouter when `OPENROUTER_API_KEY` or
+    /// `HSM_OPENROUTER_API_KEY` is set (optional `RALPH_OPENROUTER_MODEL` overrides `CLOUD_MODEL_ID`);
+    /// otherwise `OllamaClient::chat` (Ollama + cloud fallback). Loop state stays on disk under
+    /// `state_dir`, not in the harness.
+    async fn chat_with_agent(&self, agent: &AgentConfig, user_prompt: &str) -> anyhow::Result<String> {
+        let system = agent
+            .system_prompt
+            .replace("{STATE_DIR}", &self.state_dir.to_string_lossy());
+        let cfg = self.ollama_config_for_agent(agent);
 
-        let response = client
-            .post("http://localhost:11434/api/generate")
-            .json(&body)
-            .send()
-            .await?;
+        let skip_openrouter = std::env::var("RALPH_SKIP_OPENROUTER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        if !response.status().is_success() {
+        if !skip_openrouter {
+            let or_model = std::env::var("RALPH_OPENROUTER_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            if let Some(cloud) = try_cloud_chat_env(
+                &system,
+                user_prompt,
+                &[],
+                agent.temperature,
+                cfg.max_tokens,
+                or_model.as_deref(),
+            )
+            .await
+            {
+                return Ok(cloud.text);
+            }
+        }
+
+        let client = OllamaClient::new(cfg.clone());
+        let result = client.chat(&system, user_prompt, &[]).await;
+
+        let text = result.text.trim();
+        if text.is_empty() {
             return Err(anyhow::anyhow!(
-                "Ollama returned status {}",
-                response.status()
+                "LLM returned empty response (model `{}`). Set OPENROUTER_API_KEY (+ CLOUD_MODEL_ID) for OpenRouter, or run `ollama pull {}` with OLLAMA_HOST pointing at that server.",
+                agent.model,
+                agent.model
+            ));
+        }
+        if result.timed_out && result.text.trim_start().starts_with("[FALLBACK:") {
+            return Err(anyhow::anyhow!(
+                "{} (Ollama {}:{}, model `{}`). For OpenRouter-first, set OPENROUTER_API_KEY; optional RALPH_OPENROUTER_MODEL. For Ollama-only, fix the model tag or host.",
+                result.text,
+                cfg.host,
+                cfg.port,
+                agent.model
             ));
         }
 
-        let json: serde_json::Value = response.json().await?;
-        let text = json["response"].as_str().unwrap_or("").to_string();
-
-        Ok(text)
+        Ok(result.text)
     }
 
     /// Initialize state directory and write task
@@ -344,10 +378,7 @@ impl RalphCouncil {
         let prompt = self.build_worker_prompt();
 
         // Call LLM with worker model
-        let response = match self
-            .generate_with_model(&self.config.worker.model, &prompt)
-            .await
-        {
+        let response = match self.chat_with_agent(&self.config.worker, &prompt).await {
             Ok(resp) => resp,
             Err(e) => return Err(anyhow::anyhow!("Worker LLM error: {}", e)),
         };
@@ -388,10 +419,7 @@ impl RalphCouncil {
         let prompt = self.build_reviewer_prompt();
 
         // Call LLM with reviewer model (potentially different from worker)
-        let response = match self
-            .generate_with_model(&self.config.reviewer.model, &prompt)
-            .await
-        {
+        let response = match self.chat_with_agent(&self.config.reviewer, &prompt).await {
             Ok(resp) => resp,
             Err(e) => return Err(anyhow::anyhow!("Reviewer LLM error: {}", e)),
         };

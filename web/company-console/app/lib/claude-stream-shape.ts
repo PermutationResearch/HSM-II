@@ -92,3 +92,109 @@ export function extractAnthropicStreamTextEffect(
   }
   return null;
 }
+
+/** Completed `tool_use` block after `content_block_stop` (indices ≥ 1 are reserved for runtime tools). */
+export type AnthropicCompletedToolUseWire = {
+  block_index: number;
+  tool_use_id: string;
+  name: string;
+  input_json: string;
+};
+
+/**
+ * Reassembles Anthropic-style `tool_use` streaming (start → `input_json_delta`* → `stop`).
+ * Deltas are **concatenated** in order (`partial_json` fragments), matching Anthropic’s wire
+ * and HSM’s cumulative `tool_start_delta.input.partial_json` previews (suffixes are re-spliced
+ * server-side before emit).
+ */
+export class AnthropicToolUseWireAssembler {
+  private byIndex = new Map<number, { id: string; name: string; json: string }>();
+
+  reset(): void {
+    this.byIndex.clear();
+  }
+
+  /**
+   * Feed one inner `event` from `{ type: "stream_event", event }`.
+   * Clears tool buffer on `message_start`. Returns a completed tool when `content_block_stop`
+   * closes a `tool_use` block we were tracking.
+   */
+  consume(event: unknown): AnthropicCompletedToolUseWire | null {
+    const o = event as Record<string, unknown> | null;
+    if (!o || typeof o !== "object") return null;
+    const typ = typeof o.type === "string" ? o.type : "";
+    if (typ === "message_start") {
+      this.reset();
+      return null;
+    }
+    const idxRaw = o.index;
+    const idx = typeof idxRaw === "number" ? idxRaw : Number(idxRaw);
+    if (!Number.isFinite(idx)) return null;
+
+    if (typ === "content_block_start") {
+      const cb = o.content_block as Record<string, unknown> | undefined;
+      if (cb && cb.type === "tool_use") {
+        const id = typeof cb.id === "string" ? cb.id : "";
+        const name = typeof cb.name === "string" ? cb.name : "";
+        this.byIndex.set(idx, { id, name, json: "" });
+      }
+      return null;
+    }
+
+    if (typ === "content_block_delta") {
+      const d = o.delta as Record<string, unknown> | undefined;
+      if (!d || d.type !== "input_json_delta" || typeof d.partial_json !== "string") return null;
+      const cur = this.byIndex.get(idx);
+      if (!cur) return null;
+      cur.json += d.partial_json;
+      return null;
+    }
+
+    if (typ === "content_block_stop") {
+      const cur = this.byIndex.get(idx);
+      this.byIndex.delete(idx);
+      if (!cur || !cur.name) return null;
+      return {
+        block_index: idx,
+        tool_use_id: cur.id,
+        name: cur.name,
+        input_json: cur.json,
+      };
+    }
+
+    return null;
+  }
+}
+
+/** One-shot `tool_use` block (empty `input` in start, full JSON via one `input_json_delta`, then stop). */
+export function anthropicContentBlockStartToolUse(
+  index: number,
+  toolUseId: string,
+  name: string,
+): AnthropicStreamEvent {
+  return {
+    type: "content_block_start",
+    index,
+    content_block: {
+      type: "tool_use",
+      id: toolUseId,
+      name,
+      input: {},
+    },
+  };
+}
+
+export function anthropicToolUseInputJsonDelta(index: number, partialJson: string): AnthropicStreamEvent {
+  return {
+    type: "content_block_delta",
+    index,
+    delta: { type: "input_json_delta", partial_json: partialJson },
+  };
+}
+
+export function anthropicContentBlockStopIndex(index: number): AnthropicStreamEvent {
+  return {
+    type: "content_block_stop",
+    index,
+  };
+}

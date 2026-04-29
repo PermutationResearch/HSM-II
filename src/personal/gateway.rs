@@ -220,6 +220,10 @@ pub struct Message {
     pub timestamp: DateTime<Utc>,
     pub attachments: Vec<Attachment>,
     pub reply_to: Option<String>,
+    /// When set (e.g. Company OS `execute-worker`), file/shell tools resolve relative paths under
+    /// this absolute directory for the duration of the turn instead of `workspaces/<id>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_workspace_root: Option<String>,
 }
 
 /// Message attachment

@@ -350,6 +350,51 @@ fn hypergraph_candidate_paths(home: &Path) -> [PathBuf; 4] {
     ]
 }
 
+async fn build_company_graph_fallback(pool: &PgPool) -> Option<Value> {
+    let companies = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        r#"SELECT id, COALESCE(name, 'company') AS name
+           FROM companies
+           ORDER BY created_at DESC
+           LIMIT 30"#,
+    )
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let tasks = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, String)>(
+        r#"SELECT id, company_id, COALESCE(title, 'task') AS title, COALESCE(state, 'unknown') AS state
+           FROM tasks
+           ORDER BY created_at DESC
+           LIMIT 200"#,
+    )
+    .fetch_all(pool)
+    .await
+    .ok()?;
+
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut links: Vec<Value> = Vec::new();
+    for (company_id, name) in companies {
+        nodes.push(json!({
+            "id": format!("company:{company_id}"),
+            "kind": "company",
+            "label": name,
+        }));
+    }
+    for (task_id, company_id, title, state) in tasks {
+        nodes.push(json!({
+            "id": format!("task:{task_id}"),
+            "kind": "task",
+            "label": title,
+            "state": state,
+        }));
+        links.push(json!({
+            "source": format!("company:{company_id}"),
+            "target": format!("task:{task_id}"),
+            "kind": "owns",
+        }));
+    }
+    Some(json!({ "nodes": nodes, "links": links }))
+}
+
 async fn get_graph_hypergraph(State(st): State<ConsoleState>) -> Json<Value> {
     for p in hypergraph_candidate_paths(&st.home) {
         if p.is_file() {
@@ -361,6 +406,26 @@ async fn get_graph_hypergraph(State(st): State<ConsoleState>) -> Json<Value> {
                     }));
                 }
             }
+        }
+    }
+    if let Ok(rows) = read_trail_rows(&st.home, 400).await {
+        if !rows.is_empty() {
+            return Json(json!({
+                "path": null,
+                "source": "task_trail_fallback",
+                "graph": trail_lines_to_graph(&rows),
+                "hint": "Showing synthesized graph from memory/task_trail.jsonl because no hyper_graph.json export was found.",
+            }));
+        }
+    }
+    if let Some(ref pool) = st.company_db {
+        if let Some(graph) = build_company_graph_fallback(pool).await {
+            return Json(json!({
+                "path": null,
+                "source": "company_os_db_fallback",
+                "graph": graph,
+                "hint": "Showing synthesized graph from companies/tasks because no hyper_graph.json export was found.",
+            }));
         }
     }
     Json(json!({

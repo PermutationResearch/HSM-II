@@ -222,6 +222,96 @@ fn tool_prompt_cap_from_env() -> usize {
         .unwrap_or(DEFAULT_TOOL_PROMPT_CAP)
 }
 
+fn prompt_requires_workspace_tooling(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    [
+        "codebase",
+        "repository",
+        "repo ",
+        "workspace",
+        "latest changes",
+        "pull request",
+        "recent pr",
+        "recent prs",
+        "diff",
+        "architecture risk",
+        "repo-intel",
+        "validate-delivery",
+        "orchestrate-review",
+        "perf-analyzer",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn core_tool_names_for_prompt(prompt: &str) -> &'static [&'static str] {
+    if prompt_requires_workspace_tooling(prompt) {
+        &[
+            "list_directory",
+            "search_files",
+            "read",
+            "grep",
+            "find",
+            "bash",
+            "skills_list",
+            "skill_md_read",
+        ]
+    } else {
+        &[]
+    }
+}
+
+fn build_visible_tool_lines(
+    registry: &crate::tools::ToolRegistry,
+    prompt: &str,
+    rank_cap: usize,
+) -> (Vec<String>, usize, usize) {
+    let ranked_tools = rank_tools_for_prompt(registry, prompt, rank_cap);
+    let tool_catalog = registry.list_tools();
+    let tool_descs: std::collections::HashMap<&str, &str> = tool_catalog.iter().copied().collect();
+    let mut visible_names: Vec<String> = Vec::new();
+
+    for name in core_tool_names_for_prompt(prompt) {
+        if tool_descs.contains_key(name) && !visible_names.iter().any(|n| n == name) {
+            visible_names.push((*name).to_string());
+        }
+    }
+
+    for scored in &ranked_tools {
+        if visible_names.len() >= rank_cap {
+            break;
+        }
+        if tool_descs.contains_key(scored.name.as_str()) && !visible_names.iter().any(|n| n == &scored.name) {
+            visible_names.push(scored.name.clone());
+        }
+    }
+
+    if visible_names.is_empty() {
+        visible_names = tool_catalog
+            .iter()
+            .take(rank_cap)
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+    }
+
+    let tool_lines = visible_names
+        .iter()
+        .filter_map(|name| {
+            tool_descs.get(name.as_str()).map(|desc| {
+                if let Some(scored) = ranked_tools.iter().find(|t| t.name == *name) {
+                    format!("- {}: {} [score={:.1}]", name, desc, scored.score)
+                } else {
+                    format!("- {}: {}", name, desc)
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let visible_tool_count = visible_names.len();
+    let hidden_count = tool_catalog.len().saturating_sub(visible_tool_count);
+    (tool_lines, visible_tool_count, hidden_count)
+}
+
 /// Configuration for the enhanced agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnhancedAgentConfig {
@@ -2101,29 +2191,8 @@ impl EnhancedPersonalAgent {
 
         // Build tool schema list for the system prompt
         let rank_cap = tool_prompt_cap_from_env();
-        let ranked_tools = rank_tools_for_prompt(&self.tool_registry, task, rank_cap);
-        let tool_catalog = self.tool_registry.list_tools();
-        let tool_descs: std::collections::HashMap<&str, &str> =
-            tool_catalog.iter().copied().collect();
-        let mut visible_tool_count = 0usize;
-        let mut tool_lines = ranked_tools
-            .iter()
-            .filter_map(|t| {
-                tool_descs.get(t.name.as_str()).map(|desc| {
-                    visible_tool_count += 1;
-                    format!("- {}: {} [score={:.1}]", t.name, desc, t.score)
-                })
-            })
-            .collect::<Vec<_>>();
-        if tool_lines.is_empty() {
-            tool_lines = tool_catalog
-                .iter()
-                .take(rank_cap)
-                .map(|(name, desc)| format!("- {}: {}", name, desc))
-                .collect();
-            visible_tool_count = tool_lines.len();
-        }
-        let hidden_count = tool_catalog.len().saturating_sub(visible_tool_count);
+        let (mut tool_lines, visible_tool_count, hidden_count) =
+            build_visible_tool_lines(&self.tool_registry, task, rank_cap);
         if hidden_count > 0 {
             tool_lines.push(format!(
                 "- ... {} additional tools hidden by prompt budget cap",
@@ -2147,6 +2216,13 @@ impl EnhancedPersonalAgent {
             context.skill_prompt_tokens
         );
 
+        let workspace_tool_rule = if prompt_requires_workspace_tooling(task) {
+            "\n             - For repository/workspace/code-review tasks, you MUST call at least one repo-aware tool before any final answer.\n\
+             - Prefer starting with `list_directory`, `search_files`, `read`, `grep`, or `bash`.\n"
+        } else {
+            ""
+        };
+
         let system_prompt = format!(
             "You are an autonomous agent with access to real tools. Complete the user's task by calling tools as needed.\n\n\
              ## Available Tools\n{tools_description}\n\n\
@@ -2156,6 +2232,7 @@ impl EnhancedPersonalAgent {
              ## Rules\n\
              - Call ONE tool at a time, wait for the result, then decide next step.\n\
              - When the task is COMPLETE, respond with a normal text summary (no JSON).\n\
+             {workspace_tool_rule}\
              - If a tool fails, try an alternative approach.\n\
              - Be concise. Do not explain what you will do — just do it."
         );
@@ -2290,6 +2367,21 @@ impl EnhancedPersonalAgent {
             // No tool call detected — this is the final answer
             final_content = response_text;
             break;
+        }
+
+        if final_content.is_empty() && !tools_executed.is_empty() {
+            let finalize_query =
+                "You have already gathered enough tool evidence. Produce the final answer now in plain text only. Do not call any more tools. Summarize the concrete findings and outcome.".to_string();
+            let llm_result = self
+                .llm
+                .chat(&system_prompt, &finalize_query, &conversation)
+                .await;
+            if !llm_result.timed_out && !llm_result.text.is_empty() {
+                let response_text = Self::clean_response(&llm_result.text);
+                if Self::extract_tool_call_json(&response_text).is_none() {
+                    final_content = response_text;
+                }
+            }
         }
 
         if final_content.is_empty() {

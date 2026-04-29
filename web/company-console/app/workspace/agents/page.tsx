@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   ChevronRight,
@@ -16,7 +16,7 @@ import { Skeleton } from "@/app/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { useWorkspace } from "@/app/context/WorkspaceContext";
 import type { HsmCompanyAgentRow, HsmSkillBankEntry } from "@/app/lib/hsm-api-types";
-import { useCompanyAgents, useSkillBank } from "@/app/lib/hsm-queries";
+import { fetchSkillBankEntry, useCompanyAgents, useSkillBank } from "@/app/lib/hsm-queries";
 
 function humanizeAgentName(name: string): string {
   return name
@@ -57,8 +57,12 @@ function statusVariant(status: string): "default" | "secondary" | "outline" {
 }
 
 function SkillBankPanel({
+  apiBase,
+  companyId,
   skillBank,
 }: {
+  apiBase: string;
+  companyId: string;
   skillBank: {
     current_skills: HsmSkillBankEntry[];
     recommended_skills: HsmSkillBankEntry[];
@@ -66,6 +70,7 @@ function SkillBankPanel({
   };
 }) {
   const [selectedSlug, setSelectedSlug] = useState<string | null>(skillBank.current_skills[0]?.slug ?? null);
+  const [selectedSkillBody, setSelectedSkillBody] = useState<string | null>(null);
   const installed = skillBank.current_skills;
   const inUse = installed.filter((skill) => (skill.linked_agent_count ?? 0) > 0);
   const recommended = skillBank.recommended_skills;
@@ -73,6 +78,25 @@ function SkillBankPanel({
     installed.find((skill) => skill.slug === selectedSlug) ??
     recommended.find((skill) => skill.slug === selectedSlug) ??
     null;
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!selectedSkill || selectedSkill.body) {
+        setSelectedSkillBody(selectedSkill?.body ?? null);
+        return;
+      }
+      try {
+        const entry = await fetchSkillBankEntry(apiBase, companyId, selectedSkill.slug);
+        if (!cancelled) setSelectedSkillBody(entry.body ?? null);
+      } catch {
+        if (!cancelled) setSelectedSkillBody(null);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, companyId, selectedSkill]);
 
   const renderSkillList = (skills: HsmSkillBankEntry[], emptyLabel: string) => (
     <div className="space-y-2">
@@ -191,7 +215,7 @@ function SkillBankPanel({
               <div className="mt-4 rounded-xl border border-admin-border/80 bg-black/10 p-3">
                 <p className="text-[11px] font-medium text-foreground/90">Preview</p>
                 <pre className="mt-2 max-h-[280px] overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
-                  {selectedSkill.body || "This entry is coming from other companies, so only summary metadata is shown here."}
+                  {selectedSkillBody || "This entry is coming from other companies, so only summary metadata is shown here."}
                 </pre>
               </div>
             </>
@@ -290,7 +314,7 @@ export default function WorkspaceAgentsPage() {
         </p>
       </div>
 
-      {skillBank ? <SkillBankPanel skillBank={skillBank} /> : <Skeleton className="h-72 rounded-3xl" />}
+      {skillBank ? <SkillBankPanel apiBase={apiBase} companyId={companyId} skillBank={skillBank} /> : <Skeleton className="h-72 rounded-3xl" />}
 
       <Card className="border-admin-border bg-card/80">
         <CardHeader className="pb-3">

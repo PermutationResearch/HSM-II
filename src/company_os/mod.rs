@@ -85,6 +85,12 @@ pub async fn connect_optional() -> anyhow::Result<Option<PgPool>> {
     Ok(Some(pool))
 }
 
+/// Compatibility shim for binaries that boot Company OS and expect a background
+/// Paperclip reconcile worker to exist.
+pub fn start_paperclip_reconcile_worker(_state: ConsoleState) {
+    // No-op for now; explicit sync endpoints remain the source of truth.
+}
+
 pub fn router() -> Router<ConsoleState> {
     Router::new()
         .merge(agents::router())
@@ -3215,6 +3221,94 @@ struct ExecuteTaskRow {
     parent_task_id: Option<Uuid>,
 }
 
+#[derive(sqlx::FromRow)]
+struct WorkerSkillPromptRow {
+    description: Option<String>,
+    body: Option<String>,
+}
+
+async fn build_worker_skill_instruction_block(
+    pool: &PgPool,
+    company_id: Uuid,
+    skill_slug: &str,
+) -> String {
+    let normalized = skill_slug.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "operator-chat" {
+        return String::new();
+    }
+
+    let skill_row = sqlx::query_as::<_, WorkerSkillPromptRow>(
+        r#"SELECT description, body
+           FROM company_skills
+           WHERE company_id = $1 AND lower(slug) = lower($2)
+           LIMIT 1"#,
+    )
+    .bind(company_id)
+    .bind(skill_slug)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let description = skill_row
+        .as_ref()
+        .and_then(|r| r.description.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let body = skill_row
+        .as_ref()
+        .and_then(|r| r.body.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+
+    let mut out = String::new();
+    out.push_str("## Skill execution contract\n\n");
+    out.push_str(&format!("- Active skill: `{skill_slug}`\n"));
+    if !description.is_empty() {
+        out.push_str(&format!("- Purpose: {description}\n"));
+    }
+
+    match normalized.as_str() {
+        "validate-delivery" => {
+            out.push_str(
+                "\nYou are validating delivery readiness, not giving a generic status update.\n\
+                 Required before final answer:\n\
+                 - Inspect the relevant repo/workspace files or changes with real tools.\n\
+                 - Run or inspect at least one concrete verification step tied to build/test/requirements.\n\
+                 - End with an explicit verdict: `PASS`, `FAIL`, or `BLOCKED`.\n\
+                 - Cite the concrete evidence you used.\n\
+                 If you do not have enough evidence for a verdict, say `BLOCKED` and state what is missing.\n",
+            );
+        }
+        "orchestrate-review" => {
+            out.push_str(
+                "\nYou are performing a concrete review pass, not a workspace tour.\n\
+                 Required before final answer:\n\
+                 - Inspect code, diffs, PR-related files, or review artifacts with real tools.\n\
+                 - Report findings first, ordered by severity.\n\
+                 - Each finding must point to specific evidence such as file paths, commands, or changed areas.\n\
+                 - If no actionable review evidence is available, say so explicitly instead of summarizing the repo.\n",
+            );
+        }
+        _ => {}
+    }
+
+    if !body.is_empty() {
+        let excerpt: String = body.chars().take(1200).collect();
+        out.push_str("\n### Skill notes\n");
+        out.push_str(&excerpt);
+        if body.chars().count() > 1200 {
+            out.push_str("\n...[truncated]");
+        }
+        out.push('\n');
+    }
+
+    out.push('\n');
+    out
+}
+
 /// Assemble the rich company context prefix injected into every execute-worker prompt.
 /// Fetches goals, team roster, skills catalog, active assignments, agent memories,
 /// sibling task stigmergic notes, and this task's own handoff notes.
@@ -3603,8 +3697,18 @@ async fn post_execute_task_worker(
     .await
     .unwrap_or_else(|_| Uuid::new_v4());
 
+    let skill_slug = body
+        .skill_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "operator-chat".to_string());
+
     // Build rich company context prefix (goals, team, skills, memories, handoff notes)
     let context_prefix = build_worker_context_prefix(pool, &task, &actor).await;
+    let skill_instruction_block =
+        build_worker_skill_instruction_block(pool, task.company_id, &skill_slug).await;
 
     // Assemble the base task instruction
     let base_task = body
@@ -3647,18 +3751,12 @@ async fn post_execute_task_worker(
     // Prefix with /hermes to always route through the agentic tool loop,
     // then inject company context so the agent has full situational awareness.
     let prompt = if context_prefix.is_empty() {
-        format!("/hermes {exec_identity}\n---\n\n## Your task\n\n{base_task}")
+        format!("/hermes {skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
     } else {
-        format!("/hermes {context_prefix}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
+        format!(
+            "/hermes {context_prefix}{skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}"
+        )
     };
-
-    let skill_slug = body
-        .skill_slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "operator-chat".to_string());
 
     let actor_for_response = actor.clone();
     let skill_slug_for_response = skill_slug.clone();
@@ -3680,7 +3778,7 @@ async fn post_execute_task_worker(
             Path(task_id),
             Json(PostRunTelemetryBody {
                 run_status: Some("running".to_string()),
-                tool_calls: Some(1),
+                tool_calls: Some(0),
                 log_append: Some(format!(
                     "worker start actor={} skill={} at={}\n",
                     actor,
@@ -3760,9 +3858,6 @@ async fn post_execute_task_worker(
                 | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
             }
-        }
-        if tool_calls <= 0 {
-            tool_calls = 1;
         }
 
         let _ = post_task_run_telemetry(

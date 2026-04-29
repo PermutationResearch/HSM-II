@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, Space_Mono, Lora } from "next/font/google";
+import { Space_Grotesk, Space_Mono } from "next/font/google";
 import { Providers } from "./providers";
 import "./globals.css";
 
@@ -22,12 +22,6 @@ const fontMono = Space_Mono({
   display: "swap",
 });
 
-const fontSerif = Lora({
-  subsets: ["latin"],
-  variable: "--font-lora",
-  display: "swap",
-});
-
 /**
  * Nothing-inspired typography (see `.cursor/skills/nothing-design/`):
  * - **Space Grotesk** — body, UI, headings (`next/font` → `--font-space-grotesk`).
@@ -37,7 +31,7 @@ const fontSerif = Lora({
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${fontSans.variable} ${fontMono.variable} ${fontSerif.variable}`}>
+    <html lang="en" className={`${fontSans.variable} ${fontMono.variable}`}>
       <body className="min-h-screen font-sans antialiased">
         <Providers>{children}</Providers>
       </body>

@@ -87,6 +87,10 @@ async function fetchOptionalRaw(url: string): Promise<Buffer | null> {
   return Buffer.from(await response.arrayBuffer());
 }
 
+function asNodeWritableBytes(bytes: Buffer): Uint8Array {
+  return Uint8Array.from(bytes);
+}
+
 async function resolveGitHubRef(owner: string, repoName: string, subpath: string) {
   const refs = ["main", "master"];
   for (const ref of refs) {
@@ -145,7 +149,7 @@ async function materializeGitHubPack(input: {
     if (!bytes) {
       throw new Error(`Missing file while downloading ${fullPath}.`);
     }
-    fs.writeFileSync(targetPath, bytes);
+    fs.writeFileSync(targetPath, asNodeWritableBytes(bytes));
     written += 1;
   }
 

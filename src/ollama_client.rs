@@ -433,6 +433,87 @@ async fn call_cloud_chat(
     })
 }
 
+/// Try OpenRouter/OpenAI-compatible chat via env configuration.
+/// Returns `None` when cloud env is not configured or request fails.
+pub async fn try_cloud_chat_env(
+    system_prompt: &str,
+    user_message: &str,
+    history: &[(String, String)],
+    temperature: f64,
+    max_tokens: u32,
+    model_id_override: Option<&str>,
+) -> Option<LlmResult> {
+    let mut cfg = if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+        if !api_key.trim().is_empty() {
+            let model_id = std::env::var("CLOUD_MODEL_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| std::env::var("DEFAULT_LLM_MODEL").ok())
+                .unwrap_or_else(|| "openrouter/elephant-alpha".to_string());
+            Some(CloudConfig {
+                base_url: std::env::var("OPENROUTER_API_BASE")
+                    .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string())
+                    .trim_end_matches('/')
+                    .to_string(),
+                api_key: api_key.trim().to_string(),
+                model_id,
+            })
+        } else {
+            None
+        }
+    } else if let (Ok(api_key), Ok(base_url)) = (
+        std::env::var("OPENAI_API_KEY"),
+        std::env::var("OPENAI_BASE_URL"),
+    ) {
+        if !api_key.trim().is_empty() && !base_url.trim().is_empty() {
+            let model_id = std::env::var("CLOUD_MODEL_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| std::env::var("DEFAULT_LLM_MODEL").ok())
+                .unwrap_or_else(|| "openrouter/elephant-alpha".to_string());
+            Some(CloudConfig {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key: api_key.trim().to_string(),
+                model_id,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    }?;
+
+    if let Some(m) = model_id_override {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            cfg.model_id = trimmed.to_string();
+        }
+    }
+
+    let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+    for (user_msg, assistant_msg) in history {
+        messages.push(json!({"role": "user", "content": user_msg}));
+        messages.push(json!({"role": "assistant", "content": assistant_msg}));
+    }
+    messages.push(json!({"role": "user", "content": user_message}));
+
+    let result = call_cloud_chat(&cfg, messages, temperature, max_tokens)
+        .await
+        .ok()?;
+    if result.text.trim().is_empty() {
+        return None;
+    }
+    crate::company_os::spawn_record_llm_spend(
+        &cfg.model_id,
+        &result.text,
+        result.tokens_generated,
+        result.latency_ms,
+        result.timed_out,
+        result.cached,
+    );
+    Some(result)
+}
+
 /// Result of an LLM call with metadata
 #[derive(Clone, Debug)]
 pub struct LlmResult {

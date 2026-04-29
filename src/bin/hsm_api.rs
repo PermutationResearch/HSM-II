@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let _ = dotenvy::dotenv();
     hyper_stigmergy::telemetry::init_from_env();
+    let _telemetry_session = hyper_stigmergy::telemetry::start_session_guard();
 
     let args = Args::parse();
 

@@ -21,8 +21,8 @@ async-stream = "0.3"
 
 # Database & Persistence
 mysql_async = "0.34"
-rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
-sqlx = { version = "0.8", features = [
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+sqlx = { version = "0.8.6", features = [
     "runtime-tokio-native-tls",
     "postgres",
     "migrate",

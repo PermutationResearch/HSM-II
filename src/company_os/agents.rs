@@ -1120,6 +1120,9 @@ pub fn build_llm_system_addon(row: &CompanyAgentRow) -> String {
             s.push('\n');
         }
     }
+    s.push('\n');
+    s.push_str(crate::harness::baseline_coding_agent_contract());
+    s.push('\n');
     s
 }
 

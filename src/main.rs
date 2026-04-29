@@ -5060,10 +5060,14 @@ impl App {
                  - Be concise in your responses\n\
                  - Show file paths clearly when working with files\n\
                  \n\
+                 HARNESS CONTRACT:\n\
+                 {}\n\
+                 \n\
                  LIVE WORLD DATA (for context):\n\
                  {}\n\n\
                  SKILL FORGE GUIDANCE (SkillRL retrieval):\n\
                  {}",
+                hyper_stigmergy::harness::baseline_coding_agent_contract(),
                 context,
                 if skill_prompt.is_empty() { "(none)".to_string() } else { skill_prompt.clone() },
             )
@@ -5640,8 +5644,10 @@ impl App {
                 let system_prompt = format!(
                     "You are an expert coding assistant in a local CLI environment.\n\
                      Working directory: {}\n\
-                     Use tools for concrete actions, keep responses concise, and do not invent tool outputs.",
-                    cwd.display()
+                     Use tools for concrete actions, keep responses concise, and do not invent tool outputs.\n\n\
+                     {}",
+                    cwd.display(),
+                    hyper_stigmergy::harness::baseline_coding_agent_contract()
                 );
 
                 let mut agent = hyper_stigmergy::AgentLoop::new(
@@ -6036,6 +6042,8 @@ impl App {
                      - Prefer specialized tools over shell equivalents for file ops/search.\n\
                      - For multi-step work, use TodoWrite-style planning in your reasoning, then execute concrete tools.\n\
                      - Assist defensive security tasks only; refuse clearly malicious coding requests.\n\n\
+                     HARNESS CAPABILITY CONTRACT:\n\
+                     {}\n\n\
                      XML formats:\n\
                      <read>\n\
                        <path>relative/path/from/project/root.rs</path>\n\
@@ -6098,7 +6106,8 @@ impl App {
                         - Keep everything machine-parseable.\n\n\
                      8. Task completion\n\
                         - When complete, provide a brief summary of what you changed and which files you touched.",
-                    cwd.display()
+                    cwd.display(),
+                    hyper_stigmergy::harness::baseline_coding_agent_contract()
                 );
 
                 // Get initial context - ls of current directory

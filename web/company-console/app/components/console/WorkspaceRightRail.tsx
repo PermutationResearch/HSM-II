@@ -219,6 +219,66 @@ type ChatTranscriptItem =
   | { kind: "tool"; key: string; event: RuntimeToolEvent }
   | { kind: "status"; key: string; text: string };
 
+const AGENT_CHAT_QUICK_COMMANDS: Array<{ label: string; text: string }> = [
+  { label: "Summarize", text: "Summarize current task status and blockers." },
+  { label: "Test", text: "Run relevant tests and report failures with likely root causes." },
+  { label: "Diff", text: "Show what changed and why." },
+  { label: "Sentinel", text: "/sentinel-reputation example.com" },
+];
+
+function formatTurnOrdinal(n: number): string {
+  return `#${Math.max(1, Math.trunc(n))}`;
+}
+
+function extractRunOperationalMeta(meta: Record<string, unknown> | null): Pick<LiveRun, "todoQueue" | "subagentTasks" | "bridgeProxy"> {
+  const m = meta ?? {};
+  return {
+    todoQueue: Array.isArray(m.todo_queue) ? (m.todo_queue as LiveRun["todoQueue"]) : [],
+    subagentTasks: Array.isArray(m.subagent_tasks) ? (m.subagent_tasks as LiveRun["subagentTasks"]) : [],
+    bridgeProxy: m.bridge_proxy && typeof m.bridge_proxy === "object" ? (m.bridge_proxy as LiveRun["bridgeProxy"]) : null,
+  };
+}
+
+function applyOperationalEventToLiveRun(prev: LiveRun, event: RuntimeToolEvent): LiveRun {
+  const next: LiveRun = { ...prev };
+  const tool = (event.tool_name ?? "").toLowerCase();
+  const input = asObject(event.input);
+  if (tool === "todowrite" && input && Array.isArray(input.todos)) {
+    next.todoQueue = (input.todos as LiveRun["todoQueue"]) ?? next.todoQueue;
+  }
+  if (tool === "subagent") {
+    const item = {
+      id: event.call_id ?? `subagent-${Date.now()}`,
+      description: typeof input?.prompt === "string" ? input.prompt : "Subagent task",
+      subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : undefined,
+      model: typeof input?.model === "string" ? input.model : undefined,
+      status: event.event_type === "tool_error" ? "failed" : event.event_type === "tool_complete" ? "completed" : "running",
+      updated_at: new Date().toISOString(),
+    };
+    const curr = Array.isArray(next.subagentTasks) ? [...next.subagentTasks] : [];
+    const idx = curr.findIndex((x) => x?.id === item.id);
+    if (idx >= 0) curr[idx] = item;
+    else curr.unshift(item);
+    next.subagentTasks = curr.slice(0, 30);
+  }
+  if (tool === "callmcptool" || tool === "webfetch") {
+    next.bridgeProxy = {
+      ...(next.bridgeProxy ?? {}),
+      mode: tool === "callmcptool" ? "proxy" : next.bridgeProxy?.mode ?? "local",
+      status: event.event_type === "tool_error" ? "error" : "active",
+      last_tool: event.tool_name ?? null,
+      last_mcp_server: typeof input?.server === "string" ? input.server : next.bridgeProxy?.last_mcp_server ?? null,
+      last_mcp_tool: typeof input?.toolName === "string" ? input.toolName : next.bridgeProxy?.last_mcp_tool ?? null,
+      call_count: (next.bridgeProxy?.call_count ?? 0) + 1,
+      last_error:
+        event.event_type === "tool_error"
+          ? event.message ?? null
+          : next.bridgeProxy?.last_error ?? null,
+    };
+  }
+  return next;
+}
+
 function runFailureHint(summary: string | null | undefined): string | null {
   const s = (summary ?? "").trim();
   if (!s) return null;
@@ -232,156 +292,6 @@ function runFailureHint(summary: string | null | undefined): string | null {
     return "Host disk is full during execution.";
   }
   return null;
-}
-
-function extractRunOperationalMeta(meta: Record<string, unknown> | null | undefined): Pick<
-  LiveRun,
-  "todoQueue" | "subagentTasks" | "bridgeProxy"
-> {
-  const m = meta ?? {};
-  return {
-    todoQueue: Array.isArray(m.todo_queue) ? (m.todo_queue as LiveRun["todoQueue"]) : [],
-    subagentTasks: Array.isArray(m.subagent_tasks) ? (m.subagent_tasks as LiveRun["subagentTasks"]) : [],
-    bridgeProxy:
-      m.bridge_proxy && typeof m.bridge_proxy === "object" && !Array.isArray(m.bridge_proxy)
-        ? (m.bridge_proxy as LiveRun["bridgeProxy"])
-        : null,
-  };
-}
-
-function applyOperationalEventToLiveRun(prev: LiveRun, ev: RuntimeToolEvent): LiveRun {
-  const eventType = (ev.event_type ?? "").toLowerCase();
-  const tool = (ev.tool_name ?? "").trim();
-  const toolLc = tool.toLowerCase();
-  const tsIso = new Date(ev.ts_ms ?? Date.now()).toISOString();
-  const next: LiveRun = { ...prev };
-
-  if (eventType === "tool_start" && toolLc === "todowrite") {
-    const input = asObject(ev.input);
-    const todos = Array.isArray(input?.todos) ? input.todos : [];
-    const queue = [...(next.todoQueue ?? [])];
-    for (const row of todos) {
-      const rec = asObject(row);
-      const id = typeof rec?.id === "string" ? rec.id : "";
-      const content = typeof rec?.content === "string" ? rec.content : "";
-      const status = typeof rec?.status === "string" ? rec.status : "";
-      if (!id || !content) continue;
-      const idx = queue.findIndex((x) => x.id === id);
-      const merged = { id, content, status: status || "pending", updated_at: tsIso };
-      if (idx >= 0) queue[idx] = { ...queue[idx], ...merged };
-      else queue.push(merged);
-    }
-    next.todoQueue = queue;
-  }
-
-  if (toolLc === "subagent") {
-    const callId = ev.call_id ?? `subagent-${Date.now()}`;
-    const input = asObject(ev.input);
-    const tasks = [...(next.subagentTasks ?? [])];
-    const idx = tasks.findIndex((x) => x.id === callId);
-    const status =
-      eventType === "tool_error" ? "failed" : eventType === "tool_complete" ? "completed" : "running";
-    const merged = {
-      id: callId,
-      description: typeof input?.description === "string" ? input.description : tasks[idx]?.description ?? "subagent task",
-      subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : tasks[idx]?.subagent_type,
-      model: typeof input?.model === "string" ? input.model : tasks[idx]?.model,
-      status,
-      updated_at: tsIso,
-    };
-    if (idx >= 0) tasks[idx] = { ...tasks[idx], ...merged };
-    else tasks.push(merged);
-    next.subagentTasks = tasks;
-  }
-
-  if (toolLc === "callmcptool" || toolLc === "fetchmcpresource" || toolLc === "webfetch" || toolLc === "websearch") {
-    const current = next.bridgeProxy ?? {};
-    const count = typeof current.call_count === "number" ? current.call_count : 0;
-    next.bridgeProxy = {
-      ...current,
-      mode: "proxy",
-      last_tool: tool,
-      status: eventType === "tool_error" ? "error" : eventType === "tool_complete" ? "idle" : "active",
-      last_error: eventType === "tool_error" ? (ev.message ?? "proxy tool error") : null,
-      call_count: eventType === "tool_start" ? count + 1 : count,
-    };
-  }
-
-  return next;
-}
-
-function formatTimelineClock(ms?: number | null): string {
-  const d = typeof ms === "number" && Number.isFinite(ms) ? new Date(ms) : new Date();
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function formatTurnOrdinal(turn: number): string {
-  return String(Math.max(1, turn)).padStart(2, "0");
-}
-
-type OperatorTimelineTone = "turn" | "user" | "tool" | "assistant" | "runtime";
-
-function OperatorTimelineRow({
-  tone,
-  time,
-  label,
-  headline,
-  meta,
-  children,
-}: {
-  tone: OperatorTimelineTone;
-  time?: string;
-  label: string;
-  headline?: string;
-  meta?: string;
-  children?: ReactNode;
-}) {
-  const dotClass =
-    tone === "user"
-      ? "bg-[#2d8bc4]"
-      : tone === "tool"
-        ? "bg-[#c17618]"
-        : tone === "assistant"
-          ? "bg-[#7b5cd6]"
-          : tone === "runtime"
-            ? "bg-[#4a9e5c]"
-            : "border border-[#61718a] bg-[#111827]";
-  const labelClass =
-    tone === "user"
-      ? "text-[#4aa3dc]"
-      : tone === "tool"
-        ? "text-[#d08a27]"
-        : tone === "assistant"
-          ? "text-[#9b7dff]"
-          : tone === "runtime"
-            ? "text-[#70b982]"
-            : "text-[#a9b4c4]";
-  return (
-    <div className="nd-agent-timeline-row">
-      <div className="nd-agent-timeline-row__time">{time ?? formatTimelineClock()}</div>
-      <div className="nd-agent-timeline-row__rail" aria-hidden>
-        <span className={cn("nd-agent-timeline-row__dot", dotClass)} />
-      </div>
-      <div className="min-w-0 flex-1 pb-4">
-        <div className="flex min-w-0 items-baseline gap-3">
-          <span className={cn("font-mono text-[10px] font-semibold uppercase tracking-[0.14em]", labelClass)}>
-            {label}
-          </span>
-          {headline ? (
-            <span className="min-w-0 truncate font-mono text-[13px] font-semibold tracking-tight text-[#e8e8e8]">
-              {headline}
-            </span>
-          ) : null}
-          {meta ? (
-            <span className="ml-auto shrink-0 rounded border border-[#273244] bg-[#101724] px-1.5 py-0.5 font-mono text-[9px] text-[#8391a6]">
-              {meta}
-            </span>
-          ) : null}
-        </div>
-        {children ? <div className="mt-1.5 min-w-0">{children}</div> : null}
-      </div>
-    </div>
-  );
 }
 
 /** One tool row — shared by legacy transcript merge and Claude Code–style harness card. */
@@ -404,25 +314,33 @@ function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
       : null;
   const cid = shortCallId(event.call_id);
   return (
-    <OperatorTimelineRow
-      tone="tool"
-      time={formatTimelineClock(event.ts_ms)}
-      label="Tool"
-      headline={event.tool_name ?? "tool"}
-      meta={isErr ? "error" : event.success === true ? "ok" : undefined}
-    >
-      <div className="rounded-sm border border-[#302515] bg-[#120d07] px-3 py-2">
-        <p className="font-mono text-[10px] leading-tight text-[#7c6a4f]">
-          <span className={isErr ? "text-[#c45a5a]" : "text-[#d08a27]"}>{phase}</span>
-          {cid ? (
-            <>
-              <span className="mx-1 text-[#4b3a20]">·</span>
-              <span className="text-[#8c7a5f]" title={event.call_id ?? undefined}>
-                {cid}
-              </span>
-            </>
-          ) : null}
-        </p>
+    <div className="border-t border-[#1a1a1a] py-1.5">
+      <div className="flex min-w-0 items-start gap-2">
+        <span
+          className={cn(
+            "mt-0.5 size-1.5 shrink-0 rounded-full",
+            isErr ? "bg-[#8a3030]" : "bg-[#2d4a33]",
+          )}
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[10px] leading-tight text-[#5a5a5a]">
+            <span className="text-[#666666]">{phase}</span>
+            {event.tool_name ? (
+              <>
+                <span className="mx-1 text-[#333333]">·</span>
+                <span className="text-[#888888]">{event.tool_name}</span>
+              </>
+            ) : null}
+            {cid ? (
+              <>
+                <span className="mx-1 text-[#333333]">·</span>
+                <span className="text-[#555555]" title={event.call_id ?? undefined}>
+                  {cid}
+                </span>
+              </>
+            ) : null}
+          </p>
           {event.message ? (
             <p
               className={cn(
@@ -447,8 +365,9 @@ function OperatorTranscriptToolRow({ event }: { event: RuntimeToolEvent }) {
               </pre>
             </details>
           ) : null}
+        </div>
       </div>
-    </OperatorTimelineRow>
+    </div>
   );
 }
 
@@ -456,32 +375,23 @@ function OperatorHarnessTurnCard({
   items,
   thinking,
   chatPersona,
-  turnNumber,
 }: {
   items: HarnessTurnItem[];
   thinking: boolean;
   chatPersona: string;
-  turnNumber: number;
 }) {
-  const now = formatTimelineClock();
   return (
-    <div className="nd-agent-timeline">
-      <OperatorTimelineRow
-        tone="turn"
-        time={now}
-        label={`Turn ${formatTurnOrdinal(turnNumber)}`}
-        headline={chatPersona}
-        meta="live"
-      >
-        <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[#5f6d80]">
-          Plan → Extract/Inspect → Generate/Act → Review/Verify · VM overlay · SmolVM bash
-        </p>
-      </OperatorTimelineRow>
-      <div>
+    <div className="rounded-md border border-[#262626] bg-[#080808] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <div className="mb-2 flex items-center gap-2 border-b border-[#1a1a1a] pb-1.5">
+        <Bot className="size-3.5 shrink-0 text-[#5c7a9a]" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-[#8a8a8a]">Assistant</p>
+          <p className="truncate font-mono text-[9px] text-[#555555]">{chatPersona} · tools + reply (Claude Code harness)</p>
+        </div>
+      </div>
+      <div className="space-y-1">
         {items.length === 0 && thinking ? (
-          <OperatorTimelineRow tone="runtime" time={now} label="Runtime">
-            <p className="font-mono text-[11px] text-[#7a8a9f]">Connecting to agent stream…</p>
-          </OperatorTimelineRow>
+          <p className="font-mono text-[10px] text-[#555555]">Preparing agent runtime…</p>
         ) : null}
         {items.map((it, idx) => {
           if (it.kind === "tool") {
@@ -491,7 +401,7 @@ function OperatorHarnessTurnCard({
           const isLast = idx === items.length - 1;
           const streamCaret = thinking && isLast;
           return (
-            <OperatorTimelineRow key={`h-txt-${it.seq}`} tone="assistant" time={now} label="Assistant">
+            <div key={`h-txt-${it.seq}`} className="text-xs leading-snug">
               <div className="nd-stream-assistant__body">
                 <div className="min-w-0 flex-1">
                   <WorkspaceMarkdownStreamBody
@@ -508,7 +418,7 @@ function OperatorHarnessTurnCard({
                   <span className="nd-stream-assistant__caret nd-stream-assistant__caret--pulse" aria-hidden />
                 ) : null}
               </div>
-            </OperatorTimelineRow>
+            </div>
           );
         })}
       </div>
@@ -517,29 +427,6 @@ function OperatorHarnessTurnCard({
 }
 
 const CHANNEL_STORAGE_KEY = "pc-ws-agent-channels-v2";
-
-const AGENT_CHAT_QUICK_COMMANDS = [
-  {
-    label: "/plan",
-    text: "/plan ",
-  },
-  {
-    label: "/verify",
-    text: "/verify ",
-  },
-  {
-    label: "/apply",
-    text: "/apply ",
-  },
-  {
-    label: "/discard",
-    text: "/discard ",
-  },
-  {
-    label: "/skill",
-    text: "/skill ",
-  },
-];
 
 /** Workforce roster agent id — used to resolve `propertiesSelection.id` → canonical persona name for channel keys. */
 const AGENT_REGISTRY_UUID_RE =
@@ -1463,6 +1350,11 @@ export function WorkspaceRightRail() {
   /** Skip duplicate harness rows when both Anthropic wire + `runtime` carry the same tool. */
   const harnessToolDedupeRef = useRef<Set<string>>(new Set());
 
+  const appendQuickCommand = useCallback((text: string) => {
+    setDraft((prev) => (prev.trim() ? `${prev.trim()}\n${text}` : text));
+    chatInputRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     liveToolEventsRef.current = liveToolEvents;
   }, [liveToolEvents]);
@@ -2274,7 +2166,6 @@ export function WorkspaceRightRail() {
         if (runtimeSeenRef.current.has(key)) return;
         runtimeSeenRef.current.add(key);
         setLiveToolEvents((prev) => [parsed, ...prev].slice(0, 24));
-        setLiveRun((prev) => (prev ? applyOperationalEventToLiveRun(prev, parsed) : prev));
         if (typeof parsed.tool_name === "string" && parsed.tool_name.trim().length > 0) {
           const hk = `${(parsed.call_id ?? "").trim()}::${parsed.tool_name.trim()}`;
           if (!harnessToolDedupeRef.current.has(hk)) {
@@ -2507,10 +2398,6 @@ export function WorkspaceRightRail() {
           summary: null,
           executionVerified: replyJ.execution_verified === true,
           executionMode: replyJ.execution_mode ? parseExecutionMode(replyJ.execution_mode) : undefined,
-          pendingInteractions: [],
-          todoQueue: [],
-          subagentTasks: [],
-          bridgeProxy: null,
         });
         void (async () => {
           try {
@@ -2748,97 +2635,12 @@ export function WorkspaceRightRail() {
     }
   }, [apiBase, companyId, chatPersona, liveRun?.runId, liveRun?.taskId, pushRunTimeline, qc, refreshWorkspace]);
 
-  const resolvePendingInteraction = useCallback(
-    async (
-      interaction: {
-        kind?: "approval" | "elicitation";
-        resume_token?: string;
-        tool_name?: string;
-        call_id?: string | null;
-        message?: string;
-      },
-      action: "approve" | "reject" | "respond",
-    ) => {
-      if (!companyId || !liveRun?.runId) return;
-      const kind = interaction.kind;
-      const resumeToken = interaction.resume_token?.trim();
-      if (!kind || !resumeToken) return;
-      setRunActionBusy(true);
-      setRunActionErr(null);
-      try {
-        const responseText = interactionDrafts[resumeToken] ?? "";
-        const j = await callResolveRunInteraction({
-          companyId,
-          runId: liveRun.runId,
-          interaction: {
-            kind,
-            resume_token: resumeToken,
-            tool_name: interaction.tool_name,
-            call_id: interaction.call_id ?? null,
-            message: interaction.message,
-          },
-          action,
-          responseText: action === "respond" ? responseText : undefined,
-        });
-        const nextPending = Array.isArray(j.pending_interactions)
-          ? (j.pending_interactions.filter(
-              (x): x is PendingInteraction =>
-                !!x && typeof x === "object" && !Array.isArray(x),
-            ) as PendingInteraction[])
-          : (liveRun.pendingInteractions ?? []).filter((x) => x.resume_token !== resumeToken);
-        setLiveRun((prev) =>
-          prev
-            ? {
-                ...prev,
-                pendingInteractions: nextPending,
-                summary: `Interaction ${action}ed for ${interaction.tool_name ?? "tool"}.`,
-              }
-            : prev,
-        );
-        setInteractionDrafts((prev) => {
-          const { [resumeToken]: _omit, ...rest } = prev;
-          return rest;
-        });
-        setRunNeedsApproval(nextPending.length > 0);
-        pushRunTimeline({
-          runId: liveRun.runId,
-          phase: "resume",
-          message: `${(kind ?? "interaction").toUpperCase()} ${action}ed by operator.`,
-          toolName: interaction.tool_name ?? null,
-          callId: interaction.call_id ?? null,
-        });
-        await refreshWorkspace();
-      } catch (e) {
-        setRunActionErr(e instanceof Error ? e.message : String(e));
-      } finally {
-        setRunActionBusy(false);
-      }
-    },
-    [companyId, interactionDrafts, liveRun, pushRunTimeline, refreshWorkspace],
-  );
-
   const threadNotes = chatPersona ? channels[chatPersona]?.notes ?? [] : [];
   const visibleNotes = threadNotes.slice(-24);
   const showChat = chatPersona.length > 0;
   const humanLabel = selectedRow?.title?.trim() || selectedRow?.role?.trim() || chatPersona;
   const harnessSnapshot = useMemo(() => turnHarnessRef.current.getItems(), [harnessUiVersion]);
   const harnessLayoutActive = showChat && (sending || thinking || harnessSnapshot.length > 0);
-  const currentTurnNumber = Math.max(1, visibleNotes.filter((n) => n.actor === "operator").length + (harnessLayoutActive ? 1 : 0));
-  const activeToolCount = useMemo(
-    () => mergeRuntimeToolEventsByCallId(mergeToolEventLists(channels[chatPersona]?.toolEvents ?? [], liveToolEvents)).length,
-    [channels, chatPersona, liveToolEvents],
-  );
-  const activeSessionState = thinking || liveRun?.status === "running" ? "running" : liveRun?.status ?? "ready";
-  const appendQuickCommand = useCallback((text: string) => {
-    setDraft((prev) => {
-      const p = prev.trimEnd();
-      if (text.startsWith("/") && p && !p.startsWith("/")) {
-        return `${text}${p}`;
-      }
-      return p ? `${p}\n${text}` : text;
-    });
-    requestAnimationFrame(() => chatInputRef.current?.focus());
-  }, []);
   const transcriptItems = useMemo((): ChatTranscriptItem[] => {
     if (harnessLayoutActive) {
       return visibleNotes.map((note, i) => ({
@@ -2896,6 +2698,10 @@ export function WorkspaceRightRail() {
     typeoutNote,
     visibleNotes,
   ]);
+
+  const activeSessionState = liveRun?.status ?? (thinking || sending ? "running" : "idle");
+  const currentTurnNumber = Math.max(1, threadNotes.filter((n) => n.actor === "operator").length);
+  const activeToolCount = mergeRuntimeToolEventsByCallId(liveToolEvents).length;
 
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -3011,65 +2817,6 @@ export function WorkspaceRightRail() {
               ) : (
                 <p className="font-mono text-[9px] text-[#555555]">Tool traces stream in the transcript above.</p>
               )}
-              <p className="font-mono text-[9px] text-[#666666]">
-                todo {liveRun.todoQueue?.length ?? 0} · subagents {liveRun.subagentTasks?.length ?? 0} · bridge{" "}
-                {liveRun.bridgeProxy?.status ?? "idle"}
-                {typeof liveRun.bridgeProxy?.call_count === "number"
-                  ? ` (${liveRun.bridgeProxy.call_count} calls)`
-                  : ""}
-              </p>
-              <div className="mt-1.5 space-y-1.5 rounded border border-[#2b2b2b] bg-black/40 p-2">
-                <p className="font-mono text-[9px] uppercase tracking-wide text-[#8ea3bd]">Operational State</p>
-                <div className="space-y-1">
-                  <p className="font-mono text-[9px] text-[#7f8b99]">
-                    Todos ({liveRun.todoQueue?.length ?? 0})
-                  </p>
-                  {Array.isArray(liveRun.todoQueue) && liveRun.todoQueue.length > 0 ? (
-                    <div className="space-y-0.5">
-                      {liveRun.todoQueue.slice(0, 8).map((todo, idx) => (
-                        <p key={`${todo.id ?? "todo"}:${idx}`} className="font-mono text-[9px] text-[#a7b3c2]">
-                          [{todo.status ?? "pending"}] {todo.id ?? "todo"} · {todo.content ?? ""}
-                        </p>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="font-mono text-[9px] text-[#555555]">No todo items captured yet.</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <p className="font-mono text-[9px] text-[#7f8b99]">
-                    Subagents ({liveRun.subagentTasks?.length ?? 0})
-                  </p>
-                  {Array.isArray(liveRun.subagentTasks) && liveRun.subagentTasks.length > 0 ? (
-                    <div className="space-y-0.5">
-                      {liveRun.subagentTasks.slice(0, 8).map((task, idx) => (
-                        <p key={`${task.id ?? "subagent"}:${idx}`} className="font-mono text-[9px] text-[#a7b3c2]">
-                          [{task.status ?? "running"}] {task.subagent_type ?? "subagent"} ·{" "}
-                          {task.description ?? task.id ?? "task"}
-                          {task.model ? ` · ${task.model}` : ""}
-                        </p>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="font-mono text-[9px] text-[#555555]">No subagent tasks observed yet.</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <p className="font-mono text-[9px] text-[#7f8b99]">Bridge / Proxy</p>
-                  <p className="font-mono text-[9px] text-[#a7b3c2]">
-                    mode {liveRun.bridgeProxy?.mode ?? "local"} · status {liveRun.bridgeProxy?.status ?? "idle"} ·
-                    last tool {liveRun.bridgeProxy?.last_tool ?? "—"}
-                  </p>
-                  <p className="font-mono text-[9px] text-[#a7b3c2]">
-                    last MCP {liveRun.bridgeProxy?.last_mcp_server ?? "—"} / {liveRun.bridgeProxy?.last_mcp_tool ?? "—"}
-                  </p>
-                  {liveRun.bridgeProxy?.last_error ? (
-                    <p className="line-clamp-2 font-mono text-[9px] text-rose-200">
-                      error: {liveRun.bridgeProxy.last_error}
-                    </p>
-                  ) : null}
-                </div>
-              </div>
             </div>
             <button
               type="button"
@@ -3108,67 +2855,7 @@ export function WorkspaceRightRail() {
           ) : null}
           {runNeedsApproval ? (
             <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5">
-              <p className="font-mono text-[10px] text-amber-200">
-                Blocked runtime interaction queued for operator action.
-              </p>
-              {Array.isArray(liveRun.pendingInteractions) && liveRun.pendingInteractions.length > 0 ? (
-                <div className="mt-1 space-y-1 rounded border border-amber-400/20 bg-black/30 p-1.5">
-                  {liveRun.pendingInteractions.slice(0, 4).map((it, idx) => (
-                    <div key={`${it.resume_token ?? "pending"}:${idx}`} className="space-y-1 rounded border border-amber-300/10 p-1">
-                      <p className="font-mono text-[9px] text-amber-100">
-                        {(it.kind ?? "approval").toUpperCase()} · {it.tool_name ?? "tool"}
-                        {it.call_id ? ` (${it.call_id})` : ""}
-                        {it.resume_token ? ` · token ${it.resume_token.slice(0, 8)}…` : ""}
-                      </p>
-                      {it.message ? <p className="font-mono text-[9px] text-amber-50/80">{it.message}</p> : null}
-                      {it.kind === "elicitation" && it.resume_token ? (
-                        <Textarea
-                          value={interactionDrafts[it.resume_token] ?? ""}
-                          onChange={(e) =>
-                            setInteractionDrafts((prev) => ({
-                              ...prev,
-                              [it.resume_token!]: e.target.value,
-                            }))
-                          }
-                          placeholder="Optional response payload text…"
-                          className="min-h-14 border-amber-400/20 bg-black/40 font-mono text-[10px] text-amber-50 placeholder:text-amber-100/30"
-                        />
-                      ) : null}
-                      <div className="flex flex-wrap gap-1">
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          disabled={runActionBusy || !it.resume_token}
-                          className="border-emerald-500/40 bg-transparent font-mono text-[10px] text-emerald-200 hover:bg-emerald-500/10"
-                          onClick={() => void resolvePendingInteraction(it, "approve")}
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          disabled={runActionBusy || !it.resume_token}
-                          className="border-rose-500/40 bg-transparent font-mono text-[10px] text-rose-200 hover:bg-rose-500/10"
-                          onClick={() => void resolvePendingInteraction(it, "reject")}
-                        >
-                          Reject
-                        </Button>
-                        {it.kind === "elicitation" ? (
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            disabled={runActionBusy || !it.resume_token}
-                            className="border-sky-500/40 bg-transparent font-mono text-[10px] text-sky-200 hover:bg-sky-500/10"
-                            onClick={() => void resolvePendingInteraction(it, "respond")}
-                          >
-                            Respond
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
+              <p className="font-mono text-[10px] text-amber-200">Blocked tool action queued for operator approval.</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <Link
                   href="/workspace/approvals"
@@ -3183,7 +2870,7 @@ export function WorkspaceRightRail() {
                   disabled={runActionBusy}
                   onClick={() => void resumeBlockedRun()}
                 >
-                  {runActionBusy ? "Working…" : "Resume / Continue"}
+                  {runActionBusy ? "Working…" : "Resume Run"}
                 </Button>
               </div>
             </div>
@@ -3390,40 +3077,28 @@ export function WorkspaceRightRail() {
         </>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="nd-agent-cockpit shrink-0 border-b border-[#223021] px-3 pb-3 pt-2">
-            <div className="flex items-start gap-2">
-              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#314025] bg-[#141b0f] text-[#b7e36b] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-                <Bot className="size-4" strokeWidth={1.5} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={cn(
-                      "size-2 shrink-0 rounded-full bg-[#9bd64d]",
-                      workingPersonas.has(chatPersona) && "nd-agent-status-dot--busy",
-                    )}
-                    aria-hidden
-                  />
-                  <p className="min-w-0 flex-1 truncate font-mono text-[15px] font-semibold tracking-tight text-[#f2f7e8]">
-                    {chatPersona}
-                  </p>
-                  <span
-                    className="hidden max-w-[9rem] truncate rounded border border-[#34422a] bg-[#0b1008] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.08em] text-[#d7e8bd] sm:inline-block"
-                    title={rolePillText(selectedRow)}
-                  >
-                    {rolePillText(selectedRow)}
-                  </span>
-                </div>
-                <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[#8d997e]">
-                  {humanLabel} runs as a persistent coding session: workspace context, tool trace, VM overlay, and
-                  SmolVM verification stay visible while it works.
-                </p>
-              </div>
+          <div className="shrink-0 border-b border-[#222222] px-3 pb-3 pt-2">
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "size-2 shrink-0 rounded-full bg-[#4A9E5C]",
+                  workingPersonas.has(chatPersona) && "nd-agent-status-dot--busy",
+                )}
+                aria-hidden
+              />
+              <Bot className="size-4 shrink-0 text-[#666666]" strokeWidth={1.5} />
+              <p className="min-w-0 flex-1 truncate font-mono text-sm text-[#e8e8e8]">{chatPersona}</p>
+              <span
+                className="hidden max-w-[9rem] truncate rounded border border-[#333333] px-2 py-1 font-mono text-[9px] font-medium uppercase tracking-[0.06em] text-[#e8e8e8] sm:inline-block"
+                title={rolePillText(selectedRow)}
+              >
+                {rolePillText(selectedRow)}
+              </span>
               <button
                 type="button"
                 title="Reset agent chat session cache"
                 onClick={resetAgentSessionCache}
-                className="flex size-8 shrink-0 items-center justify-center rounded-md border border-transparent text-[#70805f] hover:border-[#2d3a25] hover:bg-[#10170c] hover:text-[#e8f7d5]"
+                className="flex size-8 shrink-0 items-center justify-center rounded-md text-[#666666] hover:bg-white/[0.06] hover:text-[#e8e8e8]"
               >
                 <RefreshCw className="size-4" strokeWidth={1.5} />
               </button>
@@ -3510,14 +3185,12 @@ export function WorkspaceRightRail() {
                     const n = item.note;
                     const isUser = n.actor === "operator" || n.actor === "operator_resume";
                     return (
-                      <OperatorTimelineRow
-                        key={item.key}
-                        tone={isUser ? "user" : "assistant"}
-                        time={n.at ? formatTimelineClock(isoToMs(n.at)) : undefined}
-                        label={isUser ? "User" : "Assistant"}
-                        headline={isUser ? undefined : noteActorTranscriptLabel(n.actor)}
-                      >
-                        <div className="text-xs leading-snug">
+                      <div key={item.key} className="text-xs leading-snug">
+                        <span className="font-mono text-[10px] uppercase tracking-wide text-[#666666]">
+                          {noteActorTranscriptLabel(n.actor)}
+                          {n.at ? ` · ${n.at.slice(0, 19)}` : ""}
+                        </span>
+                        <div className="mt-1">
                           {item.typing && typeoutNote ? (
                             <div className="nd-stream-assistant__body">
                               <div className="min-w-0 flex-1">
@@ -3534,16 +3207,17 @@ export function WorkspaceRightRail() {
                             <WorkspaceMarkdownBody text={n.text} />
                           )}
                         </div>
-                      </OperatorTimelineRow>
+                      </div>
                     );
                   }
                   if (item.kind === "tool") {
                     return <OperatorTranscriptToolRow key={item.key} event={item.event} />;
                   }
                   return (
-                    <OperatorTimelineRow key={item.key} tone="runtime" label="Runtime">
+                    <div key={item.key} className="border-t border-[#222222] py-2">
+                      <p className="nd-label">RUNTIME</p>
                       <p className="mt-1 font-mono text-[11px] leading-snug text-[#999999]">{item.text}</p>
-                    </OperatorTimelineRow>
+                    </div>
                   );
                 })}
                 {harnessLayoutActive ? (
@@ -3551,7 +3225,6 @@ export function WorkspaceRightRail() {
                     items={harnessSnapshot}
                     thinking={thinking}
                     chatPersona={chatPersona}
-                    turnNumber={currentTurnNumber}
                   />
                 ) : null}
               </div>
@@ -3604,7 +3277,7 @@ export function WorkspaceRightRail() {
                   e.preventDefault();
                   void sendHandoff();
                 }}
-                placeholder={`Message ${chatPersona}…`}
+                placeholder={`Message ${chatPersona}… (Enter send · Shift+Enter new line)`}
                 rows={2}
                 disabled={sending}
                 className="min-h-[48px] flex-1 resize-none border-[#36432d] bg-[#050805] font-sans text-sm text-[#edf5e5] placeholder:text-[#6f7b64] focus-visible:border-[#8fb95d] focus-visible:ring-1 focus-visible:ring-[#4f682f]"

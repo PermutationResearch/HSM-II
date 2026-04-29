@@ -15,10 +15,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
+use std::collections::BTreeMap;
 use std::path::{Path as StdPath, PathBuf};
 use uuid::Uuid;
 
 use crate::console::ConsoleState;
+use crate::skill_markdown::{enumerate_skill_md_under_root, external_skill_dir_roots_from_env};
 
 use super::no_db;
 
@@ -35,6 +37,10 @@ pub fn router() -> Router<ConsoleState> {
             get(get_skill_bank),
         )
         .route(
+            "/api/company/companies/:company_id/skills/bank/entry",
+            get(get_skill_bank_entry),
+        )
+        .route(
             "/api/company/companies/:company_id/skills/import-hermes",
             axum::routing::post(import_hermes_skills),
         )
@@ -45,6 +51,14 @@ pub fn router() -> Router<ConsoleState> {
         .route(
             "/api/company/companies/:company_id/skills/agentskills/import",
             axum::routing::post(import_agentskills_bundle),
+        )
+        .route(
+            "/api/company/companies/:company_id/skills/agentskills/import-from-fs",
+            axum::routing::post(import_agentskills_from_fs),
+        )
+        .route(
+            "/api/company/companies/:company_id/skills/proposals/promote",
+            axum::routing::post(promote_skill_proposal_governed),
         )
         .route(
             "/api/company/companies/:company_id/migrations/legacy-agent-data",
@@ -327,6 +341,37 @@ struct ImportAgentSkillsBody {
     overwrite: Option<bool>,
     #[serde(default)]
     skills: Vec<AgentSkillsRecord>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ImportAgentSkillsFromFsBody {
+    #[serde(default)]
+    roots: Option<Vec<String>>,
+    #[serde(default)]
+    include_env_roots: Option<bool>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    source_tag: Option<String>,
+    #[serde(default)]
+    pack: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct AgentSkillFrontmatter {
+    name: Option<String>,
+    #[serde(alias = "title")]
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(alias = "summary")]
+    summary: Option<String>,
+    license: Option<String>,
+    compatibility: Option<String>,
+    metadata: Option<BTreeMap<String, String>>,
+    allowed_tools: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -770,9 +815,23 @@ fn adapter_skill_refs(cfg: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct SkillBankQuery {
+    #[serde(default)]
+    include_body: Option<bool>,
+    #[serde(default)]
+    max_body_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillBankEntryQuery {
+    slug: String,
+}
+
 async fn get_skill_bank(
     State(st): State<ConsoleState>,
     Path(company_id): Path<Uuid>,
+    Query(q): Query<SkillBankQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Some(ref pool) = st.company_db else {
         return Err(no_db());
@@ -811,18 +870,40 @@ async fn get_skill_bank(
         }
     }
 
+    let include_body = q.include_body.unwrap_or(false);
+    let max_body_bytes = q
+        .max_body_bytes
+        .filter(|v| *v > 0)
+        .unwrap_or(16_000)
+        .min(200_000);
+    let mut emitted_body_bytes = 0usize;
+
     let current_skill_values = current_skills
         .iter()
         .map(|skill| {
             let key = normalize_skill_ref(&skill.slug);
             let linked_agents = refs_to_agents.get(&key).cloned().unwrap_or_default();
+            let category = skill_category_from_slug(&skill.slug);
+            let body_value = if include_body && emitted_body_bytes < max_body_bytes {
+                let remain = max_body_bytes.saturating_sub(emitted_body_bytes);
+                let body = if skill.body.len() > remain {
+                    skill.body.chars().take(remain).collect::<String>()
+                } else {
+                    skill.body.clone()
+                };
+                emitted_body_bytes += body.len();
+                Value::String(body)
+            } else {
+                Value::Null
+            };
             json!({
                 "id": skill.id,
                 "company_id": skill.company_id,
                 "slug": skill.slug,
+                "category": category,
                 "name": skill.name,
                 "description": skill.description,
-                "body": skill.body,
+                "body": body_value,
                 "skill_path": skill.skill_path,
                 "source": skill.source,
                 "updated_at": skill.updated_at,
@@ -831,6 +912,13 @@ async fn get_skill_bank(
             })
         })
         .collect::<Vec<_>>();
+
+    let mut current_categories = std::collections::BTreeMap::<String, usize>::new();
+    for skill in &current_skills {
+        *current_categories
+            .entry(skill_category_from_slug(&skill.slug))
+            .or_insert(0) += 1;
+    }
 
     let current_slugs = current_skills
         .iter()
@@ -863,6 +951,7 @@ async fn get_skill_bank(
         .map(|(slug, name, description, company_count, company_names)| {
             json!({
                 "slug": slug,
+                "category": skill_category_from_slug(&slug),
                 "name": name,
                 "description": description,
                 "company_count": company_count,
@@ -873,14 +962,341 @@ async fn get_skill_bank(
 
     Ok(Json(json!({
         "current_skills": current_skill_values,
+        "current_categories": current_categories,
+        "include_body": include_body,
+        "body_budget_bytes": max_body_bytes,
+        "body_emitted_bytes": emitted_body_bytes,
         "recommended_skills": recommended,
         "active_agent_count": agents.len(),
         "connected_skill_refs": refs_to_agents,
     })))
 }
 
+async fn get_skill_bank_entry(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Query(q): Query<SkillBankEntryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    verify_company(pool, company_id).await?;
+    let slug = normalize_skill_ref(&q.slug);
+    if slug.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "slug required" }))));
+    }
+    let row = sqlx::query_as::<_, CompanySkillBankRow>(
+        r#"SELECT id, company_id, slug, name, description, body, skill_path, source, updated_at::text
+           FROM company_skills
+           WHERE company_id = $1 AND lower(slug) = $2
+           LIMIT 1"#,
+    )
+    .bind(company_id)
+    .bind(slug.to_ascii_lowercase())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err("get_skill_bank_entry", &e))?;
+    let Some(skill) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "skill not found" }))));
+    };
+    Ok(Json(json!({
+        "skill": {
+            "id": skill.id,
+            "company_id": skill.company_id,
+            "slug": skill.slug,
+            "category": skill_category_from_slug(&skill.slug),
+            "name": skill.name,
+            "description": skill.description,
+            "body": skill.body,
+            "skill_path": skill.skill_path,
+            "source": skill.source,
+            "updated_at": skill.updated_at,
+        }
+    })))
+}
+
 fn repo_root_guess() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[derive(Debug, Deserialize)]
+struct PromoteSkillProposalBody {
+    slug: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    proposal_markdown: Option<String>,
+    #[serde(default)]
+    proposal_path: Option<String>,
+    #[serde(default)]
+    from_task_id: Option<Uuid>,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    min_runs: Option<i64>,
+}
+
+fn clamp_slug(raw: &str) -> String {
+    normalize_skill_ref(raw)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '/')
+        .take(120)
+        .collect::<String>()
+}
+
+async fn promote_skill_proposal_governed(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<PromoteSkillProposalBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    verify_company(pool, company_id).await?;
+    let slug = clamp_slug(&body.slug);
+    if slug.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "slug required" }))));
+    }
+    let actor = body
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("operator");
+    let min_runs = body.min_runs.unwrap_or(3).clamp(1, 50);
+
+    let proposal_markdown = if let Some(md) = body
+        .proposal_markdown
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        md.to_string()
+    } else if let Some(path) = body
+        .proposal_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        std::fs::read_to_string(path).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "proposal_path unreadable" })),
+            )
+        })?
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "proposal_markdown or proposal_path required" })),
+        ));
+    };
+
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| slug.split('/').next_back().unwrap_or("skill").replace('-', " "));
+    let description = body
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Promoted from governed proposal".to_string());
+
+    let mut gate_reasons = Vec::<String>::new();
+    let mut verification_ok = false;
+    let mut policy_ok = true;
+    if let Some(task_id) = body.from_task_id {
+        let snap = sqlx::query_as::<_, (String, String, i32)>(
+            r#"SELECT run_status, COALESCE(log_tail,''), tool_calls
+               FROM task_run_snapshots
+               WHERE task_id = $1"#,
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| db_err("promote_skill_proposal_snap", &e))?;
+        if let Some((status, log_tail, tool_calls)) = snap {
+            verification_ok = status == "success"
+                && tool_calls > 0
+                && !log_tail.contains("verification bundle missing")
+                && !log_tail.contains("changed-file summary missing")
+                && !log_tail.contains("retrieval bundle missing");
+            if !verification_ok {
+                gate_reasons.push("from_task_id snapshot lacks verification evidence".to_string());
+            }
+        } else {
+            gate_reasons.push("from_task_id has no task_run_snapshot".to_string());
+        }
+        let policy_violations: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)::bigint
+               FROM governance_events
+               WHERE company_id = $1
+                 AND action = 'worker_run_event'
+                 AND subject_id = $2
+                 AND COALESCE(payload->>'event','') IN ('failed','preflight_blocked')"#,
+        )
+        .bind(company_id)
+        .bind(task_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| db_err("promote_skill_proposal_policy", &e))?;
+        policy_ok = policy_violations == 0;
+        if !policy_ok {
+            gate_reasons.push("policy violations found on referenced task".to_string());
+        }
+    } else {
+        gate_reasons.push("from_task_id not provided for verification/policy gates".to_string());
+    }
+
+    let baseline = sqlx::query_scalar::<_, f64>(
+        r#"SELECT COALESCE(
+               AVG(CASE WHEN s.run_status = 'success' THEN 1.0 ELSE 0.0 END), 0.0)
+           FROM task_run_snapshots s
+           JOIN tasks t ON t.id = s.task_id
+           WHERE t.company_id = $1
+             AND s.updated_at >= NOW() - INTERVAL '30 days'"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| db_err("promote_skill_proposal_baseline", &e))?;
+    let (skill_runs, skill_success): (i64, f64) = sqlx::query_as(
+        r#"SELECT COUNT(*)::bigint,
+                  COALESCE(AVG(CASE WHEN s.run_status = 'success' THEN 1.0 ELSE 0.0 END), 0.0)
+           FROM task_run_snapshots s
+           JOIN tasks t ON t.id = s.task_id
+           WHERE t.company_id = $1
+             AND s.updated_at >= NOW() - INTERVAL '30 days'
+             AND t.capability_refs::text ILIKE $2"#,
+    )
+    .bind(company_id)
+    .bind(format!("%{}%", slug))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| db_err("promote_skill_proposal_skill_outcomes", &e))?;
+    let outcome_ok = skill_runs >= min_runs && skill_success >= baseline;
+    if !outcome_ok {
+        gate_reasons.push(format!(
+            "outcome gate failed (runs={skill_runs}, min_runs={min_runs}, skill_success={skill_success:.3}, baseline={baseline:.3})"
+        ));
+    }
+
+    if !(verification_ok && policy_ok && outcome_ok) {
+        return Err((
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({
+                "error": "promotion gate failed",
+                "gate": {
+                    "verification_ok": verification_ok,
+                    "policy_ok": policy_ok,
+                    "outcome_ok": outcome_ok,
+                    "baseline_success": baseline,
+                    "skill_runs": skill_runs,
+                    "skill_success": skill_success,
+                    "min_runs": min_runs,
+                    "reasons": gate_reasons
+                }
+            })),
+        ));
+    }
+
+    let existing = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        r#"SELECT body, skill_path
+           FROM company_skills
+           WHERE company_id = $1 AND slug = $2
+           LIMIT 1"#,
+    )
+    .bind(company_id)
+    .bind(&slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err("promote_skill_proposal_existing", &e))?;
+    let company_home = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT hsmii_home FROM companies WHERE id = $1",
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| db_err("promote_skill_proposal_company_home", &e))?;
+    let mut rollback_path: Option<String> = None;
+    if let (Some((Some(old_body), _old_path)), Some(home)) = (existing.clone(), company_home.clone()) {
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let backup_dir = PathBuf::from(home)
+            .join("skills")
+            .join("_versions")
+            .join(slug.replace('/', "__"));
+        let backup_path = backup_dir.join(format!("{ts}.md"));
+        if std::fs::create_dir_all(&backup_dir).is_ok()
+            && std::fs::write(&backup_path, old_body.as_bytes()).is_ok()
+        {
+            rollback_path = Some(backup_path.display().to_string());
+        }
+    }
+
+    let skill_path = format!("skills/{}/", slug);
+    sqlx::query(
+        r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
+           VALUES ($1,$2,$3,$4,$5,$6,'promotion_governed')
+           ON CONFLICT (company_id, slug) DO UPDATE SET
+              name = EXCLUDED.name,
+              description = EXCLUDED.description,
+              body = EXCLUDED.body,
+              skill_path = EXCLUDED.skill_path,
+              source = EXCLUDED.source,
+              updated_at = NOW()"#,
+    )
+    .bind(company_id)
+    .bind(&slug)
+    .bind(&name)
+    .bind(&description)
+    .bind(&proposal_markdown)
+    .bind(&skill_path)
+    .execute(pool)
+    .await
+    .map_err(|e| db_err("promote_skill_proposal_upsert", &e))?;
+
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, $2, 'skill_promoted_governed', 'skill', $3, $4, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(actor)
+    .bind(slug.clone())
+    .bind(SqlxJson(json!({
+        "slug": slug,
+        "name": name,
+        "skill_path": skill_path,
+        "source": "promotion_governed",
+        "rollback_path": rollback_path,
+        "baseline_success": baseline,
+        "skill_runs": skill_runs,
+        "skill_success": skill_success,
+        "min_runs": min_runs,
+        "from_task_id": body.from_task_id
+    })))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({
+        "promoted": true,
+        "slug": slug,
+        "rollback_path": rollback_path,
+        "gate": {
+            "verification_ok": verification_ok,
+            "policy_ok": policy_ok,
+            "outcome_ok": outcome_ok,
+            "baseline_success": baseline,
+            "skill_runs": skill_runs,
+            "skill_success": skill_success,
+            "min_runs": min_runs
+        }
+    })))
 }
 
 fn collect_skill_markdowns(root: &StdPath, out: &mut Vec<PathBuf>) {
@@ -1206,6 +1622,280 @@ async fn import_agentskills_bundle(
         "attempted": attempted,
         "imported": imported,
         "rejected": rejected
+    })))
+}
+
+fn split_skill_frontmatter(raw: &str) -> (Option<String>, String) {
+    let s = raw.trim_start();
+    if !s.starts_with("---") {
+        return (None, raw.to_string());
+    }
+    let rest = &s[3..];
+    let Some(end) = rest.find("\n---") else {
+        return (None, raw.to_string());
+    };
+    let yaml_part = rest[..end].trim().to_string();
+    let body = rest[end + 4..].trim_start().to_string();
+    (Some(yaml_part), body)
+}
+
+fn parse_agentskill_file(raw: &str) -> (AgentSkillFrontmatter, String) {
+    let (yaml, body) = split_skill_frontmatter(raw);
+    let fm = yaml
+        .as_deref()
+        .and_then(|y| serde_yaml::from_str::<AgentSkillFrontmatter>(y).ok())
+        .unwrap_or_default();
+    (fm, body)
+}
+
+fn derive_skill_name(slug: &str, fm: &AgentSkillFrontmatter) -> String {
+    fm.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| fm.title.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| slug.split('/').last().unwrap_or("skill").replace('-', " "))
+}
+
+fn derive_skill_description(body: &str, fm: &AgentSkillFrontmatter) -> String {
+    fm.description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| fm.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or("Imported AgentSkill from filesystem")
+                .to_string()
+        })
+}
+
+fn expand_tilde(input: &str) -> PathBuf {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+fn build_agentskill_body_with_meta(fm: &AgentSkillFrontmatter, body: &str) -> String {
+    let meta = json!({
+        "license": fm.license,
+        "compatibility": fm.compatibility,
+        "metadata": fm.metadata,
+        "allowed_tools": fm.allowed_tools
+    });
+    let has_meta = meta
+        .as_object()
+        .map(|m| {
+            m.get("license").and_then(Value::as_str).is_some()
+                || m.get("compatibility").and_then(Value::as_str).is_some()
+                || m.get("allowed_tools").and_then(Value::as_str).is_some()
+                || m.get("metadata")
+                    .and_then(Value::as_object)
+                    .map(|x| !x.is_empty())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if has_meta {
+        format!(
+            "<!-- hsm-agentskills-meta {} -->\n\n{}",
+            meta,
+            body.trim()
+        )
+    } else {
+        body.trim().to_string()
+    }
+}
+
+fn skill_category_from_slug(slug: &str) -> String {
+    slug.split('/')
+        .next()
+        .unwrap_or("uncategorized")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+async fn import_agentskills_from_fs(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+    Json(body): Json<ImportAgentSkillsFromFsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    verify_company(pool, company_id).await?;
+
+    let dry_run = body.dry_run.unwrap_or(false);
+    let overwrite = body.overwrite.unwrap_or(true);
+    let include_env_roots = body.include_env_roots.unwrap_or(true);
+    let source_tag = body
+        .source_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("agentskills_fs")
+        .to_ascii_lowercase();
+    let source = body
+        .pack
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|pack| format!("{source_tag}:{pack}"))
+        .unwrap_or_else(|| source_tag.clone());
+
+    let mut roots = Vec::<PathBuf>::new();
+    if let Some(explicit) = body.roots.as_ref() {
+        for raw in explicit {
+            let p = expand_tilde(raw);
+            if !p.as_os_str().is_empty() {
+                roots.push(p);
+            }
+        }
+    }
+    if include_env_roots {
+        roots.extend(external_skill_dir_roots_from_env());
+    }
+    if roots.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"roots required (or set include_env_roots=true with HSM_SKILL_EXTERNAL_DIRS)"})),
+        ));
+    }
+
+    let mut scanned_roots = Vec::<String>::new();
+    let mut missing_roots = Vec::<String>::new();
+    let mut discovered_files = 0usize;
+    let mut by_slug = std::collections::BTreeMap::<String, PathBuf>::new();
+    for root in &roots {
+        if !root.is_dir() {
+            missing_roots.push(root.to_string_lossy().to_string());
+            continue;
+        }
+        scanned_roots.push(root.to_string_lossy().to_string());
+        if let Ok(entries) = enumerate_skill_md_under_root(root) {
+            for (slug, path) in entries {
+                discovered_files += 1;
+                if slug.trim().is_empty() {
+                    continue;
+                }
+                by_slug.entry(slug).or_insert(path);
+            }
+        }
+    }
+
+    let mut attempted = 0usize;
+    let mut imported = 0usize;
+    let mut rejected = 0usize;
+    let mut categories = std::collections::BTreeMap::<String, usize>::new();
+
+    for (slug, path) in &by_slug {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(v) => v,
+            Err(_) => {
+                rejected += 1;
+                continue;
+            }
+        };
+        let (fm, body_md_raw) = parse_agentskill_file(&raw);
+        let body_md = build_agentskill_body_with_meta(&fm, &body_md_raw);
+        if body_md.trim().is_empty() {
+            rejected += 1;
+            continue;
+        }
+        let name = derive_skill_name(slug, &fm);
+        let description = derive_skill_description(&body_md, &fm);
+        attempted += 1;
+        *categories.entry(skill_category_from_slug(slug)).or_insert(0) += 1;
+        if dry_run {
+            continue;
+        }
+        let skill_path = path.to_string_lossy().to_string();
+        let result = if overwrite {
+            sqlx::query(
+                r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   ON CONFLICT (company_id, slug) DO UPDATE
+                   SET name = EXCLUDED.name,
+                       description = EXCLUDED.description,
+                       body = EXCLUDED.body,
+                       skill_path = EXCLUDED.skill_path,
+                       source = EXCLUDED.source,
+                       updated_at = NOW()"#,
+            )
+            .bind(company_id)
+            .bind(slug)
+            .bind(name)
+            .bind(description)
+            .bind(body_md)
+            .bind(skill_path)
+            .bind(&source)
+            .execute(pool)
+            .await
+        } else {
+            sqlx::query(
+                r#"INSERT INTO company_skills (company_id, slug, name, description, body, skill_path, source)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   ON CONFLICT (company_id, slug) DO NOTHING"#,
+            )
+            .bind(company_id)
+            .bind(slug)
+            .bind(name)
+            .bind(description)
+            .bind(body_md)
+            .bind(skill_path)
+            .bind(&source)
+            .execute(pool)
+            .await
+        };
+        if result.is_ok() {
+            imported += 1;
+        }
+    }
+
+    let _ = sqlx::query(
+        r#"INSERT INTO governance_events (company_id, actor, action, subject_type, subject_id, payload, severity)
+           VALUES ($1, 'agentskills_fs_importer', 'import_agentskills_from_fs', 'company', $2, $3, 'info')"#,
+    )
+    .bind(company_id)
+    .bind(company_id.to_string())
+    .bind(SqlxJson(json!({
+        "dry_run": dry_run,
+        "overwrite": overwrite,
+        "source": source,
+        "roots_scanned": scanned_roots,
+        "roots_missing": missing_roots,
+        "discovered_files": discovered_files,
+        "unique_slugs": by_slug.len(),
+        "attempted": attempted,
+        "imported": imported,
+        "rejected": rejected,
+        "categories": categories
+    })))
+    .execute(pool)
+    .await;
+
+    Ok(Json(json!({
+        "ok": true,
+        "standard": "agentskills.io",
+        "import_mode": "filesystem",
+        "dry_run": dry_run,
+        "overwrite": overwrite,
+        "source": source,
+        "roots_scanned": scanned_roots,
+        "roots_missing": missing_roots,
+        "discovered_files": discovered_files,
+        "unique_slugs": by_slug.len(),
+        "attempted": attempted,
+        "imported": imported,
+        "rejected": rejected,
+        "categories": categories
     })))
 }
 

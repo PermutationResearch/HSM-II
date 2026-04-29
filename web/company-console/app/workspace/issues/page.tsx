@@ -64,6 +64,67 @@ type StatusConfig = {
   done: boolean;
 };
 
+type RunModeView = {
+  label: string;
+  toneClass: string;
+};
+
+function isRunFailed(task: HsmTaskRow): boolean {
+  return (task.run?.status ?? "").toLowerCase() === "error";
+}
+
+function isRunRunning(task: HsmTaskRow): boolean {
+  return (task.run?.status ?? "").toLowerCase() === "running";
+}
+
+function isTaskActive(task: HsmTaskRow): boolean {
+  if (isRunFailed(task)) return false;
+  if (isRunRunning(task)) return true;
+  return /progress|doing|active/i.test(task.state);
+}
+
+function getRunModeView(task: HsmTaskRow): RunModeView {
+  if (isPlanTask(task)) {
+    if (isDoneTask(task)) return { label: "plan ready", toneClass: "border-violet-500/40 text-violet-400" };
+    return { label: "plan draft", toneClass: "border-violet-500/40 text-violet-400" };
+  }
+  const run = task.run;
+  if (!run) return { label: "task", toneClass: "border-[#333333] text-muted-foreground" };
+  const st = (run.status ?? "").toLowerCase();
+  if (st === "running") return { label: "running", toneClass: "border-blue-500/40 text-blue-400" };
+  if (st === "error") return { label: "run error", toneClass: "border-red-500/40 text-red-400" };
+  if (st === "success") {
+    return run.tool_calls > 0
+      ? { label: "worker", toneClass: "border-emerald-500/40 text-emerald-400" }
+      : { label: "llm-only", toneClass: "border-amber-500/40 text-amber-300" };
+  }
+  return { label: st || "task", toneClass: "border-[#333333] text-muted-foreground" };
+}
+
+function getTaskFailureHint(task: HsmTaskRow): string | null {
+  const tail = (task.run?.log_tail ?? "").trim();
+  if (!tail) return null;
+  if (/llm unavailable for agentic execution/i.test(tail)) {
+    return "Worker could not reach an LLM provider. Check OpenRouter/Ollama configuration.";
+  }
+  if (/no llm providers configured/i.test(tail)) {
+    return "No LLM provider configured for worker execution.";
+  }
+  if (/no tool calls were executed/i.test(tail)) {
+    return "Worker stopped before executing any real tool calls.";
+  }
+  if (/no successful non-dispatch tool completions observed/i.test(tail)) {
+    return "Worker called tools but none completed successfully.";
+  }
+  if (/agentic tool loop ended without a final answer/i.test(tail)) {
+    return "Worker hit max turns before producing a final answer.";
+  }
+  if (/no space left on device|os error 28/i.test(tail)) {
+    return "Disk full during execution.";
+  }
+  return tail.length > 180 ? `${tail.slice(0, 180)}…` : tail;
+}
+
 function getStatusConfig(state: string): StatusConfig {
   if (/done|complete|closed/i.test(state))
     return {
@@ -106,18 +167,6 @@ function getStatusConfig(state: string): StatusConfig {
     className: "border-admin-border bg-admin-surface text-muted-foreground",
     done: false,
   };
-}
-
-function StatusBadge({ state, requiresHuman }: { state: string; requiresHuman?: boolean | null }) {
-  const cfg = requiresHuman && !/done|complete|closed/i.test(state)
-    ? { label: "Needs you", icon: <AlertCircle className="size-3" />, className: "border-amber-500/40 bg-amber-500/10 text-amber-400", done: false }
-    : getStatusConfig(state);
-  return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium", cfg.className)}>
-      {cfg.icon}
-      {cfg.label}
-    </span>
-  );
 }
 
 /* ─── Reassign popover ─────────────────────────────────────────────────── */
@@ -281,9 +330,13 @@ function TaskRow({
   const [markingDone, setMarkingDone] = useState(false);
   const caps = capabilityRefsFromTask(task);
   const wsPaths = workspaceAttachmentPathsFromTask(task);
-  const statusCfg = task.requires_human && !/done|complete|closed/i.test(task.state)
-    ? getStatusConfig("waiting_admin")
-    : getStatusConfig(task.state);
+  const runMode = getRunModeView(task);
+  const failureHint = getTaskFailureHint(task);
+  const statusCfg = isRunFailed(task) && !/done|complete|closed/i.test(task.state)
+    ? { label: "Run failed", icon: <AlertCircle className="size-3" />, className: "border-red-500/40 bg-red-500/10 text-red-400", done: false }
+    : task.requires_human && !/done|complete|closed/i.test(task.state)
+      ? getStatusConfig("waiting_admin")
+      : getStatusConfig(task.state);
   const isDone = statusCfg.done;
 
   const markDone = async () => {
@@ -337,6 +390,11 @@ function TaskRow({
           <span className={cn("block truncate font-medium text-foreground text-sm", isDone && "line-through text-muted-foreground")}>
             {issue.title}
           </span>
+          {failureHint ? (
+            <span className="mt-0.5 block truncate font-mono text-[10px] text-amber-300" title={task.run?.log_tail ?? undefined}>
+              Why it failed: {failureHint}
+            </span>
+          ) : null}
           {caps.filter((c) => c.kind !== "mode").length > 0 ? (
             <span className="mt-0.5 flex flex-wrap gap-1">
               {caps.filter((c) => c.kind !== "mode").slice(0, 3).map((c) => (
@@ -362,14 +420,17 @@ function TaskRow({
 
         {/* Status */}
         <span>
-          <StatusBadge state={task.state} requiresHuman={task.requires_human} />
+          <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium", statusCfg.className)}>
+            {statusCfg.icon}
+            {statusCfg.label}
+          </span>
         </span>
 
         {/* Gate */}
         <span>
-          {issue.decisionMode === "admin_required" ? (
+          {task.requires_human || issue.decisionMode === "admin_required" ? (
             <Badge variant="outline" className="border-amber-500/50 font-mono text-[9px] text-amber-400">
-              admin
+              needs human
             </Badge>
           ) : (
             <span className="text-xs text-muted-foreground">—</span>
@@ -391,11 +452,13 @@ function TaskRow({
               </Button>
             ) : (
               <Badge variant="outline" className="border-violet-500/40 font-mono text-[9px] text-violet-400">
-                plan
+                {runMode.label}
               </Badge>
             )
           ) : (
-            <span className="text-xs text-muted-foreground">—</span>
+            <Badge variant="outline" className={cn("font-mono text-[9px]", runMode.toneClass)}>
+              {runMode.label}
+            </Badge>
           )}
         </span>
 
@@ -430,7 +493,7 @@ function TaskRow({
 function IssuesContent() {
   const searchParams = useSearchParams();
   const qc = useQueryClient();
-  const { apiBase, companyId, companies, setPropertiesSelection } = useWorkspace();
+  const { apiBase, companyId, companies, setPropertiesSelection, propertiesSelection } = useWorkspace();
   const company = companies.find((c) => c.id === companyId);
   const prefix = (company?.issue_key_prefix ?? "HSM").toUpperCase();
 
@@ -485,6 +548,9 @@ function IssuesContent() {
   useEffect(() => {
     const id = searchParams.get("focus");
     if (!id || tasks.length === 0) return;
+    // `tasks` refetches often (e.g. after operator agent-chat). Do not replace an active right-rail
+    // **agent** session with this deep-link — that was kicking users back to task header + roster mid-chat.
+    if (propertiesSelection?.kind === "agent") return;
     const t = tasks.find((x) => x.id === id);
     if (!t) return;
     const pc = taskToPcIssue(t, prefix);
@@ -492,7 +558,7 @@ function IssuesContent() {
     requestAnimationFrame(() => {
       document.querySelector(`[data-task-row="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
-  }, [searchParams, tasks, prefix, setPropertiesSelection]);
+  }, [searchParams, tasks, prefix, setPropertiesSelection, propertiesSelection]);
 
   if (!companyId) return <p className="pc-page-desc">Select a company in the header.</p>;
   if (error) return (
@@ -506,7 +572,14 @@ function IssuesContent() {
   ) : null;
 
   const doneCount = issues.filter((_, i) => getStatusConfig(filtered[i]?.state ?? "").done).length;
-  const activeCount = issues.filter((_, i) => /progress|doing|active/i.test(filtered[i]?.state ?? "")).length;
+  const activeCount = issues.filter((_, i) => {
+    const task = filtered[i];
+    return task ? isTaskActive(task) : false;
+  }).length;
+  const failedCount = issues.filter((_, i) => {
+    const task = filtered[i];
+    return task ? isRunFailed(task) : false;
+  }).length;
 
   return (
     <div className="space-y-4">
@@ -545,7 +618,7 @@ function IssuesContent() {
               <CardTitle className="text-base">Task list</CardTitle>
               <CardDescription>
                 {isLoading ? "Loading…" : (
-                  <span className="inline-flex gap-3">
+                  <span className="inline-flex flex-wrap gap-3">
                     <span>{issues.length} issues</span>
                     {activeCount > 0 && (
                       <span className="inline-flex items-center gap-1 text-blue-400">
@@ -559,6 +632,15 @@ function IssuesContent() {
                         {doneCount} done
                       </span>
                     )}
+                    {failedCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-red-400">
+                        <AlertCircle className="size-3" />
+                        {failedCount} failed
+                      </span>
+                    )}
+                    <span className="text-muted-foreground">
+                      Gate = approvals/human action. Mode = plan/worker/llm state.
+                    </span>
                   </span>
                 )}
               </CardDescription>
@@ -572,7 +654,7 @@ function IssuesContent() {
               <div className="grid grid-cols-[100px_1fr_40px_148px_88px_72px_110px_auto] gap-2 border-b border-admin-border px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
                 <span>Key</span>
                 <span>Title</span>
-                <span>Pri</span>
+                <span>Priority</span>
                 <span>Status</span>
                 <span>Gate</span>
                 <span>Mode</span>

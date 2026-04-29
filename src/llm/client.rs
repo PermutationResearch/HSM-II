@@ -46,6 +46,33 @@ fn root_http_err(e: &anyhow::Error) -> Option<&LlmHttpError> {
         .or_else(|| e.chain().find_map(|c| c.downcast_ref::<LlmHttpError>()))
 }
 
+fn env_truthy_llm(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// When `HSM_ANTHROPIC_EAGER_TOOL_STREAMING=1`, set `eager_input_streaming: true` on each entry in `body["tools"]`.
+/// No-op if `tools` is absent (Hermes-style string prompts do not populate it yet).
+fn apply_anthropic_eager_tool_streaming(body: &mut Value) {
+    if !env_truthy_llm("HSM_ANTHROPIC_EAGER_TOOL_STREAMING") {
+        return;
+    }
+    let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) else {
+        return;
+    };
+    for tool in tools {
+        if let Some(obj) = tool.as_object_mut() {
+            obj.insert("eager_input_streaming".into(), json!(true));
+        }
+    }
+}
+
 /// One configured upstream (OpenAI, OpenRouter, Anthropic, Ollama).
 #[derive(Clone, Debug)]
 struct ProviderSlot {
@@ -305,12 +332,12 @@ pub fn resolve_risk_based_model(
             }
         }
     }
-    match risk_band.trim().to_ascii_lowercase().as_str() {
-        "low" => ("mimo-v2-pro".to_string(), "builtin"),
-        "medium" => ("gpt-4o-mini".to_string(), "builtin"),
-        "high" => (current_model.to_string(), "builtin"),
-        _ => (current_model.to_string(), "builtin"),
-    }
+    // Safe default: do not silently swap model families by risk band.
+    // If callers want explicit per-band routing they must set HSM_MODEL_ROUTING_JSON.
+    // This prevents OpenRouter/worker sessions from drifting to legacy built-ins
+    // like `mimo-v2-pro` when env policy is missing or not loaded.
+    let _ = risk_band; // retained for signature compatibility and future policy hooks.
+    (current_model.to_string(), "builtin")
 }
 
 /// Chat message
@@ -958,11 +985,14 @@ impl LlmClient {
     fn openai_compatible_model_id(model: &str, base_url: &str) -> String {
         let m = model.trim();
         if base_url.to_ascii_lowercase().contains("openrouter") {
-            m.strip_prefix("openrouter/")
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(m)
-                .to_string()
+            if let Some(rest) = m.strip_prefix("openrouter/").map(str::trim) {
+                // Keep OpenRouter-native ids like `openrouter/elephant-alpha`.
+                // Strip only wrapper ids like `openrouter/openai/gpt-4o`.
+                if rest.contains('/') && !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+            m.to_string()
         } else {
             m.to_string()
         }
@@ -1089,6 +1119,7 @@ impl LlmClient {
         if let Some(system) = system_msg {
             body["system"] = json!(system);
         }
+        apply_anthropic_eager_tool_streaming(&mut body);
 
         let response = self
             .http

@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
+use serde_yaml::Value as YamlValue;
 
 /// [Agent Skills](https://agentskills.io/specification) YAML front matter (all optional at parse time;
 /// the spec requires `name` + `description` for compliant skills).
@@ -27,10 +28,33 @@ struct AgentSkillFrontmatter {
     license: Option<String>,
     compatibility: Option<String>,
     #[serde(default)]
-    metadata: Option<BTreeMap<String, String>>,
+    metadata: Option<YamlValue>,
+    #[serde(default)]
+    platforms: Option<Vec<String>>,
     /// Experimental in the spec: space-delimited tool list.
     #[serde(default)]
     allowed_tools: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct AgentSkillMetadataBlock {
+    hermes: Option<AgentSkillHermesMeta>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct AgentSkillHermesMeta {
+    tags: Option<Vec<String>>,
+    category: Option<String>,
+    #[serde(alias = "fallback_for_toolsets", alias = "fallbackForToolsets")]
+    fallback_for_toolsets: Option<Vec<String>>,
+    #[serde(alias = "requires_toolsets", alias = "requiresToolsets")]
+    requires_toolsets: Option<Vec<String>>,
+    #[serde(alias = "fallback_for_tools", alias = "fallbackForTools")]
+    fallback_for_tools: Option<Vec<String>>,
+    #[serde(alias = "requires_tools", alias = "requiresTools")]
+    requires_tools: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,8 +70,17 @@ pub struct SkillMdSummary {
     pub skill_id: Option<String>,
     pub license: Option<String>,
     pub compatibility: Option<String>,
-    pub metadata: Option<BTreeMap<String, String>>,
+    pub metadata: Option<serde_json::Value>,
     pub allowed_tools: Option<String>,
+    pub platforms: Vec<String>,
+    pub tags: Vec<String>,
+    pub category: Option<String>,
+    pub fallback_for_toolsets: Vec<String>,
+    pub requires_toolsets: Vec<String>,
+    pub fallback_for_tools: Vec<String>,
+    pub requires_tools: Vec<String>,
+    pub contract_complete: bool,
+    pub missing_sections: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,6 +187,15 @@ impl SkillMdCatalog {
                     "compatibility": e.compatibility,
                     "metadata": e.metadata,
                     "allowed_tools": e.allowed_tools,
+                    "platforms": e.platforms,
+                    "tags": e.tags,
+                    "category": e.category,
+                    "fallback_for_toolsets": e.fallback_for_toolsets,
+                    "requires_toolsets": e.requires_toolsets,
+                    "fallback_for_tools": e.fallback_for_tools,
+                    "requires_tools": e.requires_tools,
+                    "contract_complete": e.contract_complete,
+                    "missing_sections": e.missing_sections,
                 })
             })
             .collect();
@@ -367,11 +409,27 @@ fn summarize_skill_file(root: &Path, skill_md: &Path) -> Result<SkillMdSummary> 
         .ok_or_else(|| anyhow!("SKILL.md has no parent directory"))?;
     let leaf = leaf_dir_of_skill_md(skill_md);
     let raw = std::fs::read_to_string(skill_md)?;
-    let (fm_opt, _) = parse_frontmatter_block(&raw)?;
+    let (fm_opt, body) = parse_frontmatter_block(&raw)?;
     let strict = agentskills_strict();
+    let missing_sections = skill_contract_missing_sections(&body);
+    let contract_complete = missing_sections.is_empty();
 
-    let (display_name, description, skill_id, license, compatibility, metadata, allowed_tools) =
-        match &fm_opt {
+    let (
+        display_name,
+        description,
+        skill_id,
+        license,
+        compatibility,
+        metadata,
+        allowed_tools,
+        platforms,
+        tags,
+        category,
+        fallback_for_toolsets,
+        requires_toolsets,
+        fallback_for_tools,
+        requires_tools,
+    ) = match &fm_opt {
             Some(fm) => {
                 let id = fm
                     .name
@@ -426,6 +484,11 @@ fn summarize_skill_file(root: &Path, skill_md: &Path) -> Result<SkillMdSummary> 
                         .filter(|t| !t.is_empty())
                         .unwrap_or_else(|| String::new()),
                 };
+                let metadata_json = fm
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| serde_json::to_value(m).ok());
+                let hermes_meta = fm.metadata.as_ref().and_then(extract_hermes_meta);
 
                 (
                     disp,
@@ -433,11 +496,58 @@ fn summarize_skill_file(root: &Path, skill_md: &Path) -> Result<SkillMdSummary> 
                     id,
                     fm.license.clone(),
                     fm.compatibility.clone(),
-                    fm.metadata.clone(),
+                    metadata_json,
                     fm.allowed_tools.clone(),
+                    normalize_string_vec(fm.platforms.clone().unwrap_or_default()),
+                    normalize_string_vec(
+                        hermes_meta
+                            .as_ref()
+                            .and_then(|h| h.tags.clone())
+                            .unwrap_or_default(),
+                    ),
+                    hermes_meta.as_ref().and_then(|h| clean_opt(&h.category)),
+                    normalize_string_vec(
+                        hermes_meta
+                            .as_ref()
+                            .and_then(|h| h.fallback_for_toolsets.clone())
+                            .unwrap_or_default(),
+                    ),
+                    normalize_string_vec(
+                        hermes_meta
+                            .as_ref()
+                            .and_then(|h| h.requires_toolsets.clone())
+                            .unwrap_or_default(),
+                    ),
+                    normalize_string_vec(
+                        hermes_meta
+                            .as_ref()
+                            .and_then(|h| h.fallback_for_tools.clone())
+                            .unwrap_or_default(),
+                    ),
+                    normalize_string_vec(
+                        hermes_meta
+                            .as_ref()
+                            .and_then(|h| h.requires_tools.clone())
+                            .unwrap_or_default(),
+                    ),
                 )
             }
-            None => (String::new(), String::new(), None, None, None, None, None),
+            None => (
+                String::new(),
+                String::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         };
 
     let name = if display_name.is_empty() {
@@ -457,6 +567,15 @@ fn summarize_skill_file(root: &Path, skill_md: &Path) -> Result<SkillMdSummary> 
         compatibility,
         metadata,
         allowed_tools,
+        platforms,
+        tags,
+        category,
+        fallback_for_toolsets,
+        requires_toolsets,
+        fallback_for_tools,
+        requires_tools,
+        contract_complete,
+        missing_sections,
     })
 }
 
@@ -577,6 +696,66 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
     format!("{}… [truncated]", &s[..end])
 }
 
+fn normalize_string_vec(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for v in values {
+        let t = v.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        if seen.insert(lower) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+fn clean_opt(v: &Option<String>) -> Option<String> {
+    v.as_ref().map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
+}
+
+fn extract_hermes_meta(metadata: &YamlValue) -> Option<AgentSkillHermesMeta> {
+    serde_yaml::from_value::<AgentSkillMetadataBlock>(metadata.clone())
+        .ok()
+        .and_then(|m| m.hermes)
+}
+
+fn skill_contract_missing_sections(body: &str) -> Vec<String> {
+    let required = ["When to Use", "Procedure", "Pitfalls", "Verification"];
+    let mut found = std::collections::BTreeSet::new();
+    for raw in body.lines() {
+        let line = raw.trim();
+        if !line.starts_with('#') {
+            continue;
+        }
+        let heading = line.trim_start_matches('#').trim();
+        let norm = normalize_heading(heading);
+        if !norm.is_empty() {
+            found.insert(norm);
+        }
+    }
+    required
+        .iter()
+        .filter_map(|name| {
+            let norm = normalize_heading(name);
+            if found.contains(&norm) {
+                None
+            } else {
+                Some((*name).to_string())
+            }
+        })
+        .collect()
+}
+
+fn normalize_heading(s: &str) -> String {
+    s.to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +829,44 @@ mod tests {
         assert!(cat
             .read_skill_resource("my-skill", "../my-skill/references/note.txt", 1024)
             .is_err());
+    }
+
+    #[test]
+    fn contract_sections_and_hermes_metadata_are_exposed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let skill = root.join("my-skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            r#"---
+name: my-skill
+description: test
+platforms: [macos, linux]
+metadata:
+  hermes:
+    tags: [python, automation]
+    category: devops
+    requires_tools: [bash]
+---
+# Skill Title
+
+## When to Use
+X
+
+## Procedure
+Y
+"#,
+        )
+        .unwrap();
+        let cat = SkillMdCatalog::from_roots(&[root.to_path_buf()]);
+        let s = cat.get("my-skill").unwrap();
+        assert_eq!(s.platforms, vec!["macos".to_string(), "linux".to_string()]);
+        assert_eq!(s.tags, vec!["python".to_string(), "automation".to_string()]);
+        assert_eq!(s.category.as_deref(), Some("devops"));
+        assert_eq!(s.requires_tools, vec!["bash".to_string()]);
+        assert!(!s.contract_complete);
+        assert!(s.missing_sections.contains(&"Pitfalls".to_string()));
+        assert!(s.missing_sections.contains(&"Verification".to_string()));
     }
 }

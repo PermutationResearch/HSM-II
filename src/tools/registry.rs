@@ -124,7 +124,7 @@ impl ToolRegistry {
     /// Register a tool
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        info!("Registering tool: {}", name);
+        debug!("Registering tool: {}", name);
         self.tools.insert(name.clone(), tool);
         self.stats.entry(name).or_default();
     }
@@ -424,19 +424,23 @@ impl ToolRegistry {
         }
 
         crate::runtime_control::mark_tool_activity(&call.name, &call.call_id, "finish");
-        crate::runtime_control::publish_completion(crate::runtime_control::CompletionEvent::tool_completion(
-            &call.name,
-            &call.call_id,
-            output.success,
-            if output.success {
-                "tool completed".to_string()
-            } else {
-                output
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "tool failed".to_string())
-            },
-        ));
+        let output_len = output.result.len();
+        crate::runtime_control::publish_completion(
+            crate::runtime_control::CompletionEvent::tool_completion_with_output(
+                &call.name,
+                &call.call_id,
+                output.success,
+                if output.success {
+                    "tool completed".to_string()
+                } else {
+                    output
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "tool failed".to_string())
+                },
+                output_len,
+            ),
+        );
         crate::runtime_control::mark_runtime_idle();
 
         ToolCallResult {

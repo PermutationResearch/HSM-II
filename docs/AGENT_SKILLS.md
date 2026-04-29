@@ -17,3 +17,7 @@ To validate packs against the reference rules, use the **`skills-ref`** CLI from
 ## Seeds in this repo
 
 See `templates/hsmii/skills/` for a compliant example (`name` matches the folder name, lowercase kebab-case).
+
+## Why descriptions matter (tool + skill selection)
+
+Models map user intent to **tool names/descriptions/schemas** and to **skill catalog blurbs** the same way they would pick a function: unclear text leads to skipped skills, wrong tools, or overuse of generic primitives. For a concise, model-centric explanation (Claude-style `tool_use`, Hermes-style function calling, progressive disclosure, pitfalls), load the on-disk skill **`llm-tool-skill-reasoning`** via `skill_md_read` or open `skills/llm-tool-skill-reasoning/SKILL.md`.

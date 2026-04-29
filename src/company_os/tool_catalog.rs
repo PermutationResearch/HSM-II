@@ -32,6 +32,10 @@ pub fn router() -> Router<ConsoleState> {
             post(discover_tools),
         )
         .route(
+            "/api/company/companies/:company_id/tools/seed-builtin",
+            post(seed_builtin_tools),
+        )
+        .route(
             "/api/company/companies/:company_id/tools/:tool_key/describe",
             get(describe_tool),
         )
@@ -386,6 +390,22 @@ async fn discover_tools(
     verify_company(pool, company_id).await?;
     let q = body.query.trim().to_ascii_lowercase();
     let limit = body.limit.unwrap_or(8).clamp(1, 40) as usize;
+
+    // Lazy bootstrap: if the catalog is empty for this company, auto-seed built-in tools
+    // so the first discover call just works without requiring a manual seed step.
+    let catalog_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM company_tool_catalog WHERE company_id = $1")
+            .bind(company_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    if catalog_count == 0 {
+        tracing::info!(company_id = %company_id, "company_tool_catalog empty — auto-seeding built-in tools");
+        if let Err(e) = do_seed_builtin(pool, company_id).await {
+            tracing::warn!(company_id = %company_id, error = %e, "auto-seed failed, continuing with empty catalog");
+        }
+    }
+
     let rows = sqlx::query_as::<_, ToolCatalogRow>(
         r#"SELECT id, company_id, source_id, tool_key, display_name, description, schema, meta, active,
                   created_at::text, updated_at::text
@@ -683,5 +703,126 @@ async fn resume_execution(
         )
     })?;
     Ok(Json(json!({ "execution": final_row })))
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tool seeding
+// ---------------------------------------------------------------------------
+
+/// Seed `company_tool_catalog` with the 70+ native HSM tools for `company_id`.
+///
+/// Uses the in-process `ToolRegistry` (via `register_all_tools`) as the single source
+/// of truth so tool_key / description / JSON-schema stay in sync with actual tool impls.
+///
+/// Creates (or upserts) a `company_tool_sources` row named `"hsm_native"` with
+/// `kind = 'custom'`, then upserts every tool from the registry into `company_tool_catalog`.
+/// Idempotent — safe to call multiple times.
+async fn do_seed_builtin(pool: &sqlx::PgPool, company_id: Uuid) -> Result<usize, String> {
+    // Build an in-process registry to get accurate names/descriptions/schemas.
+    let mut registry = crate::tools::ToolRegistry::new();
+    crate::tools::register_all_tools(&mut registry);
+    let schemas = registry.get_schemas(); // Vec<Value>
+
+    // Upsert the built-in tool source row.
+    let source_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO company_tool_sources
+               (company_id, kind, name, source_url, auth, config, status)
+               VALUES ($1, 'custom', 'hsm_native', NULL, '{}'::jsonb, '{}'::jsonb, 'active')
+               ON CONFLICT (company_id, name) DO UPDATE SET
+                 status = 'active',
+                 updated_at = NOW()
+               RETURNING id"#,
+    )
+    .bind(company_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut seeded = 0usize;
+    for entry in &schemas {
+        // Each entry is { "type": "function", "function": { "name":…, "description":…, "parameters":… } }
+        let func = match entry.get("function") {
+            Some(f) => f,
+            None => continue,
+        };
+        let tool_key_raw = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if tool_key_raw.is_empty() {
+            continue;
+        }
+        let tool_key = sanitize_tool_key(tool_key_raw);
+        let display_name = tool_key
+            .split(['_', '-'])
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description = func.get("description").and_then(|v| v.as_str()).map(str::to_string);
+        let schema = func.get("parameters").cloned().unwrap_or_else(|| json!({}));
+        let meta = json!({
+            "source_kind": "custom",
+            "source_name": "hsm_native",
+            "ingested_via": "seed_builtin"
+        });
+
+        sqlx::query(
+            r#"INSERT INTO company_tool_catalog
+               (company_id, source_id, tool_key, display_name, description, schema, meta, active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+               ON CONFLICT (company_id, tool_key) DO UPDATE SET
+                 source_id    = EXCLUDED.source_id,
+                 display_name = EXCLUDED.display_name,
+                 description  = EXCLUDED.description,
+                 schema       = EXCLUDED.schema,
+                 meta         = EXCLUDED.meta,
+                 active       = TRUE,
+                 updated_at   = NOW()"#,
+        )
+        .bind(company_id)
+        .bind(source_id)
+        .bind(&tool_key)
+        .bind(&display_name)
+        .bind(description.as_deref())
+        .bind(SqlxJson(schema))
+        .bind(SqlxJson(meta))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        seeded += 1;
+    }
+
+    // Stamp last_ingested_at on the source.
+    let _ = sqlx::query(
+        "UPDATE company_tool_sources SET last_ingested_at = NOW(), updated_at = NOW() WHERE id = $1",
+    )
+    .bind(source_id)
+    .execute(pool)
+    .await;
+
+    Ok(seeded)
+}
+
+/// `POST /api/company/companies/{company_id}/tools/seed-builtin`
+///
+/// Idempotent bootstrap: populates (or refreshes) the native HSM tool definitions in
+/// `company_tool_catalog` so `company_tool_discover` returns real results.
+async fn seed_builtin_tools(
+    State(st): State<ConsoleState>,
+    Path(company_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(ref pool) = st.company_db else {
+        return Err(no_db());
+    };
+    verify_company(pool, company_id).await?;
+
+    match do_seed_builtin(pool, company_id).await {
+        Ok(n) => Ok(Json(json!({ "ok": true, "seeded": n }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))),
+    }
 }
 

@@ -4,7 +4,6 @@
  * NDJSON stream (one JSON object per line) for operator chat:
  * - `runtime` / `runtime_raw`: tool/runtime events (mirrors Company OS SSE while worker runs)
  * - `stream_event`: Claude-style partial assistant stream (`event` = Anthropic stream object)
- * - `delta`: optional legacy token chunks (not emitted on OpenRouter path when `stream_event` is used)
  * - `phase`, `done`, `error`
  */
 import { NextRequest } from "next/server";

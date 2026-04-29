@@ -173,6 +173,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let _ = dotenvy::dotenv();
     hyper_stigmergy::telemetry::init_from_env();
+    let _telemetry_session = hyper_stigmergy::telemetry::start_session_guard();
 
     let cli = Cli::parse();
 
@@ -405,6 +406,7 @@ async fn cmd_start(
                                 timestamp: chrono::Utc::now(),
                                 attachments: vec![],
                                 reply_to: None,
+                                thread_workspace_root: None,
                             };
 
                             match agent.handle_message(msg).await {
@@ -450,6 +452,7 @@ async fn cmd_chat(home: &PathBuf, message: Option<String>) -> Result<()> {
             timestamp: chrono::Utc::now(),
             attachments: vec![],
             reply_to: None,
+            thread_workspace_root: None,
         };
 
         let response = agent.handle_message(gateway_msg).await?;
@@ -477,6 +480,7 @@ async fn cmd_do(home: &PathBuf, task: &str) -> Result<()> {
         timestamp: chrono::Utc::now(),
         attachments: vec![],
         reply_to: None,
+        thread_workspace_root: None,
     };
 
     let result = agent.handle_message(msg).await?;
@@ -860,5 +864,6 @@ fn default_message() -> gateway::Message {
         timestamp: chrono::Utc::now(),
         attachments: vec![],
         reply_to: None,
+        thread_workspace_root: None,
     }
 }

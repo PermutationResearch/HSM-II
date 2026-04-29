@@ -31,17 +31,17 @@ import {
   looksLikeQuickToolIntent,
   looksLikeRepoInfoQuestion,
   looksLikeSkillsOrCatalogQuestion,
-  parseAgentChatSlashCommand,
   operatorChatQuickToolPromptMode,
   executeTaskAction,
   operatorChatShouldRouteWorker,
   parseOptimizeCommand,
+  parseSentinelReputationCommand,
   parseTaskManagementAction,
+  querySentinelReputation,
   readAgentChatBackend,
   resolveAgentForPersona,
   saveCompactionToMemory,
   isThinHarnessModel,
-  slashCommandWorkerInstruction,
   type WorkerDispatchResult,
   UPSTREAM,
   upsertThreadSessionState,
@@ -61,6 +61,7 @@ import {
 } from "@/app/lib/agent-chat-stream-policy.mjs";
 import { openRouterStreamDeltaToText, normalizeChatCompletionMessageContent } from "@/app/lib/llm-text-content";
 import { asObject } from "@/app/lib/runtime-contract";
+import { evaluateStrictActionPolicy } from "@/app/lib/strict-security";
 
 export type AgentChatRequestBody = {
   taskId: string;
@@ -131,6 +132,114 @@ type OperationalStateAccumulator = {
   subagent_tasks: Map<string, OperationalSubagentTask>;
   bridge_proxy: BridgeProxyState;
 };
+
+const OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS = Math.min(
+  Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS ?? "120000", 10) || 120000, 5000),
+  120000,
+);
+const OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS = Math.min(
+  Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS ?? "30000", 10) || 30000, 5000),
+  120000,
+);
+
+type AgentChatSlashCommand =
+  | { kind: "skill"; skillSlug: string }
+  | { kind: "help" };
+
+function parseAgentChatSlashCommand(text: string, knownSlugs: string[]): AgentChatSlashCommand | null {
+  const t = text.trim();
+  if (!t.startsWith("/")) return null;
+  const body = t.slice(1).trim();
+  if (!body) return { kind: "help" };
+  const [cmdRaw, ...rest] = body.split(/\s+/);
+  const cmd = cmdRaw.toLowerCase();
+  if (cmd === "help") return { kind: "help" };
+  if (cmd === "skill" && rest.length > 0) {
+    const slug = rest.join("-").toLowerCase();
+    const matched = knownSlugs.find((s) => s.toLowerCase() === slug) ?? slug;
+    return { kind: "skill", skillSlug: matched };
+  }
+  const slashAsSkill = knownSlugs.find((s) => s.toLowerCase() === cmd);
+  return slashAsSkill ? { kind: "skill", skillSlug: slashAsSkill } : null;
+}
+
+function slashCommandWorkerInstruction(cmd: AgentChatSlashCommand): string {
+  if (cmd.kind === "help") {
+    return "List available slash commands and supported agent-chat skills.";
+  }
+  return `Run the \`${cmd.skillSlug}\` skill in the worker agent loop and report results.`;
+}
+
+function makeOperationalAccumulator(): OperationalStateAccumulator {
+  return {
+    todo_queue: new Map<string, OperationalTodoItem>(),
+    subagent_tasks: new Map<string, OperationalSubagentTask>(),
+    bridge_proxy: {
+      mode: "local",
+      status: "idle",
+      call_count: 0,
+      updated_at: new Date().toISOString(),
+      last_tool: null,
+      last_mcp_server: null,
+      last_mcp_tool: null,
+      last_error: null,
+    },
+  };
+}
+
+function captureOperationalStateFromRuntime(payload: Record<string, unknown>, acc: OperationalStateAccumulator): void {
+  const eventType = typeof payload.event_type === "string" ? payload.event_type : "";
+  const toolName = typeof payload.tool_name === "string" ? payload.tool_name : "";
+  const now = new Date().toISOString();
+  if (eventType === "tool_start" || eventType === "tool_complete" || eventType === "tool_error") {
+    acc.bridge_proxy.call_count += 1;
+    acc.bridge_proxy.last_tool = toolName || acc.bridge_proxy.last_tool;
+    acc.bridge_proxy.status = eventType === "tool_error" ? "error" : "active";
+    acc.bridge_proxy.updated_at = now;
+  }
+  const input = asObject(payload.input);
+  if (toolName === "TodoWrite" && input && Array.isArray(input.todos)) {
+    for (const item of input.todos) {
+      if (!item || typeof item !== "object") continue;
+      const id = typeof (item as { id?: unknown }).id === "string" ? String((item as { id: unknown }).id) : "";
+      if (!id) continue;
+      acc.todo_queue.set(id, {
+        id,
+        content: typeof (item as { content?: unknown }).content === "string" ? String((item as { content: unknown }).content) : "",
+        status:
+          typeof (item as { status?: unknown }).status === "string"
+            ? ((item as { status: unknown }).status as OperationalTodoItem["status"])
+            : "pending",
+        updated_at: now,
+      });
+    }
+  }
+  if (toolName === "Subagent") {
+    const id =
+      (typeof payload.call_id === "string" && payload.call_id) ||
+      (typeof payload.task_key === "string" && payload.task_key) ||
+      `subagent-${acc.subagent_tasks.size + 1}`;
+    acc.subagent_tasks.set(id, {
+      id,
+      description: typeof input?.prompt === "string" ? input.prompt : "Subagent task",
+      subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : undefined,
+      model: typeof input?.model === "string" ? input.model : undefined,
+      status: eventType === "tool_error" ? "failed" : eventType === "tool_complete" ? "completed" : "running",
+      updated_at: now,
+    });
+  }
+  if (toolName === "CallMcpTool") {
+    acc.bridge_proxy.mode = "proxy";
+    acc.bridge_proxy.last_mcp_server = typeof input?.server === "string" ? input.server : acc.bridge_proxy.last_mcp_server;
+    acc.bridge_proxy.last_mcp_tool =
+      typeof input?.toolName === "string" ? input.toolName : acc.bridge_proxy.last_mcp_tool;
+    acc.bridge_proxy.updated_at = now;
+  }
+  if (eventType === "tool_error") {
+    acc.bridge_proxy.last_error =
+      typeof payload.message === "string" ? payload.message : acc.bridge_proxy.last_error;
+  }
+}
 
 const ARTIFACT_SNAPSHOT_MAX_CHARS = 800;
 
@@ -225,135 +334,6 @@ async function patchRunArtifactsMeta(
     const mergedMeta: Record<string, unknown> = {
       ...currentMeta,
       run_artifacts: artifacts,
-    };
-    await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meta: mergedMeta }),
-    });
-  } catch {
-    // Best-effort only.
-  }
-}
-
-function makeOperationalAccumulator(): OperationalStateAccumulator {
-  return {
-    todo_queue: new Map<string, OperationalTodoItem>(),
-    subagent_tasks: new Map<string, OperationalSubagentTask>(),
-    bridge_proxy: {
-      mode: "local",
-      status: "idle",
-      last_tool: null,
-      last_mcp_server: null,
-      last_mcp_tool: null,
-      last_error: null,
-      call_count: 0,
-      updated_at: new Date().toISOString(),
-    },
-  };
-}
-
-function captureOperationalStateFromRuntime(payload: Record<string, unknown>, acc: OperationalStateAccumulator) {
-  const eventType = typeof payload.event_type === "string" ? payload.event_type : "";
-  const toolNameRaw = typeof payload.tool_name === "string" ? payload.tool_name.trim() : "";
-  const toolName = toolNameRaw.toLowerCase();
-  const callId = typeof payload.call_id === "string" ? payload.call_id.trim() : "";
-  const input = asObject(payload.input);
-  const now = new Date().toISOString();
-
-  if (eventType === "tool_start") {
-    if (toolName === "todowrite") {
-      const todos = Array.isArray(input?.todos) ? input.todos : [];
-      for (const row of todos) {
-        const rec = asObject(row);
-        const id = typeof rec?.id === "string" ? rec.id.trim() : "";
-        const content = typeof rec?.content === "string" ? rec.content.trim() : "";
-        const status = typeof rec?.status === "string" ? rec.status : "pending";
-        if (!id || !content) continue;
-        if (status !== "pending" && status !== "in_progress" && status !== "completed" && status !== "cancelled") {
-          continue;
-        }
-        acc.todo_queue.set(id, { id, content, status, updated_at: now });
-      }
-    } else if (toolName === "subagent") {
-      const id = callId || `subagent-${acc.subagent_tasks.size + 1}`;
-      const description =
-        typeof input?.description === "string" && input.description.trim().length > 0
-          ? input.description.trim()
-          : "subagent task";
-      acc.subagent_tasks.set(id, {
-        id,
-        description,
-        subagent_type: typeof input?.subagent_type === "string" ? input.subagent_type : undefined,
-        model: typeof input?.model === "string" ? input.model : undefined,
-        status: "running",
-        updated_at: now,
-      });
-    }
-
-    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
-      acc.bridge_proxy.mode = "proxy";
-      acc.bridge_proxy.status = "active";
-      acc.bridge_proxy.last_tool = toolNameRaw || null;
-      acc.bridge_proxy.last_mcp_server = typeof input?.server === "string" ? input.server : null;
-      acc.bridge_proxy.last_mcp_tool = typeof input?.toolName === "string" ? input.toolName : null;
-      acc.bridge_proxy.call_count += 1;
-      acc.bridge_proxy.updated_at = now;
-    }
-  }
-
-  if (eventType === "tool_complete") {
-    if (toolName === "subagent" && callId && acc.subagent_tasks.has(callId)) {
-      const prev = acc.subagent_tasks.get(callId)!;
-      acc.subagent_tasks.set(callId, { ...prev, status: "completed", updated_at: now });
-    }
-    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
-      acc.bridge_proxy.status = "idle";
-      acc.bridge_proxy.updated_at = now;
-    }
-  }
-
-  if (eventType === "tool_error") {
-    if (toolName === "subagent" && callId && acc.subagent_tasks.has(callId)) {
-      const prev = acc.subagent_tasks.get(callId)!;
-      acc.subagent_tasks.set(callId, { ...prev, status: "failed", updated_at: now });
-    }
-    if (toolName === "callmcptool" || toolName === "fetchmcpresource" || toolName === "webfetch" || toolName === "websearch") {
-      acc.bridge_proxy.status = "error";
-      acc.bridge_proxy.last_error = typeof payload.message === "string" ? payload.message.slice(0, 280) : "proxy tool error";
-      acc.bridge_proxy.updated_at = now;
-    }
-  }
-}
-
-function serializeOperationalState(acc: OperationalStateAccumulator): {
-  todo_queue: OperationalTodoItem[];
-  subagent_tasks: OperationalSubagentTask[];
-  bridge_proxy: BridgeProxyState;
-} {
-  return {
-    todo_queue: [...acc.todo_queue.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    subagent_tasks: [...acc.subagent_tasks.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    bridge_proxy: { ...acc.bridge_proxy },
-  };
-}
-
-async function patchRunOperationalMeta(
-  companyId: string,
-  runId: string | null | undefined,
-  operational: ReturnType<typeof serializeOperationalState>,
-): Promise<void> {
-  if (!runId) return;
-  try {
-    const runRes = await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`);
-    if (!runRes.ok) return;
-    const runJson = (await runRes.json().catch(() => ({}))) as { run?: { meta?: Record<string, unknown> } };
-    const currentMeta = asObject(runJson.run?.meta) ?? {};
-    const mergedMeta: Record<string, unknown> = {
-      ...currentMeta,
-      todo_queue: operational.todo_queue,
-      subagent_tasks: operational.subagent_tasks,
-      bridge_proxy: operational.bridge_proxy,
     };
     await fetch(`${UPSTREAM}/api/company/companies/${companyId}/agent-runs/${runId}`, {
       method: "PATCH",
@@ -786,6 +766,37 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
   const { taskId, persona, companyId, notes } = body;
   const rawLastOperatorText = [...notes].reverse().find((n) => n.actor === "operator")?.text ?? "";
   let lastOperatorText = rawLastOperatorText;
+  const policyCheck = evaluateStrictActionPolicy(rawLastOperatorText);
+  if (policyCheck.blocked) {
+    await write({ type: "error", message: policyCheck.reason ?? "Blocked by strict security policy" });
+    return;
+  }
+
+  const sentinelCommand = parseSentinelReputationCommand(rawLastOperatorText);
+  if (sentinelCommand) {
+    await write({ type: "phase", phase: "sentinel_reputation", query: sentinelCommand.query });
+    const sentinel = await querySentinelReputation({ query: sentinelCommand.query });
+    if (!sentinel.ok) {
+      await write({
+        type: "error",
+        message: sentinel.error ?? "Sentinel reputation query failed",
+        sentinel,
+      });
+      return;
+    }
+    await write({
+      type: "done",
+      ok: true,
+      reply: `Sentinel reputation for "${sentinelCommand.query}" retrieved.`,
+      at: new Date().toISOString(),
+      sentinel,
+      execution_mode: "worker",
+      worker_evidence: true,
+      execution_verified: true,
+      finalized: true,
+    });
+    return;
+  }
 
   let agentRegistryId: string | undefined;
   let agentAdapterConfig: Record<string, unknown> | null = null;
@@ -890,7 +901,6 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     );
     const artifacts = serializeRunArtifacts(runArtifacts);
     await patchRunArtifactsMeta(companyId, result?.runId, artifacts);
-    await patchRunOperationalMeta(companyId, result?.runId, serializeOperationalState(operationalState));
     if (!result || result.ok !== true) {
       const r = result;
       await write({
@@ -940,7 +950,7 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     return;
   }
 
-  if (!detectedSkill && companyId && !slashCommand) {
+  if (!detectedSkill && companyId) {
     // ── Task Management Action Lane ──────────────────────────────────────────
     // Handles "create task", "assign to", "hand back", "mark done", "add note",
     // "requires human" deterministically without going through worker or LLM.
@@ -1102,16 +1112,8 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       looksLikeRepoInfoQuestion(lastOperatorText) ||
       looksLikeImplicitWorkspacePointer(lastOperatorText) ||
       looksLikeQuickToolIntent(lastOperatorText);
-    const routeDecision = slashCommand
-      ? {
-          ...baseRoute,
-          routeWorker: true,
-          executionIntent: true,
-          codingIntent: true,
-          quickToolIntent: false,
-          reason: `slash_command_${slashCommand.kind}`,
-        }
-      : semanticRoute && baseRoute.reason === "worker_first_claude_code_mode"
+    const routeDecision =
+      semanticRoute && baseRoute.reason === "worker_first_claude_code_mode"
         ? {
             ...baseRoute,
             // Semantic router is authoritative for its domain:
@@ -1191,7 +1193,10 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
           skillSlug: "operator-chat",
           externalSystem: "worker-dispatch-chat",
           persistAgentNote: true,
-          waitForTelemetryMs: 120_000,
+          waitForTelemetryMs:
+            executionIntent || codingIntent || quickToolIntent
+              ? OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS
+              : OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS,
           requireWorkerEvidence: true,
           runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
           extraMeta: {
@@ -1236,7 +1241,6 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       );
       const artifacts = serializeRunArtifacts(runArtifacts);
       await patchRunArtifactsMeta(companyId, result?.runId, artifacts);
-      await patchRunOperationalMeta(companyId, result?.runId, serializeOperationalState(operationalState));
       if (!result || result.ok !== true) {
         const r = result;
         await write({
@@ -1319,6 +1323,30 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
     ),
   ]);
   let enrichedSystem = system;
+  if (companyId) {
+    const [taskCtxData, threadData] = await Promise.all([
+      fetch(`${UPSTREAM}/api/company/tasks/${taskId}/llm-context`).then((r) => r.json()).catch(() => null),
+      agentRegistryId
+        ? fetch(`${UPSTREAM}/api/company/companies/${companyId}/agents/${agentRegistryId}/operator-thread`)
+            .then((r) => r.json())
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    const addon = (taskCtxData as { combined_system_addon?: string } | null)?.combined_system_addon ?? "";
+    const compactDigest = (threadData as { compact_digest?: string } | null)?.compact_digest ?? "";
+    // Thin mode: dramatically tighten enrichment caps so the model has headroom
+    const addonCap   = thin ? 600  : 2800;
+    const digestCap  = thin ? 400  : 1800;
+    const compact = [
+      compactDigest ? `## Operator Thread Digest\n${compactDigest.slice(0, digestCap)}` : "",
+      addon ? `## Task LLM Context (Compacted)\n${addon.slice(0, addonCap)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (compact) {
+      enrichedSystem = `${system}\n\n${compact}`;
+    }
+  }
 
   // Compact the note history if it has grown large — keeps LLM cost/latency
   // bounded and avoids context-window overflows on long operator threads.

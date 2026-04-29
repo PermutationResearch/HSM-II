@@ -4,8 +4,7 @@
 
 /* Nothing dark tokens (instrument panel / OLED) */
 :root {
-  --font-space-grotesk: "Space Grotesk", "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
-  --font-space-mono: "Space Mono", "JetBrains Mono", "SFMono-Regular", "SF Mono", "Menlo", monospace;
+  /* --font-space-grotesk / --font-space-mono: set on <html> via `next/font` in app/layout.tsx */
   --nd-black: #000000;
   --nd-surface: #111111;
   --nd-surface-raised: #1a1a1a;

@@ -7,38 +7,72 @@
 <meta http-equiv="Pragma" content="no-cache"/>
 <meta http-equiv="Expires" content="0"/>
 <title>Hyper-Stigmergic Morphogenesis II — Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Doto:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script>
+  (function() {
+    const saved = localStorage.getItem('hsm_theme');
+    const systemPrefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+    const theme = saved || (systemPrefersLight ? 'light' : 'dark');
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
 <script defer src="https://unpkg.com/graphology@0.25.4/dist/graphology.umd.min.js"></script>
 <script defer src="https://unpkg.com/graphology-layout-forceatlas2@0.10.1/build/graphology-layout-forceatlas2.min.js"></script>
 <script defer src="https://unpkg.com/sigma@2.4.0/build/sigma.min.js"></script>
 <script defer src="https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js"></script>
 <style>
 :root {
-  --bg: #0d0d0f;
-  --panel: #111215;
-  --border: #1e2028;
-  --accent: #7c6af7;
-  --accent2: #3ecfb0;
-  --accent3: #f7a26a;
-  --text: #c8ccd4;
-  --text-dim: #555a6a;
-  --text-bright: #eef0f5;
+  --bg: #0f141a;
+  --panel: #141d27;
+  --border: rgba(161, 182, 205, 0.22);
+  --accent: #1f9a76;
+  --accent2: #39b08f;
+  --accent3: #b48a53;
+  --text: #d7e1ec;
+  --text-dim: #7f95ad;
+  --text-bright: #edf3fa;
   --red: #e05a5a;
   --green: #4ecf7e;
-  --tab-active: #1a1c23;
-  --input-bg: #16181f;
-  --scrollbar: #2a2d38;
+  --tab-active: #1a2531;
+  --input-bg: #111923;
+  --scrollbar: #2a3543;
 }
+html[data-theme='light'] {
+  --bg: #f5f3ee;
+  --panel: #fffdf8;
+  --border: rgba(17, 20, 24, 0.16);
+  --accent: #1f9a76;
+  --accent2: #2f8f74;
+  --accent3: #9a7648;
+  --text: #1a222b;
+  --text-dim: #6b7a89;
+  --text-bright: #0f141a;
+  --tab-active: #f0ece4;
+  --input-bg: #f0ece4;
+  --scrollbar: #c9c0b5;
+}
+html { color-scheme: dark; }
+html[data-theme='light'] { color-scheme: light; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
   font-size: 13px;
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
+}
+input, textarea, select, code, pre, #log-content, #world-content {
+  font-family: 'Space Mono', ui-monospace, 'SF Mono', monospace;
+}
+.theme-toggle {
+  min-width: 108px;
+  text-align: center;
 }
 
 /* ── Top bar ── */
@@ -905,6 +939,7 @@ body {
     <button class="btn" onclick="sendCmd('/reflect')">reflect</button>
     <button class="btn primary" onclick="sendCmd('/auto')">auto</button>
     <button class="btn green" onclick="sendCmd('/save')">save</button>
+    <button class="btn theme-toggle" id="theme-toggle" type="button">[ MODE: DARK ]</button>
   </div>
 </div>
 
@@ -1335,6 +1370,28 @@ const WS_GRAPH_ACTIVITY = 'ws://' + location.host + '/api/graph-activity';
 const WS_CODE     = 'ws://' + location.host + '/api/code';
 const WS_OPTIMIZE = 'ws://' + location.host + '/api/optimize';
 const WS_VISUAL   = 'ws://' + location.host + '/api/visual/ws';
+const THEME_KEY = 'hsm_theme';
+
+function resolveTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === 'dark' || saved === 'light') return saved;
+  const systemPrefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+  return systemPrefersLight ? 'light' : 'dark';
+}
+
+function getMermaidTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'neutral' : 'dark';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'light' ? '[ MODE: LIGHT ]' : '[ MODE: DARK ]';
+  if (typeof mermaid !== 'undefined') {
+    mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+  }
+}
 
 console.log('[WebSocket URLs] Chat:', WS_CHAT, 'Viz:', WS_VIZ);
 
@@ -2267,10 +2324,18 @@ var _currentVisualData = null;
 
 // Initialize mermaid when page loads
 document.addEventListener('DOMContentLoaded', function() {
+  applyTheme(resolveTheme());
+  var themeBtn = document.getElementById('theme-toggle');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function() {
+      var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      applyTheme(next);
+    });
+  }
   if (typeof mermaid !== 'undefined') {
     mermaid.initialize({ 
       startOnLoad: false,
-      theme: 'dark',
+      theme: getMermaidTheme(),
       themeVariables: {
         primaryColor: '#2d2d3a',
         primaryTextColor: '#c8ccd4',
