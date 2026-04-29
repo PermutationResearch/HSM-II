@@ -22,7 +22,9 @@ import {
   createAgentRun,
   operatorChatQuickToolPromptMode,
   operatorChatShouldRouteWorker,
+  parseSentinelReputationCommand,
   parseTaskManagementAction,
+  querySentinelReputation,
   OR_BASE,
   parseOptimizeCommand,
   readAgentChatBackend,
@@ -31,6 +33,7 @@ import {
   UPSTREAM,
   upsertThreadSessionState,
 } from "@/app/lib/agent-chat-server";
+import { evaluateStrictActionPolicy, rateLimitFromRequest, strictSecurityEnabled } from "@/app/lib/strict-security";
 import { asObject } from "@/app/lib/runtime-contract";
 import { extractReplyFromChatCompletionPayload } from "@/app/lib/llm-text-content";
 
@@ -45,7 +48,25 @@ interface RequestBody {
   notes: StigNote[];
 }
 
+const OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS = Math.min(
+  Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS ?? "120000", 10) || 120000, 5000),
+  300_000,
+);
+const OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS = Math.min(
+  Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS ?? "30000", 10) || 30000, 5000),
+  300_000,
+);
+
 export async function POST(req: NextRequest) {
+  if (strictSecurityEnabled()) {
+    const rl = rateLimitFromRequest(req, "agent-chat-reply");
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded in strict security mode", retry_after_ms: rl.retryAfterMs ?? 0 },
+        { status: 429 },
+      );
+    }
+  }
   const bodyRaw = await req.json().catch(() => null);
   const bodyObj = asObject(bodyRaw);
   const body: RequestBody | null = bodyObj
@@ -64,6 +85,34 @@ export async function POST(req: NextRequest) {
 
   const { taskId, persona, companyId, notes } = body;
   const lastOperatorText = [...notes].reverse().find((n) => n.actor === "operator")?.text ?? "";
+  const policyCheck = evaluateStrictActionPolicy(lastOperatorText);
+  if (policyCheck.blocked) {
+    return NextResponse.json({ ok: false, error: policyCheck.reason ?? "Blocked by strict security policy" }, { status: 403 });
+  }
+
+  const sentinelCommand = parseSentinelReputationCommand(lastOperatorText);
+  if (sentinelCommand) {
+    const sentinel = await querySentinelReputation({ query: sentinelCommand.query });
+    if (!sentinel.ok) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: sentinel.error ?? "Sentinel reputation query failed",
+          sentinel,
+        },
+        { status: sentinel.status >= 400 ? sentinel.status : 502 },
+      );
+    }
+    return NextResponse.json({
+      ok: true,
+      reply: `Sentinel reputation for "${sentinelCommand.query}" retrieved.`,
+      at: new Date().toISOString(),
+      sentinel,
+      execution_mode: "worker",
+      worker_evidence: true,
+      execution_verified: true,
+    });
+  }
 
   let agentRegistryId: string | undefined;
   let agentAdapterConfig: Record<string, unknown> | null = null;
@@ -95,7 +144,10 @@ export async function POST(req: NextRequest) {
       skillSlug: detectedSkill,
       externalSystem: "worker-dispatch",
       persistAgentNote: true,
-      waitForTelemetryMs: 120_000,
+      // Validation/build skills may run cargo check or npm build — at least 4 min; env can raise further (capped above).
+      waitForTelemetryMs: ["validate-delivery", "perf-analyzer", "orchestrate-review"].includes(detectedSkill)
+        ? Math.max(240_000, OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS)
+        : OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS,
       requireWorkerEvidence: true,
       runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
       extraMeta: {
@@ -304,7 +356,10 @@ export async function POST(req: NextRequest) {
         skillSlug: "operator-chat",
         externalSystem: "worker-dispatch-chat",
         persistAgentNote: true,
-        waitForTelemetryMs: 120_000,
+        waitForTelemetryMs:
+          executionIntent || codingIntent || quickToolIntent
+            ? OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS
+            : OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS,
         requireWorkerEvidence: true,
         runSummary: `Operator turn via agent loop runtime: ${lastOperatorText.slice(0, 120)}`,
         extraMeta: {

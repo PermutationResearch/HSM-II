@@ -135,12 +135,14 @@ type OperationalStateAccumulator = {
 
 const OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS = Math.min(
   Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS ?? "120000", 10) || 120000, 5000),
-  120000,
+  300_000,
 );
 const OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS = Math.min(
   Math.max(Number.parseInt(process.env.HSM_OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS ?? "30000", 10) || 30000, 5000),
-  120000,
+  300_000,
 );
+// Build-heavy skills (cargo check, npm build) can take 2-3 min.
+const BUILD_HEAVY_SKILLS = new Set(["validate-delivery", "perf-analyzer", "orchestrate-review"]);
 
 type AgentChatSlashCommand =
   | { kind: "skill"; skillSlug: string }
@@ -861,7 +863,9 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         skillSlug: detectedSkill,
         externalSystem: "worker-dispatch",
         persistAgentNote: true,
-        waitForTelemetryMs: 120_000,
+        waitForTelemetryMs: BUILD_HEAVY_SKILLS.has(detectedSkill)
+          ? Math.max(240_000, OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS)
+          : OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS,
         requireWorkerEvidence: true,
         runSummary: `Skill turn via agent loop runtime: ${detectedSkill}`,
         extraMeta: {
@@ -923,8 +927,10 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
         compact_bytes: compact.bytes,
       },
     });
+    const finalizedSummary =
+      typeof result.summary === "string" && result.summary.trim().length > 0 ? result.summary.trim() : "";
     const skillReply = result.finalized
-      ? `Completed \`${detectedSkill}\` in worker agent runtime.`
+      ? finalizedSummary || `Completed \`${detectedSkill}\` in worker agent runtime.`
       : `Dispatched \`${detectedSkill}\` to worker runtime. Waiting for completion evidence.`;
     await write({
       type: "done",
@@ -943,7 +949,7 @@ export async function runAgentChatNdjsonStream(body: AgentChatRequestBody, write
       await write({
         type: "final_answer",
         payload: {
-          message: result.workerEvidence || skillReply,
+          message: skillReply,
         },
       });
     }
