@@ -25,6 +25,9 @@ secrets/
 # =============================================================================
 # Data & Artifacts
 # =============================================================================
+# Company OS Python meta-harness (fallback when ~/.hsm/meta-harness is not writable)
+.meta-harness/
+
 *.bincode
 *.db
 *.db-journal
@@ -168,3 +171,35 @@ web/**/.next/
 # IDE / local tooling
 .cursor/
 .claude/worktrees/
+
+# =============================================================================
+# Local tooling caches & mirrors (keep repo status clean)
+# =============================================================================
+# Entire .cargo/ under repo root (registry mirror, etc.) — use global ~/.cargo for real config
+/.cargo/
+# Toolchain / Playwright MCP scrap under workspace
+.rustup/
+.playwright-mcp/
+# rust-doctor CLI output
+.rust-doctor-cache.json
+rust-doctor-report.json
+**/.rust-doctor-cache.json
+# Cursor/IDE skill tree mirrors (canonical skills live under .claude/skills or ./skills)
+.agents/
+# Local experiment / metrics trees
+/autocontext/
+/metrics/
+# E2E snapshot dumps
+docs/e2e-snapshots/
+# Editor backup files
+*.backup
+# Root-level UI capture noise
+/agent-instructions.png
+/agent-memory.png
+/agent-workspace.png
+/right-rail-chat.png
+/roster-view.png
+# Large scratch media next to tracked web_interface HTML
+/web_interface/*.mov
+/web_interface/*.mp4
+/web_interface/*.png
