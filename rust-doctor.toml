@@ -1,0 +1,23 @@
+# rust-doctor — https://github.com/ArthurDEV44/rust-doctor
+#
+# Default: **lint off** + **dependencies off** so `rust-doctor --offline --plan` finishes in
+# seconds (clippy pedantic on this workspace can take 10+ minutes).
+#
+# Full clippy + dependency tools (needs Cargo.lock / installs): ignore this file for one run:
+#   rust-doctor --no-project-config --offline --plan
+#
+# Piping: stdout is block-buffered when not a TTY, so `rust-doctor … | head` can show nothing
+# for a long time during a full scan. Use:
+#   bash scripts/rust-doctor-plan.sh
+# or `script -q /dev/null rust-doctor …` on macOS.
+
+verbose = false
+fail_on = "none"
+dependencies = false
+lint = false
+
+[ignore]
+# Unpublished workspace crates — metadata lints are noise here.
+rules = ["cargo_common_metadata"]
+# Toolchain sources sometimes appear in reports; never actionable for this repo.
+files = ["**/rustlib/**", "**/.rustup/**"]
