@@ -765,30 +765,12 @@ async fn auto_dispatch_eligible_tasks(pool: &PgPool, home: &std::path::Path) {
             task_row.title,
             task_row.specification.as_deref().unwrap_or("(no specification)")
         );
-        let exec_identity = format!(
-            "## Your execution identity\n\n\
-             - **Actor (you)**: {actor}\n\
-             - **company_id**: {company_id}\n\
-             - **task_id**: {task_id}\n\
-             - **run_id**: {run_id}\n\n\
-             When calling company OS tools always pass `company_id`, `task_id`, and `run_id` \
-             explicitly using the values above.\n\n\
-             ## Available company OS tools\n\
-             - `company_list_tasks` — see open/in-progress work across the company\n\
-             - `company_create_task` — spawn a subtask and optionally assign it to another agent via `checked_out_by`\n\
-             - `company_update_task` — change task state (done/blocked/open) or append a stigmergic note\n\
-             - `company_memory_search` / `company_memory_append` — shared + private memory pool\n\
-             - `company_task_requires_human` — escalate to human inbox when blocked\n\
-             - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\n",
-            actor = actor,
-            company_id = task_meta.company_id,
-            task_id = task_id,
-            run_id = run_id,
-        );
+        let exec_identity =
+            company_worker_exec_identity_markdown(&actor, task_meta.company_id, task_id, run_id);
         let prompt = if context_prefix.is_empty() {
-            format!("/hermes {exec_identity}\n---\n\n## Your task\n\n{base_task}")
+            format!("/agent {exec_identity}\n---\n\n## Your task\n\n{base_task}")
         } else {
-            format!("/hermes {context_prefix}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
+            format!("/agent {context_prefix}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
         };
 
         let pool_bg = pool.clone();
@@ -825,7 +807,9 @@ async fn auto_dispatch_eligible_tasks(pool: &PgPool, home: &std::path::Path) {
                             timestamp: Utc::now(),
                             attachments: Vec::new(),
                             reply_to: None,
-                            thread_workspace_root: None,
+                            thread_workspace_root: std::env::current_dir()
+                                .ok()
+                                .map(|p| p.to_string_lossy().to_string()),
                         };
                         match agent.handle_message(msg).await {
                             Ok(reply) => ("success".to_string(), Some(reply)),
@@ -3227,6 +3211,52 @@ struct WorkerSkillPromptRow {
     body: Option<String>,
 }
 
+/// Markdown injected into every Company OS worker prompt (auto-dispatch and
+/// `POST …/execute-worker`). Keeps runtime behavior aligned with the product
+/// story: agents can introspect repo/skills/state, prefer propose→human→mutate,
+/// and rely on `agent_runs` + telemetry for audit — without implying hidden
+/// autopilot for outbound growth.
+fn company_worker_exec_identity_markdown(
+    actor: &str,
+    company_id: Uuid,
+    task_id: Uuid,
+    run_id: Uuid,
+) -> String {
+    format!(
+        "## Your execution identity\n\n\
+         - **Actor (you)**: {actor}\n\
+         - **company_id**: {company_id}\n\
+         - **task_id**: {task_id}\n\
+         - **run_id**: {run_id}\n\n\
+         When calling company OS tools always pass `company_id`, `task_id`, and `run_id` \
+         explicitly using the values above.\n\n\
+         ## Available company OS tools\n\
+         - `company_list_tasks` — see open/in-progress work across the company\n\
+         - `company_create_task` — spawn a subtask and optionally assign it to another agent via `checked_out_by`\n\
+         - `company_update_task` — change task state (done/blocked/open) or append a stigmergic note\n\
+         - `company_memory_search` / `company_memory_append` — shared + private memory pool\n\
+         - `company_task_requires_human` — escalate to human inbox when blocked\n\
+         - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\n\
+         ## Introspection, self-change, and audit\n\n\
+         **Inspect this stack (native tools you already have)**\n\
+         - **Repository / source:** `read` / `read_file`, `write`, `edit`, `list_directory`, `grep`, `find`, `bash`, and the **git** tools. \
+         When the message sets **`thread_workspace_root`**, use it as the root for relative paths (normally the checked-out repo).\n\
+         - **Skills & instructions:** `skills_list`, `skill_md_read`, `skill_resource_read` for on-disk Agent Skills; the sections above carry company + task instructions.\n\
+         - **Machine / process state (where policy allows):** `environment`, `system_info`, `process_list`, `disk_usage`, …\n\
+         - **Company ledger:** use the IDs in **Your execution identity** with the `company_*` tools. This dispatch is tied to **`agent_runs`** (`run_id`); telemetry and tool traces are the **audit trail** operators see.\n\n\
+         **Changing behavior or code (recommended → stronger)**\n\
+         1. **Propose** — write the plan in your answer; record it with **`company_update_task`** notes or **`company_memory_append`** so another human can review the diff in intent, not only in chat.\n\
+         2. **Human gate** — call **`company_task_requires_human`** when approval is needed before risky edits, spend, or customer-visible side effects.\n\
+         3. **Mutate directly** — `write` / `edit` / `bash` apply immediately; use when this workspace is *meant* for autonomous coding (sandbox company, CI, etc.). You still leave tool traces — that is **not** a substitute for human judgment when stakes are high.\n\n\
+         **Outbound “grow the business” work** (HTTP, webhooks, email, campaigns, ads) only happens when operators wire **explicit tools** \
+         (`http_request`, `webhook_send`, browser tools, catalog tools, …) and governance. Core Company OS does **not** ship a secret auto-advertiser; you build that loop deliberately on top.\n\n",
+        actor = actor,
+        company_id = company_id,
+        task_id = task_id,
+        run_id = run_id,
+    )
+}
+
 async fn build_worker_skill_instruction_block(
     pool: &PgPool,
     company_id: Uuid,
@@ -3742,34 +3772,15 @@ async fn post_execute_task_worker(
 
     // Build the execution identity block so tools can reference company_id / task_id / run_id
     // without relying on environment variables (which are not available inside tokio tasks).
-    let exec_identity = format!(
-        "## Your execution identity\n\n\
-         - **Actor (you)**: {actor}\n\
-         - **company_id**: {company_id}\n\
-         - **task_id**: {task_id}\n\
-         - **run_id**: {run_id}\n\n\
-         When calling company OS tools always pass `company_id`, `task_id`, and `run_id` \
-         explicitly using the values above.\n\n\
-         ## Available company OS tools\n\
-         - `company_list_tasks` — see open/in-progress work across the company\n\
-         - `company_create_task` — spawn a subtask and optionally assign it to another agent via `checked_out_by`\n\
-         - `company_update_task` — change task state (done/blocked/open) or append a stigmergic note\n\
-         - `company_memory_search` / `company_memory_append` — shared + private memory pool\n\
-         - `company_task_requires_human` — escalate to human inbox when blocked\n\
-         - `company_tool_discover` / `company_tool_describe` / `company_tool_call` — tool catalog\n\n",
-        actor = actor,
-        company_id = task.company_id,
-        task_id = task_id,
-        run_id = run_id,
-    );
+    let exec_identity = company_worker_exec_identity_markdown(&actor, task.company_id, task_id, run_id);
 
-    // Prefix with /hermes to always route through the agentic tool loop,
+    // Prefix with /agent to always route through the Agent Loop,
     // then inject company context so the agent has full situational awareness.
     let prompt = if context_prefix.is_empty() {
-        format!("/hermes {skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
+        format!("/agent {skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}")
     } else {
         format!(
-            "/hermes {context_prefix}{skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}"
+            "/agent {context_prefix}{skill_instruction_block}{exec_identity}\n---\n\n## Your task\n\n{base_task}"
         )
     };
 
@@ -3834,7 +3845,11 @@ async fn post_execute_task_worker(
                         timestamp: Utc::now(),
                         attachments: Vec::new(),
                         reply_to: None,
-                        thread_workspace_root: None,
+                        // Give the worker a real workspace root so bash and file tools
+                        // resolve against the actual repo instead of an empty temp dir.
+                        thread_workspace_root: std::env::current_dir()
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string()),
                     };
                     match agent.handle_message(msg).await {
                         Ok(reply) => {
@@ -9729,9 +9744,9 @@ async fn post_agent_chat(
     // Build rich company context prefix
     let context = build_company_chat_context(pool, company_id, &actor).await;
 
-    // Prefix with /hermes so handle_message always fires the agentic tool loop.
+    // Prefix with /agent so handle_message always fires the Agent Loop.
     let prompt = format!(
-        "/hermes {context}{thread_history}\n---\n\n## Message from {actor}\n\n{message}"
+        "/agent {context}{thread_history}\n---\n\n## Message from {actor}\n\n{message}"
     );
 
     let home = st.home.clone();

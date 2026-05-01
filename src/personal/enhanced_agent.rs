@@ -455,7 +455,7 @@ pub struct EnhancedPersonalAgent {
     /// Optional Hermes extension server client (for when the Hermes Agent daemon is running).
     pub hermes_client: Option<HermesClient>,
     /// SFT capture handle — set by Company OS dispatch before `handle_message`; `None` in
-    /// interactive sessions. When set, every Hermes turn is recorded to `sft_traces.jsonl`.
+    /// interactive sessions. When set, every Agent Loop turn is recorded to `sft_traces.jsonl`.
     pub sft_capture: Option<crate::sft::SftCapture>,
 
     // ── Honcho cross-session user inference ───────────────────────────────────
@@ -1523,7 +1523,13 @@ impl EnhancedPersonalAgent {
         }
         self.tool_registry.set_harness_context(Some(harness_env));
         let _harness_turn = crate::harness::HarnessTurnCleanup::new(&mut self.tool_registry);
-        if let Err(e) = crate::harness::activate_thread_workspace(&message_id) {
+        // If the caller supplied an explicit workspace root (e.g. execute-worker sets
+        // it to the repo root), use that; otherwise create a per-message temp workspace.
+        if let Some(ref root) = msg.thread_workspace_root {
+            if let Err(e) = crate::harness::activate_thread_workspace_at(root) {
+                tracing::warn!(target: "hsm.harness.workspace", "workspace at {root} failed: {e}");
+            }
+        } else if let Err(e) = crate::harness::activate_thread_workspace(&message_id) {
             tracing::warn!(target: "hsm.harness.workspace", "{}", e);
         }
 
@@ -1615,13 +1621,17 @@ impl EnhancedPersonalAgent {
         } else if msg.content.starts_with("/tool") {
             // Tool execution command
             self.process_tool_command(&msg, &mut context).await?
-        } else if msg.content.starts_with("/hermes ") || msg.content.trim() == "/hermes" {
-            // Explicit Hermes execution command — must be checked BEFORE auto-detect blocks
-            // so that execute-worker prompts prefixed with /hermes always reach the agentic loop.
-            let task = msg.content.trim_start_matches("/hermes").trim().to_string();
+        } else if msg.content.starts_with("/agent ") || msg.content.trim() == "/agent" || msg.content.starts_with("/hermes ") || msg.content.trim() == "/hermes" {
+            // Explicit Agent Loop command ("/hermes" kept as compatibility alias).
+            // Checked before auto-detect so worker prompts with /agent or /hermes always route here.
+            let task = if msg.content.trim_start().starts_with("/agent") {
+                msg.content.trim_start_matches("/agent").trim().to_string()
+            } else {
+                msg.content.trim_start_matches("/hermes").trim().to_string()
+            };
             if task.is_empty() {
                 AgentResponse {
-                    content: "Usage: /hermes <task>\n\nRuns the task through the Hermes Agent with real tools (web search, terminal, browser).\nRequires Hermes Agent running at HSM_HERMES_ENDPOINT (default: http://localhost:8000).".to_string(),
+                    content: "Usage: /agent <task>\n\nRuns the task through the Agent Loop with real tools (web search, terminal, browser).\n(/hermes is still accepted as a legacy alias.)\nRequires HSM_HERMES_ENDPOINT when using the external Hermes daemon path.".to_string(),
                     primary_agent: 0,
                     council_used: false,
                     confidence: 1.0,
@@ -1645,12 +1655,16 @@ impl EnhancedPersonalAgent {
             // Complex decision - use council
             self.process_with_council(&msg, &mut context).await?
         } else if self.should_use_hermes(&msg.content) && self.hermes_enabled {
-            // Auto-detected real-world task (web, terminal, files) — route to Hermes
+            // Auto-detected real-world task (web, terminal, files) — route to Agent Loop
             let content = msg.content.clone();
             self.process_with_hermes(&msg, &mut context, &content)
                 .await?
+        } else if self.hermes_enabled {
+            // Default chat policy: always route through Agent Loop when available.
+            let content = msg.content.clone();
+            self.process_with_hermes(&msg, &mut context, &content).await?
         } else {
-            // Simple query - use single agent with CASS skills
+            // Fallback only when Agent Loop is unavailable.
             self.process_with_skills(&msg, &mut context).await?
         };
 
@@ -2186,7 +2200,7 @@ impl EnhancedPersonalAgent {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
 
-        info!("Hermes native loop: {}", &task[..task.len().min(80)]);
+        info!("Agent Loop: {}", &task[..task.len().min(80)]);
         context.skills_accessed.push("hermes_agentic".to_string());
 
         // Build tool schema list for the system prompt
@@ -2216,11 +2230,23 @@ impl EnhancedPersonalAgent {
             context.skill_prompt_tokens
         );
 
-        let workspace_tool_rule = if prompt_requires_workspace_tooling(task) {
-            "\n             - For repository/workspace/code-review tasks, you MUST call at least one repo-aware tool before any final answer.\n\
-             - Prefer starting with `list_directory`, `search_files`, `read`, `grep`, or `bash`.\n"
+        // Company OS execute-worker tasks always embed "## Your execution identity" in the
+        // prompt; use that as a reliable signal to apply stronger tool-loop rules.
+        let is_company_os_worker = task.contains("## Your execution identity");
+
+        let workspace_tool_rule = if is_company_os_worker || prompt_requires_workspace_tooling(task) {
+            "\n             - Always call tools to gather concrete evidence before writing any final answer.\n\
+             - Use `bash` for shell commands (git, cargo, npm, test runners).\n\
+             - Use `read`, `grep`, `list_directory`, `search_files` for file inspection.\n\
+             - Do NOT stop after one tool call — keep calling tools until you have enough evidence.\n"
         } else {
             ""
+        };
+
+        let completion_rule = if is_company_os_worker {
+            "- When you have enough evidence, write a final plain-text summary. For validation tasks end with PASS, FAIL, or BLOCKED."
+        } else {
+            "- When the task is COMPLETE, respond with a normal text summary (no JSON)."
         };
 
         let system_prompt = format!(
@@ -2231,7 +2257,7 @@ impl EnhancedPersonalAgent {
              {{\"tool\": \"tool_name\", \"parameters\": {{\"param\": \"value\"}}}}\n\n\
              ## Rules\n\
              - Call ONE tool at a time, wait for the result, then decide next step.\n\
-             - When the task is COMPLETE, respond with a normal text summary (no JSON).\n\
+             {completion_rule}\n\
              {workspace_tool_rule}\
              - If a tool fails, try an alternative approach.\n\
              - Be concise. Do not explain what you will do — just do it."
@@ -2276,7 +2302,7 @@ impl EnhancedPersonalAgent {
                     json.get("parameters"),
                 ) {
                     if self.tool_registry.has(tool_name) {
-                        info!("Hermes turn {}: calling tool {}", turn + 1, tool_name);
+                        info!("Agent Loop turn {}: calling tool {}", turn + 1, tool_name);
                         let call_id = uuid::Uuid::new_v4().to_string();
                         Self::publish_tool_input_deltas(tool_name, &call_id, params);
                         let call = ToolCallEntry {
@@ -2357,7 +2383,7 @@ impl EnhancedPersonalAgent {
                         );
                         continue;
                     } else {
-                        warn!("Hermes turn {}: unknown tool '{}'", turn + 1, tool_name);
+                        warn!("Agent Loop turn {}: unknown tool '{}'", turn + 1, tool_name);
                         conversation.push(("user".to_string(), current_query.clone()));
                         conversation.push(("assistant".to_string(), response_text.clone()));
                         current_query = format!(

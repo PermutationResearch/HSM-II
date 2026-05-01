@@ -1,0 +1,369 @@
+/**
+ * Paperclip-adjacent doc chrome (tokens from paperclip.ing via FontOfWeb):
+ * Inter body, Instrument Serif headlines, Cod Gray / Dorado / Westar neutrals,
+ * soft card shadow, rounded controls.
+ */
+
+:root {
+  --pc-cod: #1a1a1a;
+  --pc-dorado: #4a4a4a;
+  --pc-bitter: #888880;
+  --pc-westar: #e0dcd6;
+  --pc-stone-50: #efefee;
+  --pc-white: #ffffff;
+  --pc-shadow-sm: rgba(0, 0, 0, 0.08) 0px 2px 16px 0px,
+    rgba(255, 255, 255, 0.25) 0px 1px 0px 0px inset;
+  --pc-radius: 10px;
+  --pc-radius-sm: 6px;
+
+  --vp-c-bg: var(--pc-stone-50);
+  --vp-c-bg-alt: var(--pc-white);
+  --vp-c-bg-elv: var(--pc-white);
+  --vp-c-text-1: var(--pc-cod);
+  --vp-c-text-2: var(--pc-dorado);
+  --vp-c-text-3: var(--pc-bitter);
+  --vp-c-divider: var(--pc-westar);
+  --vp-c-gutter: var(--pc-westar);
+
+  --vp-c-brand-1: var(--pc-cod);
+  --vp-c-brand-2: var(--pc-dorado);
+  --vp-c-brand-3: var(--pc-bitter);
+
+  --vp-button-brand-bg: var(--pc-cod);
+  --vp-button-brand-text: var(--pc-white);
+  --vp-button-brand-hover-bg: #313131;
+  --vp-button-alt-bg: var(--pc-white);
+  --vp-button-alt-text: var(--pc-cod);
+  --vp-button-alt-hover-bg: var(--pc-stone-50);
+
+  --vp-font-family-base: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --vp-sidebar-bg-color: var(--pc-white);
+  --vp-nav-bg-color: rgba(255, 255, 255, 0.92);
+  --vp-code-block-bg: #f6f5f3;
+  --vp-code-copy-code-bg: #ebe8e4;
+  --vp-code-copy-code-hover-bg: #e0dcd6;
+  --vp-c-bg-soft: #f3f2f0;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Copy-for-LLM — top of page content (not nav) */
+.copy-for-llm-wrap {
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 0 1rem;
+  padding: 0;
+  pointer-events: auto;
+}
+
+.copy-for-llm-wrap--home {
+  max-width: 1152px;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 24px;
+}
+
+@media (min-width: 640px) {
+  .copy-for-llm-wrap--home {
+    padding: 0 48px;
+  }
+}
+
+@media (min-width: 960px) {
+  .copy-for-llm-wrap--home {
+    padding: 0 64px;
+  }
+}
+
+.copy-for-llm-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.copy-for-llm-btn {
+  font-family: var(--vp-font-family-base);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--pc-radius);
+  border: 1px solid var(--pc-westar);
+  background: var(--pc-cod);
+  color: var(--pc-white);
+  cursor: pointer;
+  box-shadow: var(--pc-shadow-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.copy-for-llm-btn:hover:not(:disabled) {
+  background: #313131;
+  border-color: var(--pc-bitter);
+}
+
+.copy-for-llm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.copy-for-llm-link {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--vp-font-family-base);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--pc-radius);
+  border: 1px solid var(--pc-westar);
+  background: var(--pc-white);
+  color: var(--pc-cod);
+  text-decoration: none;
+  box-shadow: var(--pc-shadow-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.copy-for-llm-link:hover {
+  background: var(--pc-stone-50);
+  border-color: var(--pc-bitter);
+  color: var(--pc-cod);
+}
+
+.copy-for-llm-status {
+  font-size: 12px;
+  color: var(--pc-bitter);
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body {
+  color: var(--pc-cod);
+}
+
+/* Nav — airy, paper-like bar */
+.VPNav {
+  border-bottom: 1px solid var(--pc-westar) !important;
+  backdrop-filter: blur(10px);
+}
+
+.VPNavBar .title {
+  font-family: var(--vp-font-family-base);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--pc-cod) !important;
+}
+
+.VPNavBarMenu .VPNavBarMenuLink {
+  font-weight: 500;
+  color: var(--pc-dorado) !important;
+}
+
+.VPNavBarMenu .VPNavBarMenuLink:hover {
+  color: var(--pc-cod) !important;
+}
+
+/* Search button — pill, soft shadow (DocSearch classes from VitePress) */
+.VPNavBar .DocSearch-Button {
+  border-radius: 999px !important;
+  border: 1px solid var(--pc-westar) !important;
+  background: var(--pc-white) !important;
+  box-shadow: var(--pc-shadow-sm) !important;
+}
+
+.VPNavBar .DocSearch-Button-Placeholder,
+.VPNavBar .DocSearch-Button-Keys {
+  color: var(--pc-bitter) !important;
+}
+
+/* Sidebar */
+.VPSidebar {
+  border-right: 1px solid var(--pc-westar) !important;
+  background: var(--pc-white) !important;
+}
+
+.VPSidebarItem .text {
+  font-weight: 500;
+  color: var(--pc-dorado);
+}
+
+.VPSidebarItem.is-active .link {
+  color: var(--pc-cod) !important;
+  font-weight: 600;
+}
+
+/* Main doc typography */
+.VPContent main .vp-doc {
+  font-family: var(--vp-font-family-base);
+  font-size: 16px;
+  line-height: 1.65;
+  letter-spacing: -0.01em;
+}
+
+.vp-doc h1 {
+  font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  color: var(--pc-cod);
+  border-bottom: 1px solid var(--pc-westar);
+  padding-bottom: 0.75rem;
+}
+
+.vp-doc h2,
+.vp-doc h3 {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  color: var(--pc-cod);
+}
+
+.vp-doc p,
+.vp-doc li {
+  color: var(--pc-dorado);
+}
+
+.vp-doc a {
+  color: var(--pc-cod);
+  text-decoration: underline;
+  text-decoration-color: var(--pc-westar);
+  text-underline-offset: 3px;
+}
+
+.vp-doc a:hover {
+  text-decoration-color: var(--pc-bitter);
+}
+
+.vp-doc :not(pre) > code {
+  background: #f0eeeb;
+  border: 1px solid var(--pc-westar);
+  border-radius: var(--pc-radius-sm);
+  padding: 0.12em 0.35em;
+  font-size: 0.9em;
+}
+
+/* Home hero — Instrument Serif headline, Inter body (Paperclip rhythm) */
+.VPHero {
+  padding: 48px 24px 56px;
+}
+
+.VPHero .heading .name {
+  font-family: "Inter", var(--vp-font-family-base) !important;
+  font-size: 0.8125rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  color: var(--pc-bitter) !important;
+  line-height: 1.5 !important;
+}
+
+.VPHero .heading .text {
+  font-family: "Instrument Serif", Georgia, serif !important;
+  font-size: clamp(2.5rem, 6vw, 4.25rem) !important;
+  font-weight: 400 !important;
+  line-height: 1.08 !important;
+  letter-spacing: -0.03em !important;
+  color: var(--pc-cod) !important;
+  max-width: 18ch;
+}
+
+.VPHero .heading .text em {
+  font-style: italic;
+  font-family: "Instrument Serif", Georgia, serif;
+}
+
+.VPHero .heading .tagline {
+  font-family: "Inter", var(--vp-font-family-base) !important;
+  font-size: 1.125rem !important;
+  line-height: 1.65 !important;
+  color: var(--pc-dorado) !important;
+  max-width: 38rem;
+  font-weight: 400 !important;
+}
+
+.VPHero .actions {
+  gap: 12px !important;
+  padding-top: 8px;
+}
+
+.VPHero .actions .VPButton {
+  border-radius: var(--pc-radius) !important;
+  font-weight: 500 !important;
+  padding: 0 1.25rem !important;
+  min-height: 44px !important;
+  box-shadow: var(--pc-shadow-sm);
+  border: 1px solid transparent !important;
+}
+
+.VPHero .actions .VPButton.medium.brand {
+  background: var(--pc-cod) !important;
+  color: var(--pc-white) !important;
+}
+
+.VPHero .actions .VPButton.medium.alt {
+  background: var(--pc-white) !important;
+  color: var(--pc-cod) !important;
+  border-color: var(--pc-westar) !important;
+}
+
+.VPHero .actions .VPButton:hover {
+  opacity: 0.92;
+}
+
+/* Home feature grid — soft cards */
+.VPFeatures .VPFeature {
+  background: var(--pc-white) !important;
+  border: 1px solid var(--pc-westar) !important;
+  border-radius: var(--pc-radius) !important;
+  box-shadow: var(--pc-shadow-sm);
+}
+
+.VPFeatures .VPFeature .title {
+  font-family: "Instrument Serif", Georgia, serif !important;
+  font-weight: 400 !important;
+  font-size: 1.35rem !important;
+  color: var(--pc-cod) !important;
+}
+
+.VPFeatures .VPFeature .details {
+  color: var(--pc-dorado) !important;
+  line-height: 1.55 !important;
+}
+
+/* Footer */
+.VPFooter {
+  border-top: 1px solid var(--pc-westar);
+  color: var(--pc-bitter);
+  font-size: 0.875rem;
+}
+
+/* Outline / aside */
+.VPDocAsideOutline .outline-link {
+  color: var(--pc-dorado);
+}
+
+.VPDocAsideOutline .outline-link:hover,
+.VPDocAsideOutline .outline-link.active {
+  color: var(--pc-cod);
+}
+
+/* Tables in docs */
+.vp-doc table {
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: var(--pc-radius-sm);
+  border: 1px solid var(--pc-westar);
+}
+
+.vp-doc tr:nth-child(2n) {
+  background: #f7f6f4;
+}
+
+.vp-doc th,
+.vp-doc td {
+  border-color: var(--pc-westar) !important;
+}

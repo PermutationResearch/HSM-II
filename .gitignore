@@ -180,10 +180,6 @@ web/**/.next/
 # Toolchain / Playwright MCP scrap under workspace
 .rustup/
 .playwright-mcp/
-# rust-doctor CLI output
-.rust-doctor-cache.json
-rust-doctor-report.json
-**/.rust-doctor-cache.json
 # Cursor/IDE skill tree mirrors (canonical skills live under .claude/skills or ./skills)
 .agents/
 # Local experiment / metrics trees
@@ -203,3 +199,5 @@ docs/e2e-snapshots/
 /web_interface/*.mov
 /web_interface/*.mp4
 /web_interface/*.png
+# VitePress bundle for localhost marketing site (see docs-site npm run build:web)
+/web_interface/docs/

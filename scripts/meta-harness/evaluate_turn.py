@@ -18,6 +18,8 @@ from typing import Optional, List
 
 import httpx
 
+from belief_state import HarnessBeliefV1
+
 NEXT_BASE = "http://localhost:3050"
 HSM_BASE  = "http://localhost:3847"
 
@@ -98,6 +100,7 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
         error            bool   — any error line present
         phase_sequence   list   — ordered list of phase names seen
         score            float  — composite 0-1 (higher = better)
+        belief_state     dict  — Beta posterior + VoI proxy (harness log; see docs)
     """
     finalized = False
     final_answer_len = 0
@@ -106,12 +109,14 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
     error = False
     phase_sequence: list[str] = []
     streamed_text = ""
+    belief = HarnessBeliefV1()
 
     for line in lines:
         t = line.get("type", "")
 
         if t == "error":
             error = True
+            belief.on_error_event()
 
         elif t == "phase":
             ph = line.get("phase", "")
@@ -123,6 +128,7 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
             ev_type = payload.get("event_type", "")
             if ev_type in ("tool_start", "tool_end"):
                 tool_calls += 1
+                belief.on_tool_event(tool_calls)
             if payload.get("tool_name") == "finalize_response":
                 finalized = True
             if ev_type == "loop_iteration":
@@ -131,6 +137,7 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
         elif t == "sub_agent_spawned":
             # Counts as a tool-level action
             tool_calls += 1
+            belief.on_tool_event(tool_calls)
 
         elif t == "stream_event":
             ev = line.get("event", {})
@@ -165,6 +172,14 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
                 finalized = True
                 streamed_text += msg_text
 
+    belief.apply_terminal_evidence(
+        finalized=finalized,
+        error=error,
+        tool_calls=tool_calls,
+        streamed_chars=len(streamed_text),
+        final_answer_len=final_answer_len,
+    )
+
     # Composite score
     s = 0.0
     if finalized:         s += 0.5
@@ -183,6 +198,7 @@ def score_turn(lines: list[dict], elapsed_s: float) -> dict:
         "phase_sequence":   phase_sequence,
         "streamed_chars":   len(streamed_text),
         "score":            round(s, 3),
+        "belief_state":     belief.to_jsonable(tool_calls),
     }
 
 # ── Main ──────────────────────────────────────────────────────────────────────

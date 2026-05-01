@@ -1,0 +1,73 @@
+{
+  "githubRepo": "PermutationResearch/HSM-II",
+  "defaultBranch": "main",
+  "entries": [
+    {
+      "repoPath": "docs/company-os/HSM_II_COMPANY_OS_OPERATOR_GUIDE.md",
+      "slug": "operator-handbook",
+      "publicFile": "HSM_II_COMPANY_OS_OPERATOR_GUIDE.md",
+      "handbook": true,
+      "title": "Company OS & operator chat"
+    },
+    {
+      "repoPath": "docs/company-os/COMPANY_OS_AGENT_CHAT_LAUNCH.md",
+      "slug": "company-os-agent-chat-launch",
+      "publicFile": "COMPANY_OS_AGENT_CHAT_LAUNCH.md",
+      "sidebarLabel": "Launch: workspace + chat"
+    },
+    {
+      "repoPath": "docs/HSMII_ACTION_LAYER.md",
+      "slug": "hsmii-action-layer",
+      "publicFile": "HSMII_ACTION_LAYER.md",
+      "sidebarLabel": "Action layer (tools, MCP)"
+    },
+    {
+      "repoPath": "docs/EVAL_AND_META_HARNESS.md",
+      "slug": "eval-and-meta-harness",
+      "publicFile": "EVAL_AND_META_HARNESS.md",
+      "sidebarLabel": "Eval & meta-harness"
+    },
+    {
+      "repoPath": "docs/META_HARNESS_BELIEF_STATE.md",
+      "slug": "meta-harness-belief-state",
+      "publicFile": "META_HARNESS_BELIEF_STATE.md",
+      "sidebarLabel": "Meta-harness belief state"
+    },
+    {
+      "repoPath": "docs/BENCHMARK_STACK.md",
+      "slug": "benchmark-stack",
+      "publicFile": "BENCHMARK_STACK.md",
+      "sidebarLabel": "Benchmark stack"
+    },
+    {
+      "repoPath": "docs/HSM_NATIVE_BENCH.md",
+      "slug": "hsm-native-bench",
+      "publicFile": "HSM_NATIVE_BENCH.md",
+      "sidebarLabel": "HSM-native / SMB bench"
+    },
+    {
+      "repoPath": "docs/company-os/world-model-and-intelligence.md",
+      "slug": "world-model-and-intelligence",
+      "publicFile": "world-model-and-intelligence.md",
+      "sidebarLabel": "World model & intelligence"
+    },
+    {
+      "repoPath": "docs/company-os/ops-overview-api.md",
+      "slug": "ops-overview-api",
+      "publicFile": "ops-overview-api.md",
+      "sidebarLabel": "Ops overview API"
+    },
+    {
+      "repoPath": "docs/company-os/connectors-sessions-and-triggers.md",
+      "slug": "connectors-sessions-and-triggers",
+      "publicFile": "connectors-sessions-and-triggers.md",
+      "sidebarLabel": "Connectors & triggers"
+    },
+    {
+      "repoPath": "docs/AGENT_SKILLS.md",
+      "slug": "agent-skills",
+      "publicFile": "AGENT_SKILLS.md",
+      "sidebarLabel": "Agent Skills"
+    }
+  ]
+}

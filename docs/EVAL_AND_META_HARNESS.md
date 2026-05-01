@@ -118,8 +118,40 @@ cargo run --bin hsm-eval -- \
 
 ---
 
+## Company OS agent-chat (Python `scripts/meta-harness`)
+
+This is a **separate** harness from the Rust `hsm_meta_harness` binary: it drives the live **Next.js** Company Console routes `POST /api/agent-chat-reply/stream` and `POST /api/agent-chat-reply`, talking to **`hsm_console`** for tasks and worker execution (`evaluate_turn.py` defaults: Next `http://127.0.0.1:3050`, HSM `http://127.0.0.1:3847`).
+
+**Prerequisites**
+
+- `cargo run -p hyper-stigmergy --bin hsm_console` (or your usual Company OS API) reachable on **3847** (or override in `evaluate_turn.py`).
+- `cd web/company-console && npm run dev` (or production build) on **3050** so the stream route exists.
+- LLM keys the console expects (e.g. **OpenRouter** / `OPENROUTER_API_KEY` per `web/company-console` docs).
+- **Harness data directory:** by default the script uses **`~/.hsm/meta-harness/`** when your home directory is writable. If not (e.g. Cursor sandbox, read-only CI), it automatically falls back to **`<repo>/.meta-harness/`** (gitignored). Override anytime with **`HSM_META_HARNESS_DATA_DIR`**.
+
+**Timeouts**
+
+- Server-side worker telemetry waits are controlled by **`HSM_OPERATOR_CHAT_TELEMETRY_WAIT_EXEC_MS`** / **`HSM_OPERATOR_CHAT_TELEMETRY_WAIT_ANALYSIS_MS`** (see **`.env.example`**). JSON and NDJSON paths share the same caps; build-heavy skills get a longer minimum wait.
+- Next route **`maxDuration`** and the browser fallback poll budget are defined in **`web/company-console/app/lib/operator-chat-timeouts.ts`** so hosted and UI behavior stay above those waits.
+
+**Commands**
+
+```bash
+cd /path/to/hyper-stigmergic-morphogenesisII
+# Quick smoke (one task); optional quality gates exit non-zero if metrics fall below thresholds
+./scripts/company-os-agent-chat-meta-harness-smoke.sh
+
+# Full local check (three default engineering tasks)
+python3 scripts/meta-harness/meta_harness.py --tasks 3
+```
+
+**Belief state (experimental)** — `evaluate_turn.py` also prints a **`belief_state`** object: a Beta-style summary over a single “task success” latent plus a **VoI proxy** for logging, aligned with Papamarkou et al. (*Bayes-consistent decisions*; [HAL hal-05480691](https://hal.science/hal-05480691)). Semantics and limits: **`docs/META_HARNESS_BELIEF_STATE.md`**.
+
+---
+
 ## Related references
 
+- **`META_HARNESS_BELIEF_STATE.md`** — Beta / VoI-proxy fields next to **`score`** in **`evaluate_turn.py`**.
 - **`GOLDEN_PATH.md`** — Ladybug path; includes quick **`hsm-eval`** suite commands.
 - **`documentation/guides/HARNESS_V1_PLAN.md`** — harness hardening plan.
 - **`templates/business/starters/online_commerce_squad/knowledge/dspy_gepa_hsm_bridge.md`** — DSPy/GEPA and meta-harness in the “improve over time” story.
